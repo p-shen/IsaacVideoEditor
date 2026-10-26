@@ -4,7 +4,7 @@ The **Release downloads** GitHub Actions workflow builds self-contained download
 
 | Download | Target |
 | --- | --- |
-| `IsaacVideoEditor-VERSION-macos-arm64.zip` | Apple silicon Mac |
+| `IsaacVideoEditor-VERSION-macos-arm64.zip` | Apple silicon Mac running macOS 15 or newer |
 | `IsaacVideoEditor-VERSION-linux-x86_64.AppImage` | Linux x64 with glibc 2.39 or newer, such as Ubuntu 24.04+ |
 | `IsaacVideoEditor-VERSION-windows-x86_64.zip` | Windows x64 |
 
@@ -24,7 +24,7 @@ This workflow attaches files after publication and requires release immutability
 
 ## Validate without publishing
 
-In **Actions → Release downloads → Run workflow**, choose the branch to check. A manual run builds and checks all three packages but does not create or change a release. Its downloadable CI artifacts expire after one day.
+In **Actions → Release downloads → Run workflow**, choose the branch and platform to check. The default, **all**, checks all three platforms; you can select one platform when investigating a failed build. A manual run does not create or change a release. Its downloadable CI artifacts expire after one day.
 
 Successful release runs remove their temporary CI artifacts after attaching the permanent Release downloads. Failed runs retain intermediate artifacts for at most one day. Standard GitHub-hosted runners are used; no larger runners, paid signing services, or personal access tokens are required. The publication job uses GitHub's built-in token with permission to upload release assets and delete its temporary artifacts.
 

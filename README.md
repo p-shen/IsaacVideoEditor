@@ -4,6 +4,10 @@ A local video editor for short vlogs. Trim and arrange clips, mix audio, add tit
 
 Built with C++17, Qt Quick/QML, MLT, and FFmpeg.
 
+## Downloads
+
+Published [GitHub Releases](https://github.com/p-shen/IsaacVideoEditor/releases) get downloads for Apple silicon Macs, Linux x64, and Windows x64 after their release builds pass. These packages include the runtime dependencies. See the [release guide](docs/releases.md) for platform requirements and how to publish or validate a release.
+
 ## Build and run
 
 Follow the setup guide for **[macOS](docs/building.md#macos)**, **[Linux](docs/building.md#linux)**, or **[Windows](docs/building.md#windows)**. It includes dependencies, build commands, troubleshooting, and tests.
