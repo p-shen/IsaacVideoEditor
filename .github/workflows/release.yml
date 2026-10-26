@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref }}
+  group: release-${{ github.event.release.tag_name || format('validation-{0}', github.run_id) }}
   cancel-in-progress: false
 
 env:
@@ -169,6 +169,7 @@ jobs:
             "$RUNNER_TEMP/package check/IsaacVideoEditor/IsaacVideoEditor.exe"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
+        if: success() || (failure() && hashFiles('dist/*.zip') != '')
         with:
           name: windows-download
           path: dist/*.zip

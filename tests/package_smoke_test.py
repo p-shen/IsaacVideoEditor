@@ -17,7 +17,19 @@ if os.environ.get("ISAAC_CLEAN_RUNTIME") == "1":
 for source, expected_success in [(fixture, True), (fixture.with_name("missing.mp4"), False)]:
     result = subprocess.run([str(executable), "--smoke-test", str(source.resolve())],
                             env=environment, text=True, capture_output=True, timeout=45)
-    assert (result.returncode == 0) == expected_success, result.stdout + result.stderr
+    if (result.returncode == 0) != expected_success:
+        print(f"Smoke process failed: {executable}; source={source}; "
+              f"exit={result.returncode} (0x{result.returncode & 0xffffffff:08x})", file=sys.stderr)
+        print(result.stdout + result.stderr, file=sys.stderr)
+        if os.name == "nt" and os.environ.get("ISAAC_CLEAN_RUNTIME") == "1":
+            diagnostic = subprocess.run([str(executable), "--smoke-test", str(source.resolve())],
+                                        env=dict(os.environ, QT_QPA_PLATFORM="offscreen",
+                                                 QT_QUICK_BACKEND="software", SDL_AUDIODRIVER="dummy"),
+                                        text=True, capture_output=True, timeout=45)
+            print(f"With development PATH: exit={diagnostic.returncode} "
+                  f"(0x{diagnostic.returncode & 0xffffffff:08x})\n"
+                  + diagnostic.stdout + diagnostic.stderr, file=sys.stderr)
+        raise SystemExit(1)
     if expected_success:
         assert "Package smoke test passed" in result.stderr, result.stderr
         assert "playback" in result.stderr, "Package check must exercise the SDL playback backend"
