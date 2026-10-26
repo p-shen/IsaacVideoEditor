@@ -1,7 +1,9 @@
 #include "mlt_engine.h"
 #include "text_renderer.h"
 #include "visual_renderer.h"
+#include "runtime_paths.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QDateTime>
 #include <QFile>
@@ -24,7 +26,20 @@ namespace Media {
 
 void initializeMlt() {
     static std::once_flag once;
-    std::call_once(once, [] { Mlt::Factory::init(); });
+    std::call_once(once, [] {
+        const auto runtime = bundledRuntimePaths(QCoreApplication::applicationDirPath());
+        if (!runtime.mltRepository.isEmpty()) {
+            qputenv("MLT_DATA", QFile::encodeName(runtime.mltData));
+            const auto path = QFile::encodeName(runtime.executables) +
+                QDir::listSeparator().toLatin1() + qgetenv("PATH");
+            qputenv("PATH", path);
+            // Relocatable MLT builds require the repository as an explicit argument.
+            const auto repository = QFile::encodeName(runtime.mltRepository);
+            Mlt::Factory::init(repository.constData());
+        } else {
+            Mlt::Factory::init();
+        }
+    });
 }
 
 namespace {

@@ -6,11 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Quick Qml QuickControls2 Test)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Quick Qml QuickControls2)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MLT REQUIRED IMPORTED_TARGET mlt++-7)
 
 add_library(isaac_core
+    src/runtime_paths.cpp
     src/project.cpp
     src/captions.cpp
     src/text_style.cpp
@@ -57,7 +58,15 @@ if(APPLE)
         VERBATIM)
 endif()
 
-enable_testing()
+include(CTest)
+if(BUILD_TESTING)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+
+add_executable(runtime_paths_test tests/runtime_paths_test.cpp src/runtime_paths.cpp)
+target_include_directories(runtime_paths_test PRIVATE src)
+target_link_libraries(runtime_paths_test PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME runtime_paths_test COMMAND runtime_paths_test)
+
 add_executable(project_test tests/project_test.cpp)
 target_link_libraries(project_test PRIVATE isaac_core Qt6::Test)
 add_test(NAME project_test COMMAND project_test)
@@ -135,3 +144,4 @@ add_executable(composition_controller_test tests/composition_controller_test.cpp
 target_link_libraries(composition_controller_test PRIVATE isaac_ui Qt6::Test)
 add_test(NAME composition_controller_test COMMAND composition_controller_test)
 set_tests_properties(composition_controller_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
+endif()

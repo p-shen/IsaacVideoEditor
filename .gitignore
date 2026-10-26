@@ -72,3 +72,6 @@ build-main/
 .DS_Store
 *.isaac.json
 .superpowers/
+/dist/
+__pycache__/
+*.pyc
