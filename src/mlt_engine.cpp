@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <numeric>
@@ -398,7 +399,7 @@ bool exportMp4(const Project &project, const QString &path,
             // VideoToolbox uses bitrate control instead of libx264's CRF setting.
             const qint64 bitrate = std::clamp(qint64(size->width) * size->height * Project::fps * 75 / 1000,
                                               qint64(2000000), qint64(150000000));
-            consumer.set("vb", bitrate);
+            consumer.set("vb", static_cast<std::int64_t>(bitrate));
             consumer.set("allow_sw", 0);
             consumer.set("color_range", "tv");
         } else {
