@@ -10,15 +10,14 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QProcess>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QtMath>
 #include <algorithm>
-#include <cerrno>
+#include <filesystem>
 #include <chrono>
-#include <cstdio>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 #include <numeric>
 #include <thread>
@@ -371,13 +370,18 @@ bool exportMp4(const Project &project, const QString &path,
     if (!size) return false;
     Mlt::Profile profile;
     configureOutputProfile(profile, size->width, size->height);
-    QTemporaryFile temporary(target.absoluteDir().filePath(".isaac-XXXXXX.mp4"));
-    if (!temporary.open()) {
-        if (error) *error = QString("Cannot write output folder: %1").arg(temporary.errorString());
-        return false;
+    QString temporaryPath;
+    {
+        QTemporaryFile temporary(target.absoluteDir().filePath(".isaac-XXXXXX.mp4"));
+        if (!temporary.open()) {
+            if (error) *error = QString("Cannot write output folder: %1").arg(temporary.errorString());
+            return false;
+        }
+        temporaryPath = temporary.fileName();
+        // close() retains a native handle that prevents renaming on Windows.
+        temporary.setAutoRemove(false);
     }
-    const QString temporaryPath = temporary.fileName();
-    temporary.close();
+    const auto removeTemporary = qScopeGuard([&] { QFile::remove(temporaryPath); });
     const QByteArray encodedPath = QFile::encodeName(temporaryPath);
     if (progress) progress(0);
     const int total = project.durationFrames();
@@ -473,10 +477,12 @@ bool exportMp4(const Project &project, const QString &path,
         if (!render(false)) return false;
     }
     if(wasCanceled())return false;
-    const QByteArray encodedDestination = QFile::encodeName(destination);
-    if (std::rename(encodedPath.constData(), encodedDestination.constData()) != 0) {
+    std::error_code saveError;
+    std::filesystem::rename(std::filesystem::path(temporaryPath.toStdU16String()),
+                            std::filesystem::path(destination.toStdU16String()), saveError);
+    if (saveError) {
         if (error) *error = QString("Could not save MP4: %1")
-                                 .arg(QString::fromLocal8Bit(std::strerror(errno)));
+                                 .arg(QString::fromLocal8Bit(saveError.message().c_str()));
         return false;
     }
     if (progress) progress(100);

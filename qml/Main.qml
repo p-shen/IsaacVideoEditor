@@ -458,7 +458,6 @@ ApplicationWindow {
                         Accessible.role: Accessible.Pane
                         Accessible.name: "Editing timeline"
                         Accessible.description: (selectionMediaStatus ? selectionMediaStatus + ". " : "") + "Ruler seeks. Clip bodies select; edges trim. Arrow keys seek one frame. Option or Alt with arrow keys moves selected text one frame; add Shift to change its duration. The inspector provides numeric and text controls."
-                        activeFocusOnTab: true
                         ToolTip.visible: hoverMediaStatus.length > 0 || (activeFocus && selectionMediaStatus.length > 0)
                         ToolTip.text: hoverMediaStatus || selectionMediaStatus
                         ToolTip.delay: activeFocus ? 0 : 600

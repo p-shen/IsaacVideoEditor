@@ -26,6 +26,7 @@ private slots:
     void findsRecentAudioFiles();
     void prefersHardwareWhenAvailable();
     void failedExportPreservesDestination();
+    void successfulExportReplacesDestination();
 private:
     bool makeMedia(const QString &path, const QString &source, const QStringList &encoding);
     QString file(const QString &name) const { return directory_.filePath(name); }
@@ -241,6 +242,34 @@ void MediaInfoTest::prefersHardwareWhenAvailable() {
     QVERIFY(software.open(QIODevice::ReadOnly));
     QVERIFY2(software.readAll().contains("x264 - core"), "An incomplete hardware export was not retried with software.");
 #endif
+}
+
+void MediaInfoTest::successfulExportReplacesDestination() {
+    const QString output = file(QString::fromUtf8("replace ü 中文.mp4"));
+    const QByteArray original("keep existing video until export succeeds");
+    QFile destination(output);
+    QVERIFY(destination.open(QIODevice::WriteOnly));
+    QCOMPARE(destination.write(original), original.size());
+    destination.close();
+    Project project;
+    project.clips = {{file("hd.mp4"), 0, 0.1}};
+    bool sawProgress = false;
+    bool preservedDuringRender = true;
+    QString error;
+    QVERIFY2(Media::exportMp4(project, output, [&](int percent) {
+        if (percent == 100) return;
+        sawProgress = true;
+        QFile existing(output);
+        preservedDuringRender &= existing.open(QIODevice::ReadOnly) && existing.readAll() == original;
+    }, &error), qPrintable(error));
+    QVERIFY(sawProgress);
+    QVERIFY(preservedDuringRender);
+    QVERIFY(destination.open(QIODevice::ReadOnly));
+    QCOMPARE(destination.read(8).mid(4), QByteArray("ftyp"));
+    destination.close();
+    // Windows refuses this move if the exporter or validator retains a file handle.
+    QVERIFY(QFile::rename(output, file("renamed export.mp4")));
+    QVERIFY(QDir(directory_.path()).entryList({".isaac-*.mp4"}, QDir::Files | QDir::Hidden).isEmpty());
 }
 
 void MediaInfoTest::failedExportPreservesDestination() {

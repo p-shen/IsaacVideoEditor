@@ -96,6 +96,10 @@ int packageSmokeTest(const QString &fixture) {
         qCritical() << "Cannot export media:" << error;
         return 2;
     }
+    if (!Media::exportMp4(project, temporary.filePath("smoke.mp4"), {}, &error)) {
+        qCritical() << "Cannot replace an existing export:" << error;
+        return 2;
+    }
     qInfo() << "Package smoke test passed: QML, SVG, FFmpeg, media decode, playback and MP4 export";
     return 0;
 }
