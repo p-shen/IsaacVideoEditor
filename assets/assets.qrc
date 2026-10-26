@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="isaac-logo.png">isaac-logo.png</file>
+    <file alias="fonts/PlusJakartaSans.ttf">fonts/PlusJakartaSans.ttf</file>
+    <file alias="fonts/OFL.txt">fonts/OFL.txt</file>
+  </qresource>
+</RCC>

@@ -1,0 +1,16 @@
+singleton Theme 1.0 Theme.qml
+Button 1.0 Button.qml
+Pane 1.0 Pane.qml
+TextField 1.0 TextField.qml
+TabBar 1.0 TabBar.qml
+TabButton 1.0 TabButton.qml
+ComboBox 1.0 ComboBox.qml
+Inspector 1.0 Inspector.qml
+TextInspector 1.0 TextInspector.qml
+MediaBrowser 1.0 MediaBrowser.qml
+SourceControls 1.0 SourceControls.qml
+
+CompositionInspector 1.0 CompositionInspector.qml
+
+CaptionInspector 1.0 CaptionInspector.qml
+TextAttachment 1.0 TextAttachment.qml

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="IsaacVideoEditor">
+  <defs>
+    <linearGradient id="stone" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff9475"/>
+      <stop offset="0.48" stop-color="#ff6b4a"/>
+      <stop offset="1" stop-color="#e74b37"/>
+    </linearGradient>
+    <clipPath id="ball"><circle cx="512" cy="512" r="272"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="#171b24"/>
+  <ellipse cx="512" cy="512" rx="392" ry="236" transform="rotate(-31 512 512)"
+           fill="none" stroke="#ffd2c3" stroke-width="38"/>
+  <circle cx="512" cy="512" r="272" fill="url(#stone)"/>
+  <g clip-path="url(#ball)">
+    <path d="M208 438 430 226 488 395 313 538Z" fill="#ffb08f" opacity=".52"/>
+    <path d="M309 743 420 583 555 797 401 853Z" fill="#cf4738" opacity=".58"/>
+    <path d="M642 252 797 408 638 453 552 312Z" fill="#ffd0ab" opacity=".3"/>
+  </g>
+  <path d="M446 367c0-15 17-25 30-17l211 145c12 8 12 26 0 34L476 674c-13 8-30-2-30-17Z"
+        fill="#171b24"/>
+</svg>

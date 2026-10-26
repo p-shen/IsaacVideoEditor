@@ -1,0 +1,47 @@
+<RCC>
+  <qresource prefix="/qml">
+    <file>qmldir</file>
+    <file>Main.qml</file>
+    <file>MediaBrowser.qml</file>
+    <file>SourceControls.qml</file>
+    <file>Inspector.qml</file>
+    <file>AudioMixer.qml</file>
+    <file>CutInspector.qml</file>
+    <file>CompositionInspector.qml</file>
+    <file>TextInspector.qml</file>
+    <file>CaptionInspector.qml</file>
+    <file>TextAttachment.qml</file>
+    <file>Theme.qml</file>
+    <file>Button.qml</file>
+    <file>Pane.qml</file>
+    <file>TextField.qml</file>
+    <file>TabBar.qml</file>
+    <file>TabButton.qml</file>
+    <file>ComboBox.qml</file>
+    <file>WorkStatus.qml</file>
+    <file>icons/play.svg</file>
+    <file>icons/pause.svg</file>
+    <file>icons/undo.svg</file>
+    <file>icons/redo.svg</file>
+    <file>icons/arrow-up.svg</file>
+    <file>icons/arrow-down.svg</file>
+    <file>icons/trash.svg</file>
+    <file>icons/rotate-left.svg</file>
+    <file>icons/rotate-right.svg</file>
+    <file>icons/step-back.svg</file>
+    <file>icons/step-forward.svg</file>
+    <file>icons/bold.svg</file>
+    <file>icons/close.svg</file>
+    <file>icons/import.svg</file>
+    <file>icons/export.svg</file>
+    <file>icons/split.svg</file>
+    <file>icons/add-text.svg</file>
+    <file>icons/magnet.svg</file>
+    <file>icons/folder.svg</file>
+    <file>icons/recent.svg</file>
+    <file>icons/external-link.svg</file>
+    <file>icons/minus.svg</file>
+    <file>icons/plus.svg</file>
+    <file>icons/fit.svg</file>
+  </qresource>
+</RCC>
