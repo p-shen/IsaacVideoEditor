@@ -8,14 +8,20 @@ ColumnLayout {
     required property var controller
     property bool caption: false
     readonly property var info: caption ? controller.currentCaption : controller.currentText
+    readonly property string summary: info.attached ? "Follows clip" : "Project time"
     spacing: 6
-    Label { text: panel.info.attached ? "Attached to clip · source frame " + panel.info.hostSourceFrame : "Project time"; font.weight: Font.DemiBold; wrapMode: Text.Wrap; Layout.fillWidth: true }
-    Label { visible: !!panel.info.clamped; text: "Video ends before this text finishes. Its requested duration is retained."; color: UI.Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
+    Label { text: panel.summary; font.weight: Font.DemiBold; wrapMode: Text.Wrap; Layout.fillWidth: true }
+    Label { text: panel.info.attached ? "Moves and trims with its clip." : "Stays at its project time when clips change."; color: UI.Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
+    Label { text: "Clip" }
     UI.ComboBox {
         id: host
         Layout.fillWidth: true
         model: panel.controller.clips; textRole: "attachmentLabel"
-        Accessible.name: "Text attachment host clip"
+        Accessible.name: panel.caption ? "Caption attachment host clip" : "Text attachment host clip"
+        Accessible.description: panel.info.attached ? "Attached at source frame " + panel.info.hostSourceFrame : "Choose a clip for the text to follow."
+        hoverEnabled: true
+        ToolTip.visible: !!panel.info.attached && (hovered || activeFocus)
+        ToolTip.text: "Clip source position: frame " + panel.info.hostSourceFrame
         currentIndex: {
             var clips = panel.controller.clips
             for (var i = 0; i < clips.length; ++i) {
@@ -27,7 +33,7 @@ ColumnLayout {
     }
     Flow {
         Layout.fillWidth: true; spacing: 6
-        UI.Button { text: "Attach to clip"; enabled: host.currentIndex >= 0; onClicked: panel.controller.attachTimedText(panel.caption,host.currentIndex) }
-        UI.Button { text: "Detach"; enabled: !!panel.info.attached; onClicked: panel.controller.detachTimedText(panel.caption) }
+        UI.Button { text: "Attach to clip"; iconName: "link"; enabled: host.currentIndex >= 0; onClicked: panel.controller.attachTimedText(panel.caption,host.currentIndex) }
+        UI.Button { text: "Detach"; iconName: "unlink"; enabled: !!panel.info.attached; onClicked: panel.controller.detachTimedText(panel.caption) }
     }
 }

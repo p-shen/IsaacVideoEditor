@@ -8,13 +8,16 @@ ColumnLayout {
     required property var controller
     property bool editing: false
     property int editingIndex: -1
+    readonly property bool hasCaptions: controller.captions.length > 0
+    readonly property bool hasSelection: controller.selectedCaption >= 0
     spacing: 10
     readonly property bool timingReviewNeeded: {
         var cues = controller.captions
         for (var i = 0; i < cues.length; ++i) if (cues[i].timingNeedsReview) return true
         return false
     }
-    function focusFirst() { captionList.forceActiveFocus() }
+    function seconds(frames) { return (Number(frames || 0) / 60).toFixed(3) }
+    function focusFirst() { if (hasCaptions) captionList.forceActiveFocus(); else importCaptions.forceActiveFocus() }
     function beginEditing(index) {
         if (index < 0) return
         if (editing) finishEditing(false,false)
@@ -36,21 +39,39 @@ ColumnLayout {
         }
     }
     Flow {
-        Layout.fillWidth: true; Layout.margins: 12; spacing: 4
-        UI.Button { objectName: "importSrtButton"; text: "Import SRT captions (append)"; iconName: "import"; iconOnly: true; onClicked: panel.controller.importSrtDialog() }
-        UI.Button { objectName: "exportSrtButton"; text: "Export SRT captions"; iconName: "export"; iconOnly: true; enabled: panel.controller.captions.length > 0; onClicked: panel.controller.exportSrtDialog() }
-        UI.Button { objectName: "addCaptionButton"; text: "Add caption"; iconName: "plus"; onClicked: { panel.controller.addCaption(); panel.beginEditing(panel.controller.selectedCaption) } }
-        UI.Button { text: "Delete selected captions"; iconName: "trash"; iconOnly: true; enabled: panel.controller.selectedCaptions.length > 0; onClicked: panel.controller.deleteCaptions() }
+        Layout.fillWidth: true; Layout.margins: 12; spacing: 6
+        UI.Button {
+            id: importCaptions
+            objectName: "importSrtButton"
+            visible: !panel.hasCaptions
+            text: "Import captions"; iconName: "import"
+            helpText: "Import captions from an SRT file"
+            onClicked: panel.controller.importSrtDialog()
+        }
+        UI.Button { objectName: "addCaptionButton"; text: "Add caption"; iconName: "plus"; iconOnly: panel.hasCaptions; onClicked: { panel.controller.addCaption(); panel.beginEditing(panel.controller.selectedCaption) } }
+        UI.Button { text: "Delete selected captions"; iconName: "trash"; iconOnly: true; visible: panel.controller.selectedCaptions.length > 0; onClicked: panel.controller.deleteCaptions() }
     }
+    Label {
+        visible: !panel.hasCaptions
+        text: "Import an SRT file or add a caption."
+        wrapMode: Text.Wrap; color: UI.Theme.muted
+        Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
+    }
+    Repeater {
+        model: panel.controller.captionWarnings
+        Label { required property string modelData; text: modelData; wrapMode: Text.Wrap; Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; Accessible.role: Accessible.AlertMessage }
+    }
+    UI.Button { text: "Mark timing reviewed"; iconName: "check"; visible: panel.timingReviewNeeded; Layout.leftMargin: 12; onClicked: panel.controller.reviewCaptions() }
     ListView {
         id: captionList
         objectName: "captionList"
+        visible: panel.hasCaptions
         Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
-        Layout.preferredHeight: Math.min(260,Math.max(100,contentHeight))
+        Layout.preferredHeight: Math.min(160,Math.max(100,contentHeight))
         model: panel.controller.captions
         clip: true; spacing: 4; activeFocusOnTab: true
         currentIndex: panel.controller.selectedCaption
-        Accessible.name: "Captions and project intervals"
+        Accessible.name: "Captions and project intervals in seconds"
         ScrollBar.vertical: ScrollBar {}
         Keys.onReturnPressed: panel.beginEditing(panel.controller.selectedCaption)
         Keys.onEnterPressed: panel.beginEditing(panel.controller.selectedCaption)
@@ -64,10 +85,11 @@ ColumnLayout {
             width: captionList.width
             height: Math.max(72,contentItem.implicitHeight + topPadding + bottomPadding)
             highlighted: panel.controller.selectedCaptions.indexOf(index) >= 0
-            Accessible.name: "Caption " + (index + 1) + ", frames " + modelData.startFrame + " to " + (modelData.startFrame + modelData.durationFrames) + ", " + modelData.text
+            Accessible.name: "Caption " + (index + 1) + ", " + panel.seconds(modelData.startFrame) + " to " + panel.seconds(modelData.startFrame + modelData.durationFrames) + " seconds, " + modelData.text
             contentItem: ColumnLayout {
                 spacing: 3
-                Label { text: row.modelData.startFrame + " – " + (row.modelData.startFrame + row.modelData.durationFrames) + " frames · " + (row.modelData.attached ? "Attached" : "Project time") + (row.modelData.overlap ? " · overlap" : ""); color: UI.Theme.muted; elide: Text.ElideRight; Layout.fillWidth: true }
+                Label { text: panel.seconds(row.modelData.startFrame) + " – " + panel.seconds(row.modelData.startFrame + row.modelData.durationFrames) + " s"; color: UI.Theme.muted; elide: Text.ElideRight; Layout.fillWidth: true }
+                Label { text: (row.modelData.attached ? "Follows clip" : "Project time") + (row.modelData.overlap ? " · overlap" : ""); color: UI.Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true }
                 Label { text: row.modelData.text || "Empty caption"; maximumLineCount: 2; wrapMode: Text.Wrap; elide: Text.ElideRight; Layout.fillWidth: true }
             }
             background: Rectangle { radius: UI.Theme.radius; color: row.highlighted ? UI.Theme.selected : row.hovered ? UI.Theme.hover : UI.Theme.panel; border.width: row.activeFocus || row.highlighted ? 2 : 0; border.color: UI.Theme.accent }
@@ -81,30 +103,15 @@ ColumnLayout {
             Keys.onUpPressed: panel.controller.navigateCaption(-1)
             Keys.onDownPressed: panel.controller.navigateCaption(1)
         }
-        Label { visible: panel.controller.captions.length === 0; anchors.fill: parent; text: "Import an SRT file or add a caption."; wrapMode: Text.Wrap; color: UI.Theme.muted }
     }
     Flow {
+        visible: panel.hasCaptions
         Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; spacing: 4
-        UI.Button { text: "Previous caption"; iconName: "step-back"; iconOnly: true; enabled: panel.controller.captions.length > 0; onClicked: panel.controller.navigateCaption(-1) }
-        UI.Button { text: "Next caption"; iconName: "step-forward"; iconOnly: true; enabled: panel.controller.captions.length > 0; onClicked: panel.controller.navigateCaption(1) }
-        UI.Button { objectName: "previewCaptionButton"; text: "Preview caption start"; iconName: "play"; enabled: panel.controller.selectedCaption >= 0; onClicked: panel.controller.previewCaption() }
-        UI.Button { text: "Edit caption"; enabled: panel.controller.selectedCaption >= 0; onClicked: panel.beginEditing(panel.controller.selectedCaption) }
+        UI.Button { text: "Previous caption"; iconName: "step-back"; iconOnly: true; onClicked: panel.controller.navigateCaption(-1) }
+        UI.Button { text: "Next caption"; iconName: "step-forward"; iconOnly: true; onClicked: panel.controller.navigateCaption(1) }
+        UI.Button { objectName: "previewCaptionButton"; text: "Preview caption start"; iconName: "play"; iconOnly: true; visible: panel.hasSelection; onClicked: panel.controller.previewCaption() }
+        UI.Button { text: "Edit caption"; iconName: "edit"; iconOnly: true; visible: panel.hasSelection; onClicked: panel.beginEditing(panel.controller.selectedCaption) }
     }
-    CheckBox {
-        objectName: "burnCaptionsCheck"
-        Layout.leftMargin: 12; Layout.rightMargin: 12
-        text: "Burn captions into video"
-        hoverEnabled: true
-        ToolTip.visible: hovered || activeFocus
-        ToolTip.text: "Captions appear in preview and MP4. Titles are unchanged; SRT output stays separate."
-        checked: panel.controller.burnCaptions
-        onToggled: panel.controller.setBurnCaptions(checked)
-    }
-    Repeater {
-        model: panel.controller.captionWarnings
-        Label { required property string modelData; text: modelData; wrapMode: Text.Wrap; Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; Accessible.role: Accessible.AlertMessage }
-    }
-    UI.Button { text: "Mark timing reviewed"; visible: panel.timingReviewNeeded; Layout.leftMargin: 12; onClicked: panel.controller.reviewCaptions() }
     TextArea {
         id: content
         objectName: "captionContentField"
@@ -125,23 +132,77 @@ ColumnLayout {
         }
     }
     ColumnLayout {
-        visible: panel.controller.selectedCaption >= 0
+        visible: panel.hasSelection
         Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; spacing: 8
-        Label { text: panel.controller.selectedCaptions.length + " selected · style changes affect this selection"; wrapMode: Text.Wrap; Layout.fillWidth: true }
-        Label { text: "Duration (frames)" }
-        UI.TextField {
-            objectName: "captionDurationField"
-            property int editingIndex: -1
+        RowLayout {
             Layout.fillWidth: true
-            text: String(panel.controller.currentCaption.durationFrames || 1)
-            validator: IntValidator { bottom: 1; top: 5184000 }
-            Accessible.name: "Caption duration in frames"
-            onActiveFocusChanged: if (activeFocus) editingIndex = panel.controller.selectedCaption
-            onEditingFinished: if (acceptableInput && editingIndex === panel.controller.selectedCaption) panel.controller.setCaptionTiming(editingIndex,panel.controller.currentCaption.startFrame,Number(text))
-            Keys.onEscapePressed: event => { editingIndex = -1; text = Qt.binding(function() { return String(panel.controller.currentCaption.durationFrames || 1) }); focus = false; event.accepted = true }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Label { text: "Start" }
+                UI.TextField {
+                    objectName: "captionStartField"
+                    property int editingIndex: -1
+                    Layout.fillWidth: true; Layout.minimumWidth: 0
+                    text: panel.seconds(panel.controller.currentCaption.startFrame)
+                    suffix: "s"; stepper: true
+                    validator: DoubleValidator { bottom: 0; top: 86400; decimals: 3; locale: "C" }
+                    Accessible.name: "Caption start in seconds. Arrow keys adjust one frame."
+                    onActiveFocusChanged: if (activeFocus) editingIndex = panel.controller.selectedCaption
+                    onEditingFinished: if (acceptableInput && editingIndex === panel.controller.selectedCaption) panel.controller.setCaptionTiming(editingIndex,Math.round(Number(text)*60),panel.controller.currentCaption.durationFrames)
+                    onStepRequested: direction => {
+                        if (acceptableInput && editingIndex === panel.controller.selectedCaption) {
+                            panel.controller.setCaptionTiming(editingIndex,Math.max(0,Math.min(5183999,Math.round(Number(text)*60) + direction)),panel.controller.currentCaption.durationFrames)
+                            text = Qt.binding(function() { return panel.seconds(panel.controller.currentCaption.startFrame) })
+                        }
+                    }
+                    Keys.onEscapePressed: event => { editingIndex = -1; text = Qt.binding(function() { return panel.seconds(panel.controller.currentCaption.startFrame) }); focus = false; event.accepted = true }
+                }
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Label { text: "Length" }
+                UI.TextField {
+                    objectName: "captionDurationField"
+                    property int editingIndex: -1
+                    Layout.fillWidth: true; Layout.minimumWidth: 0
+                    text: panel.seconds(panel.controller.currentCaption.durationFrames || 1)
+                    suffix: "s"; stepper: true
+                    validator: DoubleValidator { bottom: 1/60; top: 86400; decimals: 3; locale: "C" }
+                    Accessible.name: "Caption duration in seconds. Arrow keys adjust one frame."
+                    onActiveFocusChanged: if (activeFocus) editingIndex = panel.controller.selectedCaption
+                    onEditingFinished: if (acceptableInput && editingIndex === panel.controller.selectedCaption) panel.controller.setCaptionTiming(editingIndex,panel.controller.currentCaption.startFrame,Math.round(Number(text)*60))
+                    onStepRequested: direction => {
+                        if (acceptableInput && editingIndex === panel.controller.selectedCaption) {
+                            panel.controller.setCaptionTiming(editingIndex,panel.controller.currentCaption.startFrame,Math.max(1,Math.min(5184000,Math.round(Number(text)*60) + direction)))
+                            text = Qt.binding(function() { return panel.seconds(panel.controller.currentCaption.durationFrames || 1) })
+                        }
+                    }
+                    Keys.onEscapePressed: event => { editingIndex = -1; text = Qt.binding(function() { return panel.seconds(panel.controller.currentCaption.durationFrames || 1) }); focus = false; event.accepted = true }
+                }
+            }
         }
-        UI.TextAttachment { controller: panel.controller; caption: true; Layout.fillWidth: true }
-        CheckBox { text: "Show safe-margin guides"; checked: panel.controller.textGuides; onToggled: panel.controller.textGuides = checked }
+        UI.InspectorDetails {
+            objectName: "captionAppearanceDetails"
+            title: "Appearance"
+            summary: panel.controller.selectedCaptions.length + " selected · " + (panel.controller.currentCaption.fontFamily || "Arial") + " " + (panel.controller.currentCaption.fontSize || 57)
+            Layout.fillWidth: true
+            Label { text: "Style changes affect the selected captions."; wrapMode: Text.Wrap; Layout.fillWidth: true; color: UI.Theme.muted }
+            UI.TextInspector { controller: appearance; appearanceOnly: true; Layout.fillWidth: true }
+        }
+        UI.InspectorDetails {
+            objectName: "captionAttachmentDetails"
+            title: "Attachment"
+            summary: panel.controller.currentCaption.attached ? "Follows clip" : "Project time"
+            Layout.fillWidth: true
+            UI.TextAttachment { controller: panel.controller; caption: true; Layout.fillWidth: true }
+        }
+        UI.InspectorDetails {
+            objectName: "captionGuidesDetails"
+            title: "Guides"
+            summary: panel.controller.textGuides ? "Safe margins on" : "Off"
+            Layout.fillWidth: true
+            CheckBox { text: "Show safe-margin guides"; checked: panel.controller.textGuides; onToggled: panel.controller.textGuides = checked }
+        }
     }
     QtObject {
         id: appearance
@@ -158,15 +219,35 @@ ColumnLayout {
         function selectText(index) { panel.controller.selectCaption(index) }
         function deleteText() { panel.controller.deleteCaptions() }
     }
-    UI.TextInspector { controller: appearance; appearanceOnly: true; Layout.fillWidth: true }
-    UI.Button {
-        objectName: "applyCaptionStyleToAll"
-        text: "Apply style to all captions"
-        visible: panel.controller.selectedCaption >= 0
-        Layout.leftMargin: 12; Layout.rightMargin: 12
-        onClicked: {
-            var c = panel.controller.currentCaption
-            panel.controller.styleCaptions({style:c.style,fontFamily:c.fontFamily,fontSize:c.fontSize,color:c.color,bold:c.bold,shadow:c.shadow,fade:c.fade,x:c.x,y:c.y},true)
+    UI.InspectorDetails {
+        objectName: "captionFileDetails"
+        visible: panel.hasCaptions
+        title: "Files and all captions"
+        summary: panel.controller.burnCaptions ? "Captions in video · SRT" : "SRT only"
+        Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
+        Flow {
+            Layout.fillWidth: true; spacing: 6
+            UI.Button { text: "Import captions (append)"; iconName: "import"; onClicked: panel.controller.importSrtDialog() }
+            UI.Button { objectName: "exportSrtButton"; text: "Export SRT"; iconName: "export"; onClicked: panel.controller.exportSrtDialog() }
+        }
+        CheckBox {
+            objectName: "burnCaptionsCheck"
+            text: "Burn captions into video"
+            hoverEnabled: true
+            ToolTip.visible: hovered || activeFocus
+            ToolTip.text: "Captions appear in preview and MP4. Titles are unchanged; SRT output stays separate."
+            checked: panel.controller.burnCaptions
+            onToggled: panel.controller.setBurnCaptions(checked)
+        }
+        UI.Button {
+            objectName: "applyCaptionStyleToAll"
+            text: "Apply style to all captions"
+            visible: panel.hasSelection
+            Layout.fillWidth: true
+            onClicked: {
+                var c = panel.controller.currentCaption
+                panel.controller.styleCaptions({style:c.style,fontFamily:c.fontFamily,fontSize:c.fontSize,color:c.color,bold:c.bold,shadow:c.shadow,fade:c.fade,x:c.x,y:c.y},true)
+            }
         }
     }
     Item { Layout.preferredHeight: 12 }

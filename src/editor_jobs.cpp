@@ -1,4 +1,5 @@
 #include "editor_controller.h"
+#include "export_job.h"
 #include "recovery_store.h"
 #include "media_cache.h"
 #include "mlt_engine.h"
@@ -14,7 +15,6 @@
 #include <QImageReader>
 #include <QMessageBox>
 #include <QStandardPaths>
-#include <QThread>
 #include <QUrl>
 #include <algorithm>
 
@@ -124,7 +124,7 @@ void EditorController::searchRelinkFolder(const QString &folder){
 bool EditorController::requestClose(){
     if(exporting()){
         if(QMessageBox::question(nullptr,"Export is running","Cancel this export and close the editor? Existing output files will be preserved.",QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return false;
-        cancelExport();if(exportThread_)exportThread_->wait();
+        cancelExport();if(exportJob_)exportJob_->stopAndWait();
     }
     if(!maybeSave())return false;if(recovery_)recovery_->clear();return true;
 }
@@ -140,29 +140,39 @@ bool EditorController::startExport(const Project &snapshot,const QString &path,c
     const auto output=normalized(path);QStringList sources={snapshot.voicePath,snapshot.musicPath};for(const auto &c:snapshot.clips)sources.append(c.path);for(const auto &asset:snapshot.assets)sources.append(asset.path);
     for(const auto &overlay:snapshot.visualOverlays)sources.append(overlay.path);
     for(const auto &source:sources)if(!source.isEmpty()&&output.compare(normalized(source),Qt::CaseInsensitive)==0){report("Choose a different file from your source media.");return false;}
-    exportDestination_=QFileInfo(path).absoluteFilePath();exportRevision_=revision;retryExportProject_=snapshot;
+    exportDestination_=QFileInfo(path).absoluteFilePath();exportRevision_=revision;retryExportProject_=snapshot;exportLog_.clear();
     QString error=snapshot.validate();const auto size=error.isEmpty()?Media::projectOutputSize(snapshot,&error):std::nullopt;
     if(!size){exportState_="Failed";report(error);return false;}
     exportDetails_=QString("%1×%2 · 60 fps · H.264 / AAC · original media").arg(size->width).arg(size->height);
     scrubbing_=skim_=resumeAfterScrub_=resumeWhenSettled_=false;preview_->pause();proxyCache_->setPaused(true);
-    exportCanceled_=std::make_shared<std::atomic_bool>(false);auto canceled=exportCanceled_;auto result=std::make_shared<std::pair<bool,QString>>();
-    exportProgress_=0;exportState_="Exporting";
-    exportThread_=QThread::create([this,snapshot,path,result,canceled]{
-        int last=-1;result->first=Media::exportMp4(snapshot,path,[this,&last](int percent){if(percent==last)return;last=percent;QMetaObject::invokeMethod(this,[this,percent]{exportProgress_=percent;emit stateChanged();},Qt::QueuedConnection);},&result->second,[canceled]{return canceled->load();});
+    sourcePreview_->pause();mediaCache_->setInteractive(true);
+    auto *job=new ExportJob(exportWorkerExecutable(),this);exportJob_=job;
+    const auto details=exportDetails_;
+    connect(job,&ExportJob::progressChanged,this,[this](int percent){exportProgress_=percent;emit stateChanged();});
+    connect(job,&ExportJob::diagnostic,this,[this,details](const QString &message){
+        if(message.startsWith("Encoder: ")){
+            exportDetails_=details+(message.contains("h264_videotoolbox")?" · Apple hardware encoding":" · software encoding");emit stateChanged();
+        }else if(message.startsWith("Retrying with software")){
+            exportDetails_=details+" · retrying with software";emit stateChanged();
+        }
     });
-    auto *thread=exportThread_.data();
-    connect(thread,&QThread::finished,this,[this,path,result,canceled]{
-        exportThread_=nullptr;proxyCache_->setPaused(false);
+    connect(job,&ExportJob::finished,this,[this,job,path](bool success,bool canceled,const QString &error){
+        exportJob_=nullptr;job->deleteLater();proxyCache_->setPaused(false);
         if(proxyPending_){proxyPending_=false;rebuild();}
         mediaCache_->setInteractive(playing()||scrubbing_||skim_);
-        // Completion wins a cancellation that arrived after atomic publication.
-        exportState_=result->first?"Completed":canceled->load()?"Canceled":"Failed";
-        if(result->first)exportProgress_=100;
-        report(result->first?"Exported "+QFileInfo(path).fileName():exportState_=="Canceled"?"Export canceled. Existing output was preserved.":"Export failed: "+result->second);emit stateChanged();
+        exportState_=success?"Completed":canceled?"Canceled":"Failed";
+        if(success)exportProgress_=100;
+        report(success?"Exported "+QFileInfo(path).fileName():canceled?"Export canceled. Existing output was preserved.":"Export failed: "+error);emit stateChanged();
     });
-    connect(thread,&QThread::finished,thread,&QObject::deleteLater);thread->start();emit stateChanged();return true;
+    exportProgress_=0;exportState_="Exporting";
+    if(!job->start(snapshot,path,&error)){
+        exportJob_=nullptr;delete job;proxyCache_->setPaused(false);mediaCache_->setInteractive(playing()||scrubbing_||skim_);
+        exportState_="Failed";report(error);emit stateChanged();return false;
+    }
+    exportLog_=job->logPath();emit stateChanged();return true;
 }
-void EditorController::cancelExport(){if(exportCanceled_&&exporting()){exportCanceled_->store(true);exportState_="Canceling";emit stateChanged();}}
+void EditorController::cancelExport(){if(exportJob_){exportState_="Canceling";exportJob_->cancel();emit stateChanged();}}
+void EditorController::openExportLog(){if(!exportLog_.isEmpty())QDesktopServices::openUrl(QUrl::fromLocalFile(exportLog_));}
 bool EditorController::retryExport(){return retryExportProject_&&startExport(*retryExportProject_,exportDestination_,exportRevision_);}
 void EditorController::revealExport(){if(exportState_=="Completed")QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(exportDestination_).absolutePath()));}
 void EditorController::openExport(){if(exportState_=="Completed")QDesktopServices::openUrl(QUrl::fromLocalFile(exportDestination_));}

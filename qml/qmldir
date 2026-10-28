@@ -5,6 +5,8 @@ TextField 1.0 TextField.qml
 TabBar 1.0 TabBar.qml
 TabButton 1.0 TabButton.qml
 ComboBox 1.0 ComboBox.qml
+InspectorDetails 1.0 InspectorDetails.qml
+InspectorPage 1.0 InspectorPage.qml
 Inspector 1.0 Inspector.qml
 TextInspector 1.0 TextInspector.qml
 MediaBrowser 1.0 MediaBrowser.qml

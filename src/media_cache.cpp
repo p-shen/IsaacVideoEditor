@@ -57,7 +57,7 @@ QString MediaCache::fingerprint(const QString &path) {
     const QFileInfo info(path);
     const QByteArray identity = sourceKey(path).toUtf8() + '\0' + QByteArray::number(info.size()) + '\0'
         + QByteArray::number(info.lastModified().toMSecsSinceEpoch()) + '\0'
-        + QByteArrayLiteral("thumbnail-60fps-160x90-autorotate-v1;pcm-mono-2000hz-100samples-fixed-v1");
+        + QByteArrayLiteral("thumbnail-60fps-160x90-autorotate-nearest-v2;pcm-mono-2000hz-100samples-fixed-v1");
     return QString::fromLatin1(QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex());
 }
 
@@ -73,12 +73,31 @@ MediaCache::Source &MediaCache::source(const QString &path) {
     return found.value();
 }
 
-QImage MediaCache::thumbnail(const QString &path, double sourceSeconds, int rotationDegrees, bool priority) {
+QImage MediaCache::thumbnail(const QString &path, double sourceSeconds, int rotationDegrees, bool priority, int toleranceFrames) {
     if (path.isEmpty() || !std::isfinite(sourceSeconds) || sourceSeconds < 0 ||
         sourceSeconds > double(std::numeric_limits<qint64>::max() / 60 - 1)) return {};
     const auto &entry = source(path);
-    const qint64 frame = qRound64(sourceSeconds * 60);
+    qint64 frame = qRound64(sourceSeconds * 60);
     const int rotation = (rotationDegrees % 360 + 360) % 360;
+    if (toleranceFrames > 0) {
+        const qint64 requested = frame;
+        qint64 nearest = qint64(toleranceFrames) + 1;
+        const auto consider = [&](qint64 candidate) {
+            const qint64 distance = std::abs(candidate - requested);
+            if (distance < nearest) { nearest = distance; frame = candidate; }
+        };
+        const QString prefix = entry.identity + ':', suffix = ':' + QString::number(rotation);
+        for (const auto &key : images_.keys()) {
+            if (!key.startsWith(prefix) || !key.endsWith(suffix)) continue;
+            consider(key.mid(prefix.size(), key.size() - prefix.size() - suffix.size()).toLongLong());
+        }
+        if (nearest > toleranceFrames) {
+            if (!current_.cancelled && current_.kind == Thumbnail && current_.identity == entry.identity && current_.rotation == rotation)
+                consider(current_.frame);
+            for (const auto &job : queue_)
+                if (job.kind == Thumbnail && job.identity == entry.identity && job.rotation == rotation) consider(job.frame);
+        }
+    }
     const QString key = entry.identity + ':' + QString::number(frame) + ':' + QString::number(rotation);
     if (viewport_) viewportRequests_.insert(key);
     if (const auto image = images_.object(key)) return *image;
@@ -243,9 +262,9 @@ void MediaCache::startNext() {
             const QString angle = QString::number(current_.rotation) + "*PI/180";
             filter = "rotate=" + angle + ":ow=rotw(" + angle + "):oh=roth(" + angle + "),";
         }
-        // Preserve the frame covering this 60 fps position when native video runs slower.
+        // Match MLT's nearest native frame, including half-frame ties on 30 fps footage.
         // FFmpeg applies camera orientation before this explicit user rotation.
-        filter = "fps=60:round=near," + filter;
+        filter = "tpad=stop=1:stop_mode=clone,setpts=ceil(PTS-0.5/(FRAME_RATE*TB)),fps=60:round=up," + filter;
         filter += "scale=w='max(1,trunc(min(160,min(iw*sar,90*dar))))':h='max(1,trunc(ow/dar))',setsar=1";
         arguments << "-vf" << filter << "-frames:v" << "1" << "-an" << "-c:v" << "png" << "-f" << "image2pipe" << "pipe:1";
     } else {

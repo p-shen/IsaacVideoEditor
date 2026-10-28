@@ -53,6 +53,33 @@ struct CachedMediaInfo {
 std::mutex mediaInfoMutex;
 QHash<QString, CachedMediaInfo> mediaInfoCache;
 
+struct PreparedSource {
+    Clip clip;
+    QString canonicalPath;
+    qint64 bytes = 0, modified = 0;
+    bool offline = false;
+    std::shared_ptr<Mlt::Producer> producer;
+};
+struct PlaybackSources {
+    mlt_profile owner;
+    mlt_profile_s profile;
+    QHash<QString, PreparedSource> clips;
+};
+constexpr auto playbackSourcesKey = "isaac.playback.sources";
+
+bool sameProfile(const mlt_profile_s &a, const mlt_profile_s &b) {
+    return a.width == b.width && a.height == b.height && a.frame_rate_num == b.frame_rate_num &&
+        a.frame_rate_den == b.frame_rate_den && a.progressive == b.progressive &&
+        a.sample_aspect_num == b.sample_aspect_num && a.sample_aspect_den == b.sample_aspect_den &&
+        a.display_aspect_num == b.display_aspect_num && a.display_aspect_den == b.display_aspect_den &&
+        a.colorspace == b.colorspace;
+}
+
+bool sameSourceSettings(const Clip &a, const Clip &b) {
+    return a.path == b.path && a.inSeconds == b.inSeconds && a.outSeconds == b.outSeconds &&
+        a.rotationDegrees == b.rotationDegrees && a.audio == b.audio && a.sourceFrameOffset == b.sourceFrameOffset;
+}
+
 std::unique_ptr<Mlt::Producer> openMedia(Mlt::Profile &profile,
                                          const QString &path,
                                          QString *error) {
@@ -237,7 +264,7 @@ std::optional<VideoSize> projectOutputSize(const Project &project, QString *erro
 
 std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
                                             Mlt::Profile &profile,
-                                            QString *error, bool allowOffline) {
+                                            QString *error, bool allowOffline, Mlt::Tractor *previousTimeline) {
     if (error) error->clear();
     initializeMlt();
     const QString problem = project.validate();
@@ -256,16 +283,32 @@ std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
         if (error) *error = "Could not create the video timeline.";
         return {};
     }
+    auto *previous = previousTimeline
+        ? static_cast<PlaybackSources *>(previousTimeline->get_data(playbackSourcesKey)) : nullptr;
+    if (previous && (previous->owner != profile.get_profile() || !sameProfile(previous->profile, *profile.get_profile()))) previous = nullptr;
+    auto *prepared = new PlaybackSources{profile.get_profile(), *profile.get_profile(), {}};
+    mlt_properties_set_data(timeline->get_properties(), playbackSourcesKey, prepared, 0,
+        [](void *p) { delete static_cast<PlaybackSources *>(p); }, nullptr);
     for (const Clip &clip : project.clips) {
-        const bool offline=allowOffline&&!QFileInfo(clip.path).isFile();
-        auto source = offline?std::make_unique<Mlt::Producer>(profile,"color","#26272d"):openMedia(profile, clip.path, error);
+        const QFileInfo file(clip.path);
+        const bool offline=allowOffline&&!file.isFile();
+        std::shared_ptr<Mlt::Producer> source;
+        if (previous) {
+            const auto found = previous->clips.constFind(clip.id);
+            if (found != previous->clips.cend() && sameSourceSettings(found->clip, clip) &&
+                found->offline == offline && (offline || file.isFile()) &&
+                found->canonicalPath == file.canonicalFilePath() &&
+                found->bytes == file.size() && found->modified == file.lastModified().toMSecsSinceEpoch()) source = found->producer;
+        }
+        const bool reused = bool(source);
+        if (!source) source = offline ? std::make_shared<Mlt::Producer>(profile,"color","#26272d") : openMedia(profile, clip.path, error);
         if (!source) return {};
         if(offline){source->set("length",qRound(clip.outSeconds*Project::fps)+1);source->set_in_and_out(0,qRound(clip.outSeconds*Project::fps));}
         if (!offline && source->get_int("video_index") < 0) {
             if (error) *error = QString("File has no video track: %1").arg(clip.path);
             return {};
         }
-        if (clip.rotationDegrees != 0) {
+        if (!reused && clip.rotationDegrees != 0) {
             const QByteArray metadata = QString("meta.media.%1.codec.rotate")
                 .arg(source->get_int("video_index")).toLatin1();
             // The decoder override replaces camera orientation, so add the user's turn.
@@ -282,11 +325,12 @@ std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
             if (error) *error = QString("Trim exceeds clip duration: %1").arg(clip.path);
             return {};
         }
-        if(!applyAudio(*source,profile,clip.audio,in,out-in+1,error))return {};
+        if(!reused && !applyAudio(*source,profile,clip.audio,in,out-in+1,error))return {};
         if (video.append(*source, in, out) != 0) {
             if (error) *error = QString("Could not add clip: %1").arg(clip.path);
             return {};
         }
+        prepared->clips.insert(clip.id, {clip, file.canonicalFilePath(), file.size(), file.lastModified().toMSecsSinceEpoch(), offline, source});
     }
 
     for (int boundary = project.clips.size() - 2; boundary >= 0; --boundary) {
@@ -340,7 +384,8 @@ std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
 }
 
 bool exportMp4(const Project &project, const QString &path,
-               std::function<void(int)> progress, QString *error, std::function<bool()> canceled) {
+               std::function<void(int)> progress, QString *error, std::function<bool()> canceled,
+               std::function<void(const QString &)> diagnostic, bool softwareOnly) {
     if (error) error->clear();
     const auto wasCanceled=[&]{if(canceled&&canceled()){if(error)*error="Export canceled.";return true;}return false;};
     if(wasCanceled())return false;
@@ -387,6 +432,7 @@ bool exportMp4(const Project &project, const QString &path,
     const int total = project.durationFrames();
     const auto render = [&](bool hardware) {
         if(wasCanceled())return false;
+        if(diagnostic)diagnostic(hardware?"Encoder: h264_videotoolbox":"Encoder: libx264");
         auto timeline = buildTimeline(project, profile, error);
         if (!timeline) return false;
         if(wasCanceled())return false;
@@ -416,8 +462,13 @@ bool exportMp4(const Project &project, const QString &path,
             if (error) *error = "Could not start MP4 export.";
             return false;
         }
+        auto lastDiagnostic=std::chrono::steady_clock::now()-std::chrono::seconds(1);
         while (!consumer.is_stopped()) {
             if(wasCanceled()){consumer.stop();return false;}
+            const auto now=std::chrono::steady_clock::now();
+            if(diagnostic&&now-lastDiagnostic>=std::chrono::seconds(1)){
+                diagnostic(QString("Frame %1/%2").arg(consumer.position()).arg(total));lastDiagnostic=now;
+            }
             if (progress && total > 0) progress(std::clamp(consumer.position() * 100 / total, 0, 99));
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -458,21 +509,28 @@ bool exportMp4(const Project &project, const QString &path,
 #ifdef Q_OS_MACOS
     QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
     if (ffmpeg.isEmpty()) ffmpeg = QStandardPaths::findExecutable("ffmpeg", {"/opt/homebrew/bin", "/usr/local/bin"});
-    if (!ffmpeg.isEmpty()) {
+    if (!softwareOnly && !ffmpeg.isEmpty()) {
+        if(diagnostic)diagnostic("Checking hardware encoder");
         QProcess probe;
         probe.start(ffmpeg, {"-nostdin", "-hide_banner", "-v", "error", "-f", "lavfi", "-i",
             QString("color=s=%1x%2:r=60").arg(size->width).arg(size->height), "-frames:v", "1", "-an",
             "-c:v", "h264_videotoolbox", "-allow_sw", "0", "-f", "null", "-"});
         if (probe.waitForFinished(5000) && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0)
             rendered = render(true);
-        else if (probe.state() != QProcess::NotRunning) {
-            probe.kill();
-            probe.waitForFinished(1000);
+        else {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.kill();probe.waitForFinished(1000);
+            }
+            if(diagnostic){
+                const auto detail=QString::fromUtf8(probe.readAllStandardError().right(4096)).trimmed();
+                diagnostic("Hardware encoder unavailable: "+(detail.isEmpty()?probe.errorString():detail));
+            }
         }
-    }
+    }else if(!softwareOnly&&diagnostic)diagnostic("Hardware probe unavailable: FFmpeg executable was not found");
 #endif
     if(wasCanceled())return false;
     if (!rendered) {
+        if(diagnostic&&error&&!error->isEmpty())diagnostic("Hardware export failed: "+*error+" Retrying with software.");
         if (error) error->clear();
         if (!render(false)) return false;
     }

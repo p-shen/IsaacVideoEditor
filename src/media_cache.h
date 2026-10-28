@@ -16,7 +16,8 @@ class MediaCache final : public QObject {
 public:
     explicit MediaCache(QObject *parent = nullptr);
     ~MediaCache() override;
-    QImage thumbnail(const QString &path, double sourceSeconds, int rotationDegrees = 0, bool priority = false);
+    // Filmstrips may reuse a nearby frame; trim/source comparisons keep the default exact request.
+    QImage thumbnail(const QString &path, double sourceSeconds, int rotationDegrees = 0, bool priority = false, int toleranceFrames = 0);
     QVector<float> waveform(const QString &path);
     QString waveformState(const QString &path) const;
     void setInteractive(bool interactive);

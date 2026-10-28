@@ -19,6 +19,110 @@ class AudioTransitionTest : public QObject {
     Q_OBJECT
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
 private slots:
+    void globalCrossfadeExportsAppendedAndSplitCuts_data() {
+        QTest::addColumn<bool>("shortClip");
+        QTest::newRow("all-full-duration")<<false;
+        QTest::newRow("short-clip-preserves-distant-fade")<<true;
+    }
+    void globalCrossfadeExportsAppendedAndSplitCuts() {
+        QFETCH(bool,shortClip);
+        QTemporaryDir dir;const auto source=dir.filePath("red-blue.mp4");
+        QString ffmpeg=QStandardPaths::findExecutable("ffmpeg");if(ffmpeg.isEmpty())ffmpeg="/opt/homebrew/bin/ffmpeg";
+        QProcess create;create.start(ffmpeg,{"-v","error","-f","lavfi","-i",
+            "color=c=red:s=160x90:r=60:d=1[red];color=c=blue:s=160x90:r=60:d=1[blue];[red][blue]concat=n=2:v=1:a=0",
+            "-c:v","libx264","-an","-y",source});
+        QVERIFY(create.waitForFinished(10000));QVERIFY2(create.exitCode()==0,create.readAllStandardError());
+
+        EditorController e;QVERIFY(e.importMedia({source}));QVERIFY(e.appendSource());
+        e.selectClip(0);e.seek(60);e.split();QCOMPARE(e.project().clips.size(),2);
+        e.selectSource(0);e.setSourceRange(0,60);QVERIFY(e.appendSource());
+        e.setSourceRange(60,120);QVERIFY(e.appendSource());
+        e.setTransition(3,"dissolve",8);e.setTransition(3,"cut",0);
+        if(shortClip)QVERIFY(e.trimClip(1,1,1.25));
+        for(int i=1;i<4;++i)QCOMPARE(e.project().transitionFramesBefore(i),0);
+
+        e.setCrossfade(.25);
+        const QVector<int> overlaps=shortClip?QVector<int>{7,7,15}:QVector<int>{15,15,15};
+        const int total=shortClip?166:195;
+        for(int i=1;i<4;++i)QCOMPARE(e.project().transitionFramesBefore(i),overlaps[i-1]);
+        QCOMPARE(e.duration(),total);
+        const auto saved=dir.filePath("all-cuts.isaac.json");QVERIFY(e.saveTo(saved));
+        QString error;const auto restored=loadProject(saved,&error);QVERIFY2(restored,qPrintable(error));
+        for(int i=1;i<4;++i)QCOMPARE(restored->transitionFramesBefore(i),overlaps[i-1]);
+
+        QVERIFY(e.loadFrom(saved));
+        const auto output=dir.filePath("all-cuts.mp4");QVERIFY(e.exportTo(output));
+        QTRY_VERIFY_WITH_TIMEOUT(!e.exporting(),20000);
+        QVERIFY2(e.exportState()=="Completed",qPrintable(e.notice()));
+        QString ffprobe=QStandardPaths::findExecutable("ffprobe");if(ffprobe.isEmpty())ffprobe=QStandardPaths::findExecutable("ffprobe",{QFileInfo(ffmpeg).absolutePath()});
+        QProcess inspect;inspect.start(ffprobe,{"-v","error","-select_streams","v:0","-count_frames","-show_entries","stream=nb_read_frames","-of","csv=p=0",output});
+        QVERIFY(inspect.waitForFinished(10000));QCOMPARE(inspect.exitCode(),0);QCOMPARE(inspect.readAllStandardOutput().trimmed().toInt(),total);
+        Project exported;exported.clips={{output,0,total/60.0}};
+        Mlt::Profile profile;Media::configureOutputProfile(profile,160,90);
+        auto timeline=Media::buildTimeline(exported,profile,&error);QVERIFY2(timeline,qPrintable(error));
+        QCOMPARE(timeline->get_playtime(),total);
+        // Independently derived midpoints of all three overlaps, with and without a short second clip.
+        const QVector<int> samples=shortClip?QVector<int>{56,64,113}:QVector<int>{52,97,142};
+        for(int at:samples) {
+            timeline->seek(at);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());
+            auto format=mlt_image_rgba;int w=160,h=90;uint8_t *pixels=nullptr;
+            QCOMPARE(mlt_frame_get_image(frame->get_frame(),&pixels,&format,&w,&h,0),0);QVERIFY(pixels);
+            const auto color=QImage(pixels,w,h,w*4,QImage::Format_RGBA8888).pixelColor(w/2,h/2);
+            QVERIFY2(color.red()>70&&color.blue()>70&&color.red()+color.blue()>210,qPrintable(QString("No crossfade in exported frame %1: %2").arg(at).arg(color.name())));
+        }
+        e.setCrossfade(0);QCOMPARE(e.duration(),shortClip?195:240);
+        for(int i=1;i<4;++i)QCOMPARE(e.project().transitionFramesBefore(i),0);
+        e.undo();QCOMPARE(e.duration(),total);
+    }
+    void oneFrameClipDoesNotRemoveDistantCrossfades() {
+        EditorController e;QVERIFY(e.importFiles({fixture(),fixture(),fixture(),fixture()}));
+        QVERIFY(e.trimClip(1,0,1./60));e.setCrossfade(.5);
+        QCOMPARE(e.project().transitionFramesBefore(1),0);
+        QCOMPARE(e.project().transitionFramesBefore(2),0);
+        QCOMPARE(e.project().transitionFramesBefore(3),30);
+        e.selectTransition(1);QVERIFY(e.currentTransition().value("shortened").toBool());
+        QCOMPARE(e.currentTransition().value("requestedFrames").toInt(),30);
+    }
+    void bulkFeedbackCountsShortenedCutsAndScopesUndo() {
+        EditorController e;QVERIFY(e.importFiles({fixture(),fixture(),fixture(),fixture(),fixture()}));
+        QVERIFY(e.trimClip(1,0,.5));e.setCrossfade(.5);
+        QVERIFY(e.notice().contains("0.5 s"));QVERIFY(e.notice().contains("4 existing cuts"));QVERIFY(e.notice().contains("2 shortened"));
+        QVERIFY(e.property("noticeCanUndo").toBool());
+        QCOMPARE(e.project().transitionFramesBefore(1),14);QCOMPARE(e.project().transitionFramesBefore(2),14);
+        QCOMPARE(e.project().transitionFramesBefore(3),30);QCOMPARE(e.project().transitionFramesBefore(4),30);
+        e.rotate(90);QVERIFY(!e.property("noticeCanUndo").toBool());QVERIFY(e.notice().isEmpty());
+        e.undo();QVERIFY(!e.property("noticeCanUndo").toBool());
+        e.setCrossfade(.25);QVERIFY(e.property("noticeCanUndo").toBool());
+        e.dismissNotice();QVERIFY(!e.property("noticeCanUndo").toBool());
+        e.setCrossfade(.75);QVERIFY(e.property("noticeCanUndo").toBool());
+        QVERIFY(!e.trimClip(0,0,1000));QVERIFY(!e.property("noticeCanUndo").toBool());
+        e.setCrossfade(.75);QVERIFY(!e.property("noticeCanUndo").toBool());
+        e.undo();QCOMPARE(e.project().crossfadeFrames,15);
+    }
+    void bulkApplyOnlyAffectsExistingCuts_data() {
+        QTest::addColumn<bool>("libraryAppend");
+        QTest::newRow("library-append")<<true;
+        QTest::newRow("import-and-append")<<false;
+    }
+    void bulkApplyOnlyAffectsExistingCuts() {
+        QFETCH(bool,libraryAppend);
+        EditorController e;QVERIFY(e.importFiles({fixture(),fixture()}));e.setCrossfade(.25);
+        if(libraryAppend){e.selectSource(0);e.setSourceRange(0,60);QVERIFY(e.appendSource());}
+        else QVERIFY(e.importFiles({fixture()}));
+        QCOMPARE(e.project().transitionFramesBefore(1),15);QCOMPARE(e.project().transitionFramesBefore(2),0);
+        e.selectClip(0);e.seek(30);e.split();QCOMPARE(e.project().clips.size(),4);
+        QCOMPARE(e.project().transitionFramesBefore(1),0);QCOMPARE(e.project().transitionFramesBefore(2),15);
+        e.setCrossfade(.25);for(int i=1;i<4;++i)QCOMPARE(e.project().transitionFramesBefore(i),15);
+    }
+    void inheritedProjectsKeepTheirTimingUntilExplicitApply() {
+        QTemporaryDir dir;Project old;
+        old.clips={{fixture(),0,2},{fixture(),0,.5},{fixture(),0,2},{fixture(),0,2}};old.crossfadeFrames=30;
+        const auto saved=dir.filePath("inherited.json");QVERIFY(saveProject(old,saved));
+        EditorController e;QVERIFY(e.loadFrom(saved));QCOMPARE(e.duration(),348);
+        QCOMPARE(e.project().transitionFramesBefore(3),14);
+        e.setCrossfade(.5);QCOMPARE(e.project().transitionFramesBefore(3),30);QCOMPARE(e.duration(),332);
+        e.undo();QCOMPARE(e.duration(),348);
+    }
     void offlineAudioKeepsDurationWithoutLibraryEntry() {
         QTemporaryDir dir;const auto audio=dir.filePath("narration.wav"),replacement=dir.filePath("moved.wav"),shortAudio=dir.filePath("short.wav");
         QString ffmpeg=QStandardPaths::findExecutable("ffmpeg");if(ffmpeg.isEmpty())ffmpeg="/opt/homebrew/bin/ffmpeg";

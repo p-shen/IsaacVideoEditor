@@ -3,9 +3,13 @@
 #include "mlt_engine.h"
 #include "quick_timeline.h"
 #include "theme.h"
+#include "update_checker.h"
+#include "update_fixtures.h"
 #include <QQuickStyle>
 #include <QApplication>
 #include <QQmlApplicationEngine>
+#include <QQmlContext>
+#include <QMessageBox>
 #include <QQuickWindow>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -64,10 +68,11 @@ private slots:
         EditorController editor;QQmlApplicationEngine engine;QSignalSpy warnings(&engine,&QQmlEngine::warnings);
         auto *window=load(engine,editor);QVERIFY(window);QVERIFY(editor.importFiles({fixture(),fixture()}));editor.setVoicePath(fixture());editor.setMusicPath(fixture());
         editor.selectAudio(1);QVERIFY(QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,1),Q_ARG(QVariant,false)));
-        auto *gain=window->findChild<QQuickItem*>("audioGainField");QVERIFY(gain);gain->setProperty("text","-8.5");QVERIFY(QMetaObject::invokeMethod(gain,"editingFinished"));
+        auto *gain=window->findChild<QQuickItem*>("audioGainField");QVERIFY(gain);gain->forceActiveFocus();gain->setProperty("text","-8.5");QVERIFY(QMetaObject::invokeMethod(gain,"editingFinished"));
         QCOMPARE(editor.project().voiceAudio.gainDb,-8.5);editor.undo();QCOMPARE(editor.project().voiceAudio.gainDb,0.0);
         editor.selectTransition(1);QVERIFY(QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,2),Q_ARG(QVariant,false)));
-        auto *cut=window->findChild<QQuickItem*>("localTransitionFrames");QVERIFY(cut);cut->setProperty("text","18");QVERIFY(QMetaObject::invokeMethod(cut,"editingFinished"));QCOMPARE(editor.project().transitionFramesBefore(1),18);
+        auto *precision=window->findChild<QQuickItem*>("transitionPrecisionDetails");QVERIFY(precision);precision->setProperty("expanded",true);
+        auto *cut=window->findChild<QQuickItem*>("localTransitionFrames");QVERIFY(cut);cut->forceActiveFocus();cut->setProperty("text","18");QVERIFY(QMetaObject::invokeMethod(cut,"editingFinished"));QCOMPARE(editor.project().transitionFramesBefore(1),18);
         const auto directory=qEnvironmentVariable("ISAAC_AUDIO_SCREENSHOTS");
         if(!directory.isEmpty()){
             QDir().mkpath(directory);
@@ -124,6 +129,119 @@ private slots:
         QVERIFY(load(engine,editor));
         QCOMPARE(warnings.count(),0);
     }
+    void softwareUpdateIsReachableFromTheMenu() {
+        const auto previousVersion=QCoreApplication::applicationVersion();
+        const auto restoreVersion=qScopeGuard([&]{QCoreApplication::setApplicationVersion(previousVersion);});
+        QCoreApplication::setApplicationVersion(qEnvironmentVariable("ISAAC_UPDATE_INSTALLED_VERSION","0.1.0"));
+        EditorController editor; QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        auto *window=load(engine,editor); QVERIFY(window);
+        auto *menu=window->findChild<QObject*>("checkForUpdatesMenuItem"); QVERIFY(menu);
+        auto *panel=window->findChild<QObject*>("softwareUpdateDialog"); QVERIFY(panel);
+        auto *checker=window->findChild<UpdateChecker*>("updateChecker"); QVERIFY(checker);
+        QCOMPARE(checker->state(),UpdateChecker::Idle);
+        QVERIFY(!panel->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(menu,"triggered"));
+        QVERIFY(checker->checking());
+        QTRY_VERIFY(panel->property("visible").toBool());
+        const auto captures=qEnvironmentVariable("ISAAC_UPDATE_SCREENSHOTS");
+        if(!captures.isEmpty()) {
+            QDir().mkpath(captures);
+            QTRY_VERIFY_WITH_TIMEOUT(!checker->checking(),20000);
+            qInfo().noquote()<<checker->message();
+            for(bool dark:{true,false}) {
+                setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+                QTest::qWait(100);
+                QVERIFY(window->grabWindow().save(captures+(dark?"/updates-dark.png":"/updates-light.png")));
+            }
+            window->resize(760,560); auto font=qApp->font(); font.setPointSize(24); window->setProperty("font",font);
+            QTest::qWait(100); QVERIFY(window->grabWindow().save(captures+"/updates-large-text.png"));
+        }
+        QVERIFY(QMetaObject::invokeMethod(panel,"close"));
+        QTRY_VERIFY(!panel->property("visible").toBool());
+        QCOMPARE(warnings.count(),0);
+    }
+    void updateDialogDownloadsPreparesAndProtectsUnsavedWork() {
+        const auto archive=UpdateTest::preparedArchiveFixture();
+        if(archive.isEmpty())QSKIP("Native update archive fixture unavailable");
+        const auto previousVersion=QCoreApplication::applicationVersion();
+        const auto restoreVersion=qScopeGuard([&]{QCoreApplication::setApplicationVersion(previousVersion);});
+        QCoreApplication::setApplicationVersion("1.2.0");
+        UpdateTest::ReleaseNetwork network; network.body=UpdateTest::downloadableRelease(archive);
+        UpdateChecker checker(network); QSignalSpy restart(&checker,&UpdateChecker::restartRequested);
+        EditorController editor; QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        setEditorQmlContext(engine,editor);
+        QQmlEngine::setObjectOwnership(&checker,QQmlEngine::CppOwnership);
+        engine.rootContext()->setContextProperty("testUpdater",&checker);
+        QFile source("qml/Main.qml"); QVERIFY(source.open(QIODevice::ReadOnly));
+        auto qml=source.readAll();
+        // Use the actual dialog with a deterministic network-backed service.
+        const QByteArray declaration="UpdateChecker { id: updater; objectName: \"updateChecker\" }";
+        QVERIFY(qml.contains(declaration));
+        qml.replace(declaration,"property var updater: testUpdater");
+        engine.loadData(qml,QUrl::fromLocalFile(QDir::current().filePath("qml/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects().first()); QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *menu=window->findChild<QObject*>("checkForUpdatesMenuItem"); QVERIFY(menu);
+        QVERIFY(QMetaObject::invokeMethod(menu,"triggered"));
+        QTRY_VERIFY(checker.canDownload());
+        auto *download=window->findChild<QQuickItem*>("downloadUpdateButton"); QVERIFY(download);
+        auto *cancel=window->findChild<QQuickItem*>("cancelUpdateDownloadButton"); QVERIFY(cancel);
+        auto *install=window->findChild<QQuickItem*>("installUpdateButton"); QVERIFY(install);
+        auto *progress=window->findChild<QQuickItem*>("updateDownloadProgress"); QVERIFY(progress);
+        QTRY_VERIFY(download->isVisible()); QVERIFY(!install->isVisible());
+        const auto captures=qEnvironmentVariable("ISAAC_UPDATE_FLOW_SCREENSHOTS");
+        const auto capture=[&](const QString &name){
+            if(captures.isEmpty())return true;
+            QDir().mkpath(captures);
+            window->resize(1320,860);
+            for(bool dark:{true,false}){
+                setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+                QTest::qWait(50);
+                if(!window->grabWindow().save(captures+"/"+name+(dark?"-dark.png":"-light.png")))return false;
+            }
+            window->resize(760,560); auto font=qApp->font(); font.setPointSize(24); window->setProperty("font",font);
+            QTest::qWait(50); const bool saved=window->grabWindow().save(captures+"/"+name+"-large.png");
+            window->setProperty("font",qApp->font()); window->resize(1320,860);
+            return saved;
+        };
+        QVERIFY(capture("available"));
+        network.body=archive; network.delay=10000;
+        QVERIFY(QMetaObject::invokeMethod(download,"clicked"));
+        QCOMPARE(checker.state(),UpdateChecker::Downloading);
+        QTRY_VERIFY(progress->isVisible()); QTRY_VERIFY(cancel->isVisible());
+        QVERIFY(capture("downloading"));
+        QVERIFY(QMetaObject::invokeMethod(cancel,"clicked"));
+        QTRY_VERIFY(checker.canDownload());
+        network.delay=0;
+        QVERIFY(QMetaObject::invokeMethod(download,"clicked"));
+        QTRY_VERIFY_WITH_TIMEOUT(!checker.busy(),20000);
+        QVERIFY2(checker.readyToInstall(),qPrintable(checker.message()));
+        QTRY_VERIFY(install->isVisible()); QVERIFY(!progress->isVisible());
+        QVERIFY(capture("ready"));
+        QVERIFY(editor.importFiles({fixture()})); QVERIFY(editor.dirty());
+        bool savePrompt=false; QTimer cancelSave;
+        connect(&cancelSave,&QTimer::timeout,window,[&]{
+            if(auto *message=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())){
+                savePrompt=true; message->done(QMessageBox::Cancel);
+            }
+        });
+        cancelSave.start(10);
+        QVERIFY(QMetaObject::invokeMethod(install,"clicked"));
+        cancelSave.stop();
+        QVERIFY(savePrompt); QVERIFY(checker.readyToInstall()); QVERIFY(window->isVisible());
+        QVERIFY(editor.dirty()); QCOMPARE(restart.count(),0); QCOMPARE(warnings.count(),0);
+        auto *message=window->findChild<QQuickItem*>("softwareUpdateMessage"); QVERIFY(message);
+        message->setProperty("text",QString("A long installation error with a folder path. ").repeated(100));
+        window->resize(760,560); auto font=qApp->font(); font.setPointSize(24); window->setProperty("font",font);
+        auto *panel=window->findChild<QObject*>("softwareUpdateDialog"); QVERIFY(panel);
+        auto *scroll=window->findChild<QQuickItem*>("updateContentScroll"); QVERIFY(scroll);
+        QTRY_VERIFY(panel->property("height").toReal()<=520);
+        QTRY_VERIFY(scroll->property("contentHeight").toReal()>scroll->height());
+        QCOMPARE(warnings.count(),0);
+    }
     void compositionNumericEscapeRestoresValuesAndBindings(){
         EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);QVERIFY(editor.importFiles({fixture()}));editor.selectClip(0);
         editor.setTransform({{"framing","crop"}});editor.editKeyframe("scale","add");QVERIFY(QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,4),Q_ARG(QVariant,false)));QTest::qWait(30);
@@ -132,7 +250,7 @@ private slots:
         const auto history=editor.undoText();
         QVERIFY(cancel("visualcropLeftField","0.2"));QCOMPARE(editor.project().clips[0].transform.cropLeft,0.);
         QVERIFY(cancel("movescaleKeyframeField","12"));QCOMPARE(editor.project().clips[0].transform.scale.keys[0].frame,0);QCOMPARE(editor.undoText(),history);
-        editor.setTransform({{"cropLeft",.1}});QCoreApplication::processEvents();auto *crop=find(window->contentItem(),"visualcropLeftField");QVERIFY(crop);QCOMPARE(crop->property("text").toString(),QString("0.1"));
+        editor.setTransform({{"cropLeft",.1}});QCoreApplication::processEvents();auto *crop=find(window->contentItem(),"visualcropLeftField");QVERIFY(crop);QCOMPARE(crop->property("text").toString(),QString("10.0"));
     }
     void canceledSourceScrubIgnoresRemainingPointerMovement(){
         QTemporaryDir dir;EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);QVERIFY(editor.importMedia({fixture()}));editor.seekSource(12);QVERIFY(editor.saveTo(dir.filePath("source.isaac.json")));
@@ -386,8 +504,7 @@ private slots:
         QVERIFY(empty->isVisible()); QVERIFY(!start->isVisible());
         QVERIFY(editor.importFiles({fixture()}));
         QTRY_VERIFY(start->isVisible()); QVERIFY(!empty->isVisible());
-        auto *nudge=window->findChild<QQuickItem*>("trimStartLaterButton"); QVERIFY(nudge);
-        nudge->forceActiveFocus(Qt::TabFocusReason); QTRY_VERIFY(nudge->hasActiveFocus()); QTest::keyClick(window,Qt::Key_Space);
+        start->forceActiveFocus(Qt::TabFocusReason); QTRY_VERIFY(start->hasActiveFocus()); QTest::keyClick(window,Qt::Key_Up);
         QVERIFY(std::abs(editor.currentClip().value("inSeconds").toDouble()-1.0/60)<0.001);
         editor.clearSelection(); QTRY_VERIFY(!start->isVisible());
         QVERIFY(QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,QVariant(0)),Q_ARG(QVariant,QVariant(true))));
@@ -426,9 +543,7 @@ private slots:
             return true;
         };
         QVERIFY(QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,QVariant(1)),Q_ARG(QVariant,QVariant(true))));
-        QQuickItem *choose=nullptr;
-        for(auto *item:window->findChildren<QQuickItem*>())
-            if(item->property("text").toString()=="Choose file") {choose=item;break;}
+        auto *choose=window->findChild<QQuickItem*>("audioSourceChoice");
         QVERIFY(choose);QTRY_VERIFY(choose->hasActiveFocus());
         window->requestUpdate();QTest::qWait(100);
         QTRY_VERIFY2(fullyVisible(choose),"Audio import must fit the compact inspector");
@@ -449,9 +564,7 @@ private slots:
         bold->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(fullyVisible(bold),"Keyboard focus must reveal lower text controls");
         if(!directory.isEmpty()) { window->requestUpdate();QTest::qWait(100);QVERIFY(window->grabWindow().save(directory+"/compact-text.png")); }
-        QQuickItem *fit=nullptr;
-        for(auto *item:window->findChildren<QQuickItem*>())
-            if(item->property("text").toString()=="Fit") {fit=item;break;}
+        auto *fit=window->findChild<QQuickItem*>("fitTimelineButton");
         QVERIFY(fit);fit->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY2(fullyVisible(fit),"Keyboard focus must reveal wrapped timeline tools");
         if(!directory.isEmpty()) { window->requestUpdate();QTest::qWait(100);QVERIFY(window->grabWindow().save(directory+"/compact-toolbar.png")); }
@@ -544,6 +657,49 @@ private slots:
         QTest::mouseRelease(window,Qt::LeftButton,Qt::NoModifier,edge-QPoint(50,0));
         QVERIFY(editor.project().clips[0].outSeconds<2.0);
         editor.undo(); QCOMPARE(editor.project().clips[0].outSeconds,2.0);
+    }
+    void frontTrimCommitsComparedFrame_data() {
+        QTest::addColumn<int>("clip");
+        QTest::newRow("first-clip") << 0;
+        QTest::newRow("after-cut") << 1;
+    }
+    void frontTrimCommitsComparedFrame() {
+        QFETCH(int, clip);
+        EditorController editor; QQmlApplicationEngine engine;
+        auto *window=load(engine,editor); QVERIFY(window);
+        const auto path=QDir::current().filePath("tests/fixtures/proxy-timing-30.mp4");
+        QVERIFY(editor.importFiles({path,path}));
+        editor.seek(clip * 24);
+        auto *timeline=window->findChild<QuickTimeline*>("timeline"); QVERIFY(timeline);
+        QTRY_VERIFY(timeline->width()>500);
+        timeline->setSnapping(false);
+        auto *incoming=window->findChild<QQuickItem*>("trimIncomingFrame"); QVERIFY(incoming);
+        const auto rect=timeline->clipRect(clip);
+        const auto from=timeline->mapToScene(QPointF(rect.left()+3,rect.top()+5)).toPoint();
+        const auto to=from+QPoint(qRound(13*timeline->pixelsPerSecond()/60),0);
+        QSignalSpy trims(timeline,&QuickTimeline::trimRequested);
+        QTest::mousePress(window,Qt::LeftButton,Qt::NoModifier,from);
+        QTest::mouseMove(window,to);
+        QVERIFY(timeline->trimPreview().value("active").toBool());
+        QCOMPARE(timeline->trimPreview().value("inTime").toDouble(),13/60.0);
+        QTRY_VERIFY_WITH_TIMEOUT(incoming->property("ready").toBool(),5000);
+        QCOMPARE(incoming->property("seconds").toDouble(),13/60.0);
+        QCOMPARE(editor.project().clips[clip].inSeconds,0.0);
+        QTest::mouseRelease(window,Qt::LeftButton,Qt::NoModifier,to);
+        QCOMPARE(trims.count(),1);
+        QCOMPARE(editor.project().clips[clip].inSeconds,13/60.0);
+        QCOMPARE(editor.project().clips[clip].outSeconds,.4);
+        QCOMPARE(editor.duration(),35);
+        const auto frameId=[&]{
+            const auto image=editor.frame(); if(image.isNull()) return -1;
+            int id=0;
+            for(int bit=0;bit<12;++bit)if(image.pixelColor((bit*8+4)*image.width()/128,image.height()/2).red()>127)id|=1<<bit;
+            return id;
+        };
+        QTRY_COMPARE_WITH_TIMEOUT(frameId(),7,3000);
+        editor.undo(); QCOMPARE(editor.project().clips[clip].inSeconds,0.0); QCOMPARE(editor.duration(),48);
+        editor.redo(); QCOMPARE(editor.project().clips[clip].inSeconds,13/60.0); QCOMPARE(editor.duration(),35);
+        QTRY_COMPARE_WITH_TIMEOUT(frameId(),7,3000);
     }
     void trimComparisonLoadsBeforeRelease() {
         EditorController editor; QQmlApplicationEngine engine;

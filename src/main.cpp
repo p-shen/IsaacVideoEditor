@@ -1,13 +1,16 @@
 #include "editor_controller.h"
+#include "export_job.h"
 #include "qml_registration.h"
 #include "mlt_engine.h"
 #include "theme.h"
 #include "runtime_paths.h"
 #include "preview.h"
 #include <QApplication>
+#include <QMessageBox>
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QFile>
 #include <QEventLoop>
 #include <QIcon>
 #include <QImageReader>
@@ -16,11 +19,16 @@
 #include <QQuickStyle>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QSslSocket>
 #include <QTimer>
 #include <mlt++/Mlt.h>
 
 namespace {
 int packageSmokeTest(const QString &fixture) {
+    if (!QSslSocket::supportsSsl()) {
+        qCritical() << "The packaged HTTPS backend is unavailable; update downloads would fail";
+        return 2;
+    }
     if (!QFileInfo(fixture).isFile()) {
         qCritical() << "Smoke test requires an existing video fixture:" << fixture;
         return 2;
@@ -92,11 +100,18 @@ int packageSmokeTest(const QString &fixture) {
         }
     }
     QTemporaryDir temporary;
-    if (!temporary.isValid() || !Media::exportMp4(project, temporary.filePath("smoke.mp4"), {}, &error)) {
-        qCritical() << "Cannot export media:" << error;
+    const auto exportWithWorker=[&]{
+        ExportJob job(QCoreApplication::applicationFilePath());QEventLoop wait;QTimer deadline;deadline.setSingleShot(true);bool completed=false;
+        QObject::connect(&job,&ExportJob::finished,&wait,[&](bool ok,bool,const QString &message){completed=ok;error=message;wait.quit();});
+        QObject::connect(&deadline,&QTimer::timeout,&wait,[&]{error="Export worker timed out.";job.cancel();wait.quit();});
+        if(!job.start(project,temporary.filePath("smoke.mp4"),&error))return false;
+        deadline.start(30000);wait.exec();job.stopAndWait();return completed;
+    };
+    if (!temporary.isValid() || !exportWithWorker()) {
+        qCritical() << "Cannot export media with worker:" << error;
         return 2;
     }
-    if (!Media::exportMp4(project, temporary.filePath("smoke.mp4"), {}, &error)) {
+    if (!exportWithWorker()) {
         qCritical() << "Cannot replace an existing export:" << error;
         return 2;
     }
@@ -106,9 +121,16 @@ int packageSmokeTest(const QString &fixture) {
 }
 
 int main(int argc,char *argv[]) {
+    const bool exportWorker=argc>1&&QByteArray(argv[1])=="--export-worker";
+    if(exportWorker)qputenv("QT_QPA_PLATFORM","offscreen");
     QApplication app(argc,argv);
     app.setApplicationName("IsaacVideoEditor");
+    app.setApplicationVersion(QStringLiteral(ISAAC_APP_VERSION));
     app.setOrganizationName("IsaacVideoEditor");
+    if(exportWorker){
+        applyAppTheme(app);
+        Media::initializeMlt();const int result=runExportWorker(app.arguments());Mlt::Factory::close();return result;
+    }
     QQuickStyle::setStyle("Basic");
     applyAppTheme(app);
     app.setWindowIcon(QIcon(":/isaac-logo.png"));
@@ -131,6 +153,22 @@ int main(int argc,char *argv[]) {
                 app.processEvents();
                 result = qmlWarnings ? 2 : packageSmokeTest(args.value(smoke + 1));
             } else {
+                const int updateStarted=args.indexOf("--update-started");
+                if(updateStarted>=0) QTimer::singleShot(0,&app,[args,updateStarted,&qmlWarnings]{
+                    if(qmlWarnings)return;
+                    const QFileInfo requested(args.value(updateStarted+1));
+                    const auto folder=QFileInfo(requested.absolutePath()).canonicalFilePath();
+                    const auto temporary=QFileInfo(QDir::tempPath()).canonicalFilePath();
+                    if(requested.fileName()!="started" || !QFileInfo(folder).fileName().startsWith("isaac-update-") ||
+                       (!folder.startsWith(temporary+'/') && !folder.startsWith("/private/tmp/")))return;
+                    QFile ready(QDir(folder).filePath("ready"));
+                    if(!ready.open(QIODevice::ReadOnly) || ready.read(128)!="IsaacVideoEditor update 1\n")return;
+                    QFile started(QDir(folder).filePath("started"));
+                    if(started.open(QIODevice::WriteOnly|QIODevice::NewOnly))started.write("IsaacVideoEditor started 1\n");
+                });
+                if(args.contains("--update-failed")) QTimer::singleShot(0,&app,[]{
+                    QMessageBox::warning(nullptr,"Update was not installed","The update could not be installed. Your previous version has been reopened. Please try the update again.");
+                });
                 if(args.size()>1&&!args[1].startsWith('-')) editor.loadFrom(args[1]);
                 result=app.exec();
             }

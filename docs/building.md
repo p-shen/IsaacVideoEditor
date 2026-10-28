@@ -2,7 +2,7 @@
 
 The Apple silicon Mac build has been verified. Intel Mac, Linux, and Windows builds remain unverified; the instructions below describe the dependency setup and build commands for each platform.
 
-All platforms need Git, a C++17 compiler, CMake 3.21 or newer, pkg-config, MLT 7 with its C++ development files and FFmpeg/avformat plugin, and FFmpeg's `ffmpeg` and `ffprobe` commands. Qt must include Core, Gui, Widgets, Quick, Qml, QuickControls2, and Test, plus the QML runtime modules and SVG image plugin. Use Qt **6.6 or newer**: the interface uses [`font.features`](https://doc.qt.io/qt-6/qml-qtquick-text.html#font.features-prop), introduced in Qt 6.6, even though CMake currently accepts older Qt 6 versions.
+All platforms need Git, a C++17 compiler, CMake 3.21 or newer, pkg-config, MLT 7 with its C++ development files and FFmpeg/avformat plugin, and FFmpeg's `ffmpeg` and `ffprobe` commands. Qt must include Core, Gui, Widgets, Quick, Qml, QuickControls2, Network, and Test, plus the QML runtime modules and SVG image plugin. Use Qt **6.6 or newer**: the interface uses [`font.features`](https://doc.qt.io/qt-6/qml-qtquick-text.html#font.features-prop), introduced in Qt 6.6, even though CMake currently accepts older Qt 6 versions.
 
 Build and run on the same machine with the dependencies installed. These commands produce a development build that uses those installed libraries; copying the executable alone to another machine does not include its dependencies.
 

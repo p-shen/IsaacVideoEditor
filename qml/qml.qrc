@@ -5,6 +5,8 @@
     <file>MediaBrowser.qml</file>
     <file>SourceControls.qml</file>
     <file>Inspector.qml</file>
+    <file>InspectorDetails.qml</file>
+    <file>InspectorPage.qml</file>
     <file>AudioMixer.qml</file>
     <file>CutInspector.qml</file>
     <file>CompositionInspector.qml</file>
@@ -43,5 +45,17 @@
     <file>icons/minus.svg</file>
     <file>icons/plus.svg</file>
     <file>icons/fit.svg</file>
+    <file>icons/chevron-down.svg</file>
+    <file>icons/chevron-right.svg</file>
+    <file>icons/keyframe.svg</file>
+    <file>icons/volume.svg</file>
+    <file>icons/volume-off.svg</file>
+    <file>icons/reset.svg</file>
+    <file>icons/edit.svg</file>
+    <file>icons/headphones.svg</file>
+    <file>icons/link.svg</file>
+    <file>icons/unlink.svg</file>
+    <file>icons/check.svg</file>
+    <file>icons/more.svg</file>
   </qresource>
 </RCC>

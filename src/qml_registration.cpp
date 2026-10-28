@@ -3,6 +3,7 @@
 #include "media_cache.h"
 #include "preview_item.h"
 #include "quick_timeline.h"
+#include "update_checker.h"
 #include <QQmlContext>
 #include <QGuiApplication>
 #include <QFont>
@@ -14,6 +15,7 @@ void registerEditorQmlTypes() {
     qmlRegisterType<VideoPreview>("Isaac",1,0,"VideoPreview");
     qmlRegisterType<CachedFrame>("Isaac",1,0,"CachedFrame");
     qmlRegisterType<QuickTimeline>("Isaac",1,0,"QuickTimeline");
+    qmlRegisterType<UpdateChecker>("Isaac",1,0,"UpdateChecker");
     qmlRegisterUncreatableType<EditorController>("Isaac",1,0,"EditorController","Created by the application");
     qmlRegisterUncreatableType<MediaCache>("Isaac",1,0,"MediaCache","Created by the editing controller");
 }

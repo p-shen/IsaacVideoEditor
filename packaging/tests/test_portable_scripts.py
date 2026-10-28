@@ -102,6 +102,9 @@ class QtDeploymentInputsTest(unittest.TestCase):
             binary = build / ("IsaacVideoEditor" if platform == "linux" else "IsaacVideoEditor.exe")
             binary.write_text("fixture")
             binary.chmod(0o755)
+            helper = build / ("IsaacVideoEditorUpdater" if platform == "linux" else "IsaacVideoEditorUpdater.exe")
+            helper.write_text("fixture")
+            helper.chmod(0o755)
             for name in ("ffmpeg.exe", "ffprobe.exe"):
                 (prefix / "bin" / name).write_text("fixture")
             capture = root / "deployment.json"

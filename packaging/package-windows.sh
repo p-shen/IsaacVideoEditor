@@ -14,6 +14,7 @@ for tool in pkg-config windeployqt objdump python3 pacman zip; do
     command -v "$tool" >/dev/null || fail "Missing dependency: $tool"
 done
 [[ -x "$build_dir/IsaacVideoEditor.exe" ]] || fail "Missing executable: $build_dir/IsaacVideoEditor.exe"
+[[ -x "$build_dir/IsaacVideoEditorUpdater.exe" ]] || fail "Missing update installer: $build_dir/IsaacVideoEditorUpdater.exe"
 [[ -f "$prefix/bin/ffmpeg.exe" && -f "$prefix/bin/ffprobe.exe" ]] || fail "Install the UCRT64 FFmpeg package"
 repo=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 build_dir=$(CDPATH= cd -- "$build_dir" && pwd)
@@ -40,7 +41,7 @@ fi
 [[ -d "$mlt_plugins" && -d "$mlt_data/profiles" ]] || fail "Cannot find MLT 7 plugins and profile data via pkg-config"
 bash "$repo/packaging/copy-mlt-modules.sh" "$mlt_plugins" "$stage/lib/mlt-7/" dll
 cp -aL "$mlt_data/." "$stage/share/mlt-7/"
-cp "$build_dir/IsaacVideoEditor.exe" "$prefix/bin/ffmpeg.exe" "$prefix/bin/ffprobe.exe" "$stage/"
+cp "$build_dir/IsaacVideoEditor.exe" "$build_dir/IsaacVideoEditorUpdater.exe" "$prefix/bin/ffmpeg.exe" "$prefix/bin/ffprobe.exe" "$stage/"
 cp "$repo/LICENSE" "$stage/licenses/IsaacVideoEditor.txt"
 windeployqt --release --compiler-runtime --svg --include-plugins qoffscreen,qsvg --qmldir "$repo/qml" --dir "$stage" "$stage/IsaacVideoEditor.exe"
 for plugin in platforms/qoffscreen.dll imageformats/qsvg.dll; do
@@ -59,6 +60,16 @@ Prefix=.
 Plugins=.
 QmlImports=qml
 CONF
+touch "$stage/.isaac-portable"
+python3 - "$stage" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+manifest = root / 'isaac-package-files.txt'
+manifest.touch()
+manifest.write_text(''.join(str(path.relative_to(root)).replace('\\', '/') + '\n'
+                          for path in sorted(root.rglob('*')) if path.is_file()), encoding='utf-8')
+PY
 (
     cd "$work"
     zip -qr "$name.zip" IsaacVideoEditor

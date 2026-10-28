@@ -1,0 +1,105 @@
+{
+  "changed_files": [
+    "src/text_renderer.cpp",
+    "tests/text_overlay_test.cpp"
+  ],
+  "cache": {
+    "kind": "QTextLayout LRU, shaped glyph caching enabled",
+    "budget_estimated_bytes": 8388608,
+    "minimum_entry_cost_bytes": 65536,
+    "maximum_entries": 128,
+    "per_utf16_unit_cost_bytes": 256,
+    "oversized_entries": "rendered transiently, not retained",
+    "thread_safety": "mutex covers cache lookup, layout use and draw",
+    "bound_caveat": "Qt owns internal glyph/font allocations; budget conservatively bounds retained layout complexity, not exact heap/RSS"
+  },
+  "red": {
+    "test": "repeatedCaptionsReuseExpensiveTextWork",
+    "baseline_repeated_ns": 219638000,
+    "baseline_distinct_ns": 221371166,
+    "assertion": "median repeated < 0.8 * median distinct",
+    "observed_failure": true
+  },
+  "final_focused_tests": {
+    "ctest_targets": 5,
+    "passed": 5,
+    "failed": 0,
+    "total_qt_test_cases": 68,
+    "text_overlay_test_cases": 20,
+    "elapsed_seconds": 12.38,
+    "repeated_ns": 65406167,
+    "distinct_ns": 177685875,
+    "peak_resident_growth_bytes_after_2000_distinct_cues": 1867776,
+    "rss_test_allowance_bytes": 33554432
+  },
+  "export_comparison": {
+    "source": "/tmp/isaac-text-source.mp4",
+    "duration_seconds": 5,
+    "size": [
+      1920,
+      1080
+    ],
+    "fps": 60,
+    "video_frames": 300,
+    "audio_codec": "AAC",
+    "encoder": "libx264; hardware probe unavailable in current access",
+    "short_title": {
+      "baseline_ms": [
+        6093,
+        6173
+      ],
+      "cached_ms": [
+        6252,
+        6295
+      ],
+      "interpretation": "No demonstrated speedup; about 2% slower in these runs"
+    },
+    "dense_caption": {
+      "baseline_ms": [
+        6376,
+        5754
+      ],
+      "cached_ms": [
+        5763,
+        5192
+      ],
+      "paired_reduction_percent": [
+        9.6,
+        9.8
+      ],
+      "mean_reduction_percent": 9.7
+    }
+  },
+  "pixel_comparison": {
+    "method": "SHA-256 of all decoded raw video frames using ffmpeg -map 0:v:0 -f hash -hash sha256",
+    "short_title_baseline_and_cached": "19cc0b4678f97922b1aaf0545ff7c69ea577dfbb457f3bf1616b2e9285d7a8e6",
+    "dense_caption_baseline_and_cached": "98d5c56067e965637a5fb548c6b5d29d487fd40254f641d66d953577ac2a7456",
+    "functional_reference": "Frozen original uncached painter compared exactly against cached renderer for overlapping Unicode clean/box overlays, seven fade positions, 1920x1080/853x479/640x360 canvases, and individual attached text edits"
+  },
+  "limitations": [
+    "18-minute affected project/media unavailable",
+    "No normal hardware access in this agent run",
+    "Primary agent owns full-suite verification and worker integration",
+    "Global static cache shut down cleanly in test and eight export process runs"
+  ],
+  "worker_verification": {
+    "status": "Passed on macOS 15.7.3 arm64 with normal cache/hardware access",
+    "pre_review_full_suite": "27/27 passed",
+    "font_regression_red_glyph_overlap": 0.301101,
+    "fault_handling_tests": "startup failure, worker crash/editor survival, one software retry, source collision, malformed protocol, log cap, cancellation during startup/render/finalization, late cancellation, frozen-revision retry",
+    "font_regression_green_glyph_overlap": 0.921291,
+    "focused_worker_test_cases": 15,
+    "focused_worker_failed": 0,
+    "retry_after_edit_preserves_original_frames": 4800,
+    "review": "Independent review completed; bundled font and cancellation-boundary findings addressed with regressions. No critical or minor findings.",
+    "final_ctest_targets": 27,
+    "final_ctest_passed": 27,
+    "final_ctest_failed": 0,
+    "final_ctest_seconds": 131.96,
+    "application_smoke": "Passed real application worker export/replacement and missing-media rejection",
+    "unverified": [
+      "Original 18-minute project/media",
+      "Windows and Linux runtime execution"
+    ]
+  }
+}

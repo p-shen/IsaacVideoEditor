@@ -15,6 +15,7 @@
 #include <QMouseEvent>
 #include <QQuickWindow>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QtTest>
 
 #include "quick_timeline.h"
@@ -113,8 +114,18 @@ private slots:
     void rulerScrubEscRestoresStartingFrame();
     void trimPreviewRecomputesEveryBoundaryAndCancels();
     void trimCommitsOnceWithBoundsAndExactSourceComparison();
+    void frontTrimHandleWinsOverTransition_data();
+    void frontTrimHandleWinsOverTransition();
     void snappingAcquiresReleasesAndHonorsBounds();
     void reorderUsesExistingBoundariesAndPreservesGroupOrder();
+    void landingPreviewMatchesCommittedGeometry_data();
+    void landingPreviewMatchesCommittedGeometry();
+    void cancelClearsLandingPreview();
+    void reorderReleaseUsesFinalLandingPosition();
+    void landingLabelStaysVisible_data();
+    void landingLabelStaysVisible();
+    void durationChangingReorderKeepsLandingViewport_data();
+    void durationChangingReorderKeepsLandingViewport();
     void noOpReorderHasNoCommit();
     void activeTrimEdgeDoesNotSnapToItself();
     void dragEdgeScrollStopsOnCancel();
@@ -123,6 +134,8 @@ private slots:
     void wheelPansAndModifiedWheelZoomsWithoutSeeking();
     void audioLanesAndNativeFileDrops();
     void renderedFilmstripUsesSourceTrimAndRotation();
+    void appendWithAutoFitReusesCompletedFilmstrip();
+    void filmstripReuseStaysInsideTileInterval();
     void waveformsUseTrimAndMusicLoops();
     void waveformScaleClampsFiniteValues();
     void waveformScaleChangesOnlyPaintedAmplitude();
@@ -378,6 +391,43 @@ void QuickTimelineTest::trimCommitsOnceWithBoundsAndExactSourceComparison() {
     QCOMPARE(trimmed.last().at(1).toDouble(), 359 / 60.0);
 }
 
+void QuickTimelineTest::frontTrimHandleWinsOverTransition_data() {
+    QTest::addColumn<int>("clip");
+    QTest::addColumn<bool>("top");
+    QTest::addColumn<int>("fade");
+    QTest::newRow("first-top") << 0 << true << 0;
+    QTest::newRow("first-middle") << 0 << false << 0;
+    QTest::newRow("second-top") << 1 << true << 0;
+    QTest::newRow("second-middle") << 1 << false << 0;
+    QTest::newRow("dissolve-top") << 1 << true << 30;
+    QTest::newRow("dissolve-middle") << 1 << false << 30;
+}
+
+void QuickTimelineTest::frontTrimHandleWinsOverTransition() {
+    QFETCH(int, clip);
+    QFETCH(bool, top);
+    QFETCH(int, fade);
+    Scene s;
+    auto project = sequence();
+    project.crossfadeFrames = fade;
+    s.view->setProject(project, {8, 8, 8});
+    s.view->setSnapping(false);
+    const auto rect = s.view->clipRect(clip);
+    const QPoint from(qRound(rect.left() + 3), qRound(top ? rect.top() + 5 : rect.center().y()));
+    const QPoint to = from + QPoint(qRound(s.view->pixelsPerSecond()), 0);
+    QSignalSpy trimmed(s.view, &QuickTimeline::trimRequested);
+    QSignalSpy transitions(s.view, &QuickTimeline::transitionPreviewRequested);
+    beginDrag(s, from, to);
+    QVERIFY(s.view->trimPreview().value("active").toBool());
+    QCOMPARE(s.view->trimPreview().value("inTime").toDouble(), clip + 1.0);
+    QTest::mouseRelease(&s.window, Qt::LeftButton, Qt::NoModifier, to);
+    QCOMPARE(transitions.count(), 0);
+    QCOMPARE(trimmed.count(), 1);
+    QCOMPARE(trimmed.first()[0].toInt(), clip);
+    QCOMPARE(trimmed.first()[1].toDouble(), clip + 1.0);
+    QCOMPARE(trimmed.first()[2].toDouble(), clip + 4.0);
+}
+
 void QuickTimelineTest::snappingAcquiresReleasesAndHonorsBounds() {
     Scene s;
     Project p;
@@ -424,11 +474,228 @@ void QuickTimelineTest::reorderUsesExistingBoundariesAndPreservesGroupOrder() {
     const QPoint end(qRound(last.right()), qRound(last.center().y()));
     QSignalSpy moved(s.view, &QuickTimeline::groupMoveRequested);
     beginDrag(s, from, end);
-    QVERIFY(s.view->gestureText().contains("4"));
+    QVERIFY(s.view->gestureText().contains("Place at end"));
     QTest::mouseRelease(&s.window, Qt::LeftButton, Qt::NoModifier, end);
     QCOMPARE(moved.count(), 1);
     QCOMPARE(moved.first().at(0).toList(), QVariantList({0, 2}));
     QCOMPARE(moved.first().at(1).toInt(), 4);
+}
+
+void QuickTimelineTest::landingPreviewMatchesCommittedGeometry_data() {
+    QTest::addColumn<QVariantList>("selection");
+    QTest::addColumn<int>("boundary");
+    QTest::addColumn<QVector<int>>("order");
+    QTest::addColumn<int>("crossfade");
+    QTest::addColumn<QString>("placement");
+    QTest::newRow("forward") << QVariantList{0} << 3 << QVector<int>{1,2,0,3} << 0 << "Place before Clip 4";
+    QTest::newRow("backward") << QVariantList{2} << 0 << QVector<int>{2,0,1,3} << 0 << "Place before Clip 1";
+    QTest::newRow("end") << QVariantList{1} << 4 << QVector<int>{0,2,3,1} << 0 << "Place at end";
+    QTest::newRow("crossfade") << QVariantList{0} << 3 << QVector<int>{1,2,0,3} << 30 << "Place before Clip 4";
+    QTest::newRow("group") << QVariantList{0,2} << 4 << QVector<int>{1,3,0,2} << 30 << "Place at end";
+    QTest::newRow("no-op") << QVariantList{1} << 2 << QVector<int>{0,1,2,3} << 0 << "Place before Clip 3";
+}
+
+void QuickTimelineTest::landingPreviewMatchesCommittedGeometry() {
+    QFETCH(QVariantList, selection);
+    QFETCH(int, boundary);
+    QFETCH(QVector<int>, order);
+    QFETCH(int, crossfade);
+    QFETCH(QString, placement);
+    Scene s;
+    Project p;
+    p.clips = {{"first.mp4",0,2},{"second.mp4",0,5},{"third.mp4",0,3},{"fourth.mp4",0,4}};
+    p.crossfadeFrames = crossfade;
+    s.view->setProject(p);
+    s.view->setPosition(31);
+    s.view->setSelection(selection);
+    const QPoint from = s.view->clipRect(selection.first().toInt()).center().toPoint();
+    const int targetFrame = boundary == p.clips.size() ? p.durationFrames() : p.clipStartFrame(boundary);
+    const QPoint to = s.atFrame(targetFrame, from.y());
+    QSignalSpy moved(s.view, &QuickTimeline::groupMoveRequested);
+    beginDrag(s, from, to);
+    QVERIFY2(s.view->gestureText().startsWith(placement), qPrintable(s.view->gestureText()));
+    const int first = order.indexOf(selection.first().toInt());
+    const QRectF landing = s.view->clipRect(first).united(s.view->clipRect(first + selection.size() - 1));
+    QVector<QRectF> previewRects;
+    for (int i=0; i<order.size(); ++i) previewRects.append(s.view->clipRect(i));
+    const auto previewImage = render(s.view);
+    const QPoint marker(qRound(landing.left()), qRound(landing.top()-4));
+    QCOMPARE(previewImage.pixelColor(marker), QGuiApplication::palette().color(QPalette::Highlight));
+    QTest::mouseRelease(&s.window, Qt::LeftButton, Qt::NoModifier, to);
+    const bool changed = p.reorderClips(order);
+    QCOMPARE(moved.size(), changed ? 1 : 0);
+    if (changed) {
+        QCOMPARE(moved.first().at(0).toList(), selection);
+        QCOMPARE(moved.first().at(1).toInt(), boundary);
+    }
+    s.view->setProject(p);
+    QVariantList finalSelection;
+    for (const auto &index : selection) finalSelection.append(order.indexOf(index.toInt()));
+    s.view->setSelection(finalSelection);
+    for (int i=0; i<order.size(); ++i) QCOMPARE(s.view->clipRect(i), previewRects[i]);
+    const QPoint interior(qRound(landing.left()+20), qRound(landing.top()+36));
+    QVERIFY2(previewImage.pixelColor(interior) != render(s.view).pixelColor(interior),
+             "The landing area must have a visible translucent fill while dragging");
+    QVERIFY(s.view->gestureText().isEmpty());
+}
+
+void QuickTimelineTest::cancelClearsLandingPreview() {
+    Scene s;
+    s.view->setSelection({0});
+    const auto before = render(s.view);
+    const auto from = s.view->clipRect(0).center().toPoint();
+    const QPoint to(qRound(s.view->clipRect(2).right()), from.y());
+    QSignalSpy moved(s.view, &QuickTimeline::groupMoveRequested);
+    beginDrag(s, from, to);
+    QVERIFY(s.view->gestureText().startsWith("Place at end"));
+    QVERIFY(render(s.view) != before);
+    QTest::keyClick(&s.window, Qt::Key_Escape);
+    QCOMPARE(render(s.view), before);
+    QVERIFY(s.view->gestureText().isEmpty());
+    QTest::mouseRelease(&s.window, Qt::LeftButton, Qt::NoModifier, to);
+    QCOMPARE(moved.size(), 0);
+}
+
+void QuickTimelineTest::reorderReleaseUsesFinalLandingPosition() {
+    Scene s;
+    s.view->setSelection({0});
+    const auto from = s.view->clipRect(0).center().toPoint();
+    const QPoint intermediate(qRound(s.view->clipRect(2).left()), from.y());
+    const QPoint final(qRound(s.view->clipRect(2).right()), from.y());
+    QSignalSpy moved(s.view, &QuickTimeline::groupMoveRequested);
+    QString finalPlacement;
+    QRectF finalLanding;
+    connect(s.view, &QuickTimeline::gestureChanged, s.view, [&] {
+        if (s.view->gestureText().startsWith("Place at end")) {
+            finalPlacement = s.view->gestureText();
+            finalLanding = s.view->clipRect(2);
+        }
+    });
+    beginDrag(s, from, intermediate);
+    QVERIFY(s.view->gestureText().startsWith("Place before Clip 3"));
+    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(final), QPointF(s.window.mapToGlobal(final)),
+                        Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&s.window, &release);
+    QVERIFY(!finalPlacement.isEmpty());
+    QCOMPARE(moved.size(), 1);
+    QCOMPARE(moved.first().at(1).toInt(), 3);
+    auto p = sequence();
+    QVERIFY(p.reorderClips({1,2,0}));
+    s.view->setProject(p);
+    QCOMPARE(s.view->clipRect(2), finalLanding);
+}
+
+void QuickTimelineTest::landingLabelStaysVisible_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("fontSize");
+    QTest::newRow("light") << false << 13;
+    QTest::newRow("dark") << true << 13;
+    QTest::newRow("large-text") << false << 24;
+}
+
+void QuickTimelineTest::landingLabelStaysVisible() {
+    QFETCH(bool, dark);
+    QFETCH(int, fontSize);
+    const auto originalPalette = QGuiApplication::palette();
+    const auto restorePalette = qScopeGuard([&] { QGuiApplication::setPalette(originalPalette); });
+    auto palette = originalPalette;
+    palette.setColor(QPalette::Base, dark ? QColor("#202020") : QColor("#ffffff"));
+    palette.setColor(QPalette::Text, dark ? QColor("#eeeeee") : QColor("#202020"));
+    palette.setColor(QPalette::Highlight, QColor("#3876d4"));
+    QGuiApplication::setPalette(palette);
+    Scene s;
+    s.window.resize(760, 540);
+    s.view->setSize(QSizeF(760, 540));
+    auto font = s.view->font(); font.setPointSize(fontSize); s.view->setFont(font);
+    Project p;
+    p.clips = {{"first.mp4",0,2},{"second.mp4",0,5},{"short.mp4",0,.25},{"fourth.mp4",0,4}};
+    TextOverlay title; title.text="Title"; title.durationFrames=120; p.textOverlays={title};
+    s.view->setProject(p);
+    s.view->zoomAt(1.5, s.view->labelWidth()+12);
+    s.view->setContentOffset(s.view->maximumOffset());
+    s.view->setSelection({2});
+    const auto from = s.view->clipRect(2).center().toPoint();
+    const auto to = s.atFrame(p.durationFrames(), from.y());
+    beginDrag(s, from, to);
+    QVERIFY(s.view->gestureText().startsWith("Place at end"));
+    const auto landing = s.view->clipRect(3);
+    const auto image = render(s.view);
+    // A short landing at the right edge leaves no room for the label to its right.
+    QVERIFY(landing.left()+QFontMetrics(font).horizontalAdvance("Place at end") > s.view->width());
+    const int labelY = qRound(landing.bottom()+8-QFontMetrics(font).height()/2.0-13);
+    QCOMPARE(image.pixelColor(image.width()-12, labelY), palette.color(QPalette::Base));
+    const QString label = "Place at end";
+    const int textWidth = qCeil(QFontMetricsF(font).horizontalAdvance(label));
+    const int labelHeight = QFontMetrics(font).height()+10;
+    QImage expectedText(textWidth, labelHeight, QImage::Format_ARGB32_Premultiplied);
+    expectedText.fill(palette.color(QPalette::Base));
+    QPainter textPainter(&expectedText);
+    textPainter.setFont(font);
+    textPainter.setPen(palette.color(QPalette::Text));
+    textPainter.drawText(expectedText.rect(), Qt::AlignVCenter, label);
+    textPainter.end();
+    const int labelTop = qRound(landing.bottom()-QFontMetrics(font).height()-10);
+    // Compare the actual glyphs with the full phrase, excluding the bubble border.
+    QCOMPARE(image.copy(image.width()-16-textWidth, labelTop+2, textWidth, labelHeight-4),
+             expectedText.copy(0, 2, textWidth, labelHeight-4));
+    const auto captures = qEnvironmentVariable("ISAAC_LANDING_SCREENSHOTS");
+    if (!captures.isEmpty()) {
+        QDir().mkpath(captures);
+        QVERIFY(image.save(captures+"/landing-"+QTest::currentDataTag()+".png"));
+    }
+    QTest::keyClick(&s.window, Qt::Key_Escape);
+    QTest::mouseRelease(&s.window, Qt::LeftButton, Qt::NoModifier, to);
+}
+
+void QuickTimelineTest::durationChangingReorderKeepsLandingViewport_data() {
+    QTest::addColumn<int>("shortIndex");
+    QTest::addColumn<int>("boundary");
+    QTest::addColumn<QVector<int>>("order");
+    QTest::addColumn<bool>("zoomed");
+    QTest::newRow("fit-grows") << 0 << 2 << QVector<int>{1,0,2,3} << false;
+    QTest::newRow("fit-shrinks") << 1 << 0 << QVector<int>{1,0,2,3} << false;
+    QTest::newRow("scrolled-grows") << 3 << 1 << QVector<int>{0,3,1,2} << true;
+    QTest::newRow("scrolled-shrinks") << 1 << 4 << QVector<int>{0,2,3,1} << true;
+}
+
+void QuickTimelineTest::durationChangingReorderKeepsLandingViewport() {
+    QFETCH(int, shortIndex);
+    QFETCH(int, boundary);
+    QFETCH(QVector<int>, order);
+    QFETCH(bool, zoomed);
+    Scene s;
+    Project p;
+    p.clips = {{"first.mp4",0,5},{"second.mp4",0,5},{"third.mp4",0,5},{"fourth.mp4",0,5}};
+    p.clips[shortIndex].outSeconds=1;
+    p.crossfadeFrames=100;
+    s.view->setProject(p);
+    s.view->setSelection({shortIndex});
+    if (zoomed) {
+        s.view->zoomAt(1.25, s.view->labelWidth()+12);
+        s.view->setContentOffset(s.view->maximumOffset());
+    }
+    const auto from = s.view->clipRect(shortIndex).center().toPoint();
+    const auto to = s.atFrame(boundary==p.clips.size() ? p.durationFrames() : p.clipStartFrame(boundary), from.y());
+    QSignalSpy moved(s.view, &QuickTimeline::groupMoveRequested);
+    Project committed=p;
+    connect(s.view, &QuickTimeline::groupMoveRequested, s.view, [&] {
+        committed.reorderClips(order);
+        // The controller refreshes the timeline synchronously after committing.
+        s.view->setProject(committed);
+    });
+    beginDrag(s, from, to);
+    QVERIFY(s.view->gestureText().startsWith("Place"));
+    if (zoomed) s.view->setContentOffset(s.view->maximumOffset());
+    QVector<QRectF> previewRects;
+    for (int i=0; i<order.size(); ++i) previewRects.append(s.view->clipRect(i));
+    const double scale=s.view->pixelsPerSecond(), offset=s.view->contentOffset();
+    QTest::mouseRelease(&s.window, Qt::LeftButton, Qt::NoModifier, to);
+    QCOMPARE(moved.size(), 1);
+    QCOMPARE(moved.first().at(1).toInt(), boundary);
+    QVERIFY(committed.durationFrames()!=p.durationFrames());
+    QCOMPARE(s.view->pixelsPerSecond(), scale);
+    QCOMPARE(s.view->contentOffset(), offset);
+    for (int i=0; i<order.size(); ++i) QCOMPARE(s.view->clipRect(i), previewRects[i]);
 }
 
 void QuickTimelineTest::dragEdgeScrollStopsOnCancel() {
@@ -585,8 +852,48 @@ void QuickTimelineTest::renderedFilmstripUsesSourceTrimAndRotation() {
     r = s.view->clipRect(0);
     const double imageWidth = bandHeight * 16 / 9;
     const QRectF bounds(r.left() + 45 - imageWidth / 2, bandTop, imageWidth, bandHeight);
-    // First tile samples source 7/60 seconds: original 30 fps frame 3.
-    QTRY_COMPARE_WITH_TIMEOUT(barcode(render(s.view), bounds), 3, 15000);
+    // First tile samples source 7/60 seconds: nearest original 30 fps frame 4.
+    QTRY_COMPARE_WITH_TIMEOUT(barcode(render(s.view), bounds), 4, 15000);
+    s.view->setMediaCache(nullptr);
+}
+
+void QuickTimelineTest::appendWithAutoFitReusesCompletedFilmstrip() {
+    Scene s;MediaCache cache;
+    const auto path=QFINDTESTDATA("fixtures/seek.mp4");
+    Project project;project.clips={{path,0,2}};
+    s.view->setProject(project);s.view->setMediaCache(&cache);
+    // This request finishes behind all filmstrip tiles, and covers the narrow final tile after fitting.
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path,119./60).isNull(),10000);
+    auto *process=cache.findChild<QProcess*>();QVERIFY(process);
+    QTRY_COMPARE(process->state(),QProcess::NotRunning);
+    int oldSourceRequests=0;
+    connect(process,&QProcess::started,this,[&]{if(process->arguments().contains(path))++oldSourceRequests;});
+    const double scale=s.view->pixelsPerSecond();
+    project.clips.append({"offline-append.mp4",0,2});
+    s.view->setProject(project);
+    QVERIFY(s.view->pixelsPerSecond()<scale);
+    QTest::qWait(150);
+    QCOMPARE(oldSourceRequests,0);
+    s.view->setMediaCache(nullptr);
+}
+
+void QuickTimelineTest::filmstripReuseStaysInsideTileInterval() {
+    Scene s;MediaCache cache;
+    const auto path=QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
+    cache.thumbnail(path,14./60);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path,14./60).isNull(),10000);
+    Project project;project.clips={{path,0,2}};
+    s.view->setWidth(s.view->labelWidth()+36+2344);s.view->setProject(project);
+    s.view->setPlaying(true);s.view->setMediaCache(&cache);
+    const auto r=s.view->clipRect(0);
+    const double top=r.top()+QFontMetrics(s.view->font()).height()+6;
+    const double height=r.height()-(top-r.top())-18;
+    const double width=height*16/9;
+    const QRectF tile(r.left()+225-width/2,top,width,height);
+    // Tile 2 covers [9.215, 13.823) source frames; cached frame 14 is outside it.
+    QVERIFY(barcode(render(s.view),tile)!=7);
+    s.view->setPlaying(false);
+    QTRY_COMPARE_WITH_TIMEOUT(barcode(render(s.view),tile),6,10000);
     s.view->setMediaCache(nullptr);
 }
 

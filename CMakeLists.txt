@@ -1,17 +1,19 @@
 cmake_minimum_required(VERSION 3.21)
-project(IsaacVideoEditor VERSION 0.1 LANGUAGES CXX)
+project(IsaacVideoEditor VERSION 0.2 LANGUAGES CXX)
+set(ISAAC_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Application version (GitHub release tag)")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Quick Qml QuickControls2)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Quick Qml QuickControls2 Network)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MLT REQUIRED IMPORTED_TARGET mlt++-7)
 
 add_library(isaac_core
     src/runtime_paths.cpp
+    src/export_job.cpp
     src/project.cpp
     src/captions.cpp
     src/text_style.cpp
@@ -36,13 +38,32 @@ add_library(isaac_ui
     src/quick_timeline.cpp
     src/media_cache.cpp
     src/qml_registration.cpp
+    src/update_checker.cpp
+    src/update_package.cpp
 )
 target_include_directories(isaac_ui PUBLIC src)
-target_link_libraries(isaac_ui PUBLIC isaac_core Qt6::Quick Qt6::Qml Qt6::QuickControls2 Qt6::Widgets)
+target_link_libraries(isaac_ui PUBLIC isaac_core Qt6::Quick Qt6::Qml Qt6::QuickControls2 Qt6::Widgets Qt6::Network)
 
 add_executable(IsaacVideoEditor src/main.cpp src/theme.cpp assets/assets.qrc qml/qml.qrc)
+add_executable(IsaacVideoEditorUpdater src/update_installer.cpp)
+if(WIN32)
+    set_target_properties(IsaacVideoEditorUpdater PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_libraries(IsaacVideoEditorUpdater PRIVATE shell32)
+    if(MINGW)
+        target_link_options(IsaacVideoEditorUpdater PRIVATE -municode -static -static-libgcc -static-libstdc++)
+    endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(IsaacVideoEditorUpdater PRIVATE -static-libgcc -static-libstdc++)
+endif()
+add_dependencies(IsaacVideoEditor IsaacVideoEditorUpdater)
 target_link_libraries(IsaacVideoEditor PRIVATE isaac_ui)
+target_compile_definitions(IsaacVideoEditor PRIVATE ISAAC_APP_VERSION="${ISAAC_APP_VERSION}")
 if(APPLE)
+    set_property(TARGET IsaacVideoEditor APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:IsaacVideoEditorUpdater>")
+    add_custom_command(TARGET IsaacVideoEditor POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:IsaacVideoEditorUpdater>"
+            "$<TARGET_BUNDLE_DIR:IsaacVideoEditor>/Contents/MacOS/IsaacVideoEditorUpdater"
+        VERBATIM)
     target_sources(IsaacVideoEditor PRIVATE assets/IsaacVideoEditor.icns)
     set_source_files_properties(assets/IsaacVideoEditor.icns PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)
@@ -61,6 +82,16 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
 find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME update_installer_test COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/update_installer_test.py" "$<TARGET_FILE:IsaacVideoEditorUpdater>")
+endif()
+
+add_executable(update_checker_test tests/update_checker_test.cpp src/update_checker.cpp src/update_package.cpp)
+target_include_directories(update_checker_test PRIVATE src)
+target_link_libraries(update_checker_test PRIVATE Qt6::Network Qt6::Test)
+add_test(NAME update_checker_test COMMAND update_checker_test)
 
 add_executable(runtime_paths_test tests/runtime_paths_test.cpp src/runtime_paths.cpp)
 target_include_directories(runtime_paths_test PRIVATE src)
@@ -125,14 +156,28 @@ foreach(test_name caption_controller_test caption_test source_browser_test edito
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
 endforeach()
 target_sources(qml_shell_test PRIVATE src/theme.cpp assets/assets.qrc)
+add_executable(inspector_ux_test tests/inspector_ux_test.cpp src/theme.cpp assets/assets.qrc)
+target_link_libraries(inspector_ux_test PRIVATE isaac_ui Qt6::Test)
+add_test(NAME inspector_ux_test COMMAND inspector_ux_test)
+set_tests_properties(inspector_ux_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
 target_sources(recovery_export_test PRIVATE assets/assets.qrc)
+foreach(export_test recovery_export_test editor_controller_test caption_controller_test)
+    add_dependencies(${export_test} IsaacVideoEditor)
+endforeach()
+add_executable(export_job_test tests/export_job_test.cpp assets/assets.qrc)
+add_dependencies(export_job_test IsaacVideoEditor)
+target_link_libraries(export_job_test PRIVATE isaac_core Qt6::Test)
+add_test(NAME export_job_test COMMAND export_job_test)
+set_tests_properties(export_job_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
 
 add_executable(interactions_integration_test tests/interactions_integration_test.cpp)
 target_link_libraries(interactions_integration_test PRIVATE isaac_ui Qt6::Test)
+add_dependencies(interactions_integration_test IsaacVideoEditor)
 add_test(NAME interactions_integration_test COMMAND interactions_integration_test)
 set_tests_properties(interactions_integration_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
 
 add_executable(audio_transition_test tests/audio_transition_test.cpp)
+add_dependencies(audio_transition_test IsaacVideoEditor)
 target_link_libraries(audio_transition_test PRIVATE isaac_ui Qt6::Test)
 add_test(NAME audio_transition_test COMMAND audio_transition_test)
 set_tests_properties(audio_transition_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")

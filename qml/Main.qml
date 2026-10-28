@@ -47,7 +47,8 @@ ApplicationWindow {
     palette.disabled.buttonText: disabledColors.buttonText
     property color accent: palette.highlight
     color: palette.window
-    onClosing: close => { close.accepted = editor.requestClose() }
+    property bool updateCloseApproved: false
+    onClosing: close => { close.accepted = updateCloseApproved || (updater.state !== UpdateChecker.Installing && editor.requestClose()) }
     Component.onCompleted: editor.attachTimeline(timeline)
     function revealFocusedControl() {
         var target = window.activeFocusItem
@@ -115,6 +116,11 @@ ApplicationWindow {
     Shortcut { sequence: "="; enabled: !window.textEditing; onActivated: timeline.zoomIn() }
     Shortcut { sequence: "-"; enabled: !window.textEditing; onActivated: timeline.zoomOut() }
     Shortcut { sequence: "Shift+Z"; enabled: !window.textEditing; onActivated: timeline.fitToWidth() }
+    UpdateChecker { id: updater; objectName: "updateChecker" }
+    Connections {
+        target: updater
+        function onRestartRequested() { window.updateCloseApproved = true; window.close() }
+    }
     menuBar: MenuBar {
         Menu { title: "File"; MenuItem { action: newAction }
             MenuItem { action: openAction }
@@ -152,6 +158,95 @@ ApplicationWindow {
             MenuItem { text: "Rotate right 90°"; enabled: editor.selectedClip >= 0; onTriggered: editor.rotate(90) }
             MenuItem { text: "Turn 180°"; enabled: editor.selectedClip >= 0; onTriggered: editor.rotate(180) }
         }
+        Menu {
+            title: "Help"
+            MenuItem {
+                objectName: "checkForUpdatesMenuItem"
+                text: "Check for Updates…"
+                onTriggered: { softwareUpdateDialog.open(); if (!updater.busy && !updater.readyToInstall) updater.check() }
+            }
+        }
+    }
+    Dialog {
+        id: softwareUpdateDialog
+        objectName: "softwareUpdateDialog"
+        title: updater.updateAvailable ? "Update available" : "Software update"
+        anchors.centerIn: parent
+        width: Math.min(window.width - 40, 520)
+        height: Math.min(implicitHeight, window.height - 40)
+        modal: true
+        focus: true
+        closePolicy: updater.state === UpdateChecker.Installing ? Popup.NoAutoClose : Popup.CloseOnEscape
+        standardButtons: updater.state === UpdateChecker.Installing ? Dialog.NoButton : Dialog.Close
+        contentItem: ScrollView {
+            id: updateContent
+            objectName: "updateContentScroll"
+            implicitHeight: updateColumn.implicitHeight
+            contentWidth: availableWidth
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ColumnLayout {
+            id: updateColumn
+            width: updateContent.availableWidth
+            spacing: UI.Theme.gutter
+            Label {
+                text: "Installed version: " + updater.currentVersion
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                BusyIndicator { running: updater.busy && updater.state !== UpdateChecker.Downloading; visible: running; Accessible.name: "Preparing update" }
+                Label {
+                    objectName: "softwareUpdateMessage"
+                    text: updater.message
+                    textFormat: Text.PlainText
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                }
+            }
+            ProgressBar {
+                objectName: "updateDownloadProgress"
+                Layout.fillWidth: true
+                visible: updater.state === UpdateChecker.Downloading
+                value: updater.progress
+                Accessible.name: "Update download"
+            }
+            Label {
+                visible: updater.state === UpdateChecker.Downloading
+                text: Math.round(updater.progress * 100) + "% downloaded"
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: UI.Theme.gutter
+                UI.Button {
+                    objectName: "downloadUpdateButton"
+                    text: "Download Update"
+                    visible: updater.canDownload
+                    highlighted: true
+                    onClicked: updater.download()
+                }
+                UI.Button {
+                    objectName: "cancelUpdateDownloadButton"
+                    text: "Cancel Download"
+                    visible: updater.state === UpdateChecker.Downloading
+                    onClicked: updater.cancelDownload()
+                }
+                UI.Button {
+                    objectName: "installUpdateButton"
+                    text: "Restart and Install"
+                    visible: updater.readyToInstall
+                    highlighted: true
+                    onClicked: if (editor.requestClose()) updater.install()
+                }
+                UI.Button {
+                    text: "Check again"
+                    visible: !updater.busy && !updater.readyToInstall
+                    onClicked: updater.check()
+                }
+            }
+        }
+        }
     }
     Component {
         id: splitHandle
@@ -184,6 +279,7 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent
                 Label { text: editor.notice; wrapMode: Text.Wrap; Layout.fillWidth: true; Accessible.role: Accessible.AlertMessage }
+                UI.Button { objectName: "noticeUndoButton"; text: "Undo"; visible: editor.noticeCanUndo; enabled: editor.canUndo; helpText: undoAction.text; onClicked: editor.undo() }
                 UI.Button { text: "Dismiss notice"; iconName: "close"; iconOnly: true; flat: true; onClicked: editor.dismissNotice() }
             }
         }
@@ -221,7 +317,7 @@ ApplicationWindow {
                             UI.TabButton { text: "Clips" }
                         }
                         StackLayout {
-                            Layout.fillWidth: true; Layout.fillHeight: true
+                            Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0
                             currentIndex: window.browserSection
                             UI.MediaBrowser { id: mediaBrowser; controller: editor }
                             ColumnLayout {
@@ -288,7 +384,7 @@ ApplicationWindow {
                                     }
                                 }
                             }
-                            Loader { id: compactInspector; active: window.compact; sourceComponent: inspectorComponent; onLoaded: item.section = window.inspectorSection }
+                            Loader { id: compactInspector; Layout.minimumHeight: 0; active: window.compact; sourceComponent: inspectorComponent; onLoaded: item.section = window.inspectorSection }
                         }
                     }
                 }
@@ -417,7 +513,7 @@ ApplicationWindow {
                             width: Math.min(timelineTools.width,captionTool.implicitWidth+transformTool.implicitWidth+4)
                             spacing: 4
                             UI.Button { id: captionTool; text: "Captions"; iconName: "add-text"; flat: true; onClicked: window.focusInspector(5) }
-                            UI.Button { id: transformTool; text: "Canvas / transform"; iconName: "fit"; flat: true; onClicked: { window.focusInspector(4); editor.transformMode = true } }
+                            UI.Button { id: transformTool; text: "Transform"; iconName: "fit"; flat: true; onClicked: { window.focusInspector(4); editor.transformMode = true } }
                         }
                         Flow {
                             width: Math.min(timelineTools.width,snapButton.width + skimCheck.width + zoomTools.width + waveformScale.width + fitButton.width + spacing * 4)
@@ -438,7 +534,7 @@ ApplicationWindow {
                                 ToolTip.visible: hovered || visualFocus
                                 ToolTip.text: "Waveform display height; audio volume stays the same"
                             }
-                            UI.Button { id: fitButton; text: "Fit"; iconName: "fit"; flat: true; Accessible.name: "Fit entire edit in timeline"; helpText: "Fit entire edit in timeline (Shift+Z)"; onClicked: timeline.fitToWidth() }
+                            UI.Button { id: fitButton; objectName: "fitTimelineButton"; text: "Fit"; iconName: "fit"; flat: true; Accessible.name: "Fit entire edit in timeline"; helpText: "Fit entire edit in timeline (Shift+Z)"; onClicked: timeline.fitToWidth() }
                         }
                         Label { text: editor.clips.length + (editor.clips.length === 1 ? " clip · " : " clips · ") + (editor.duration / 60).toFixed(1) + " s"; padding: 8; color: UI.Theme.muted }
                     }
@@ -562,6 +658,7 @@ ApplicationWindow {
                 UI.Button { text: "Cancel export"; visible: editor.exporting; enabled: editor.exportState !== "Canceling"; onClicked: editor.cancelExport() }
                 UI.Button { text: "Retry same revision"; visible: editor.exportState === "Failed" || editor.exportState === "Canceled"; onClicked: editor.retryExport() }
                 UI.Button { text: "Reveal in folder"; visible: editor.exportState === "Completed"; onClicked: editor.revealExport() }
+                UI.Button { text: "Open export log"; visible: editor.exportLog !== ""; onClicked: editor.openExportLog() }
                 UI.Button { text: "Open video"; visible: editor.exportState === "Completed"; onClicked: editor.openExport() }
                 UI.Button { text: editor.exporting ? "Keep editing" : "Close"; onClicked: exportPanel.close() }
             }

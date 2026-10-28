@@ -28,7 +28,7 @@ To resume a saved edit, choose **Open Project** in the empty viewer or **File �
 
 Select a clip in **Clips** or the timeline. Drag its edges to trim, or enter **Start** and **Length** in the **Clip** inspector. For example, Start 5 s and Length 10 s keeps seconds 5–15.
 
-Move the playhead inside a clip and click **Split**. Drag pieces to reorder them, or use the clip browser’s arrows. **Fades** sets transitions between clips; splitting inside an active crossfade is disabled. Use the **Clip** menu to rotate footage, or **Canvas / transform** to reframe it.
+Move the playhead inside a clip and click **Split**. Drag pieces to reorder them, or use the clip browser’s arrows. **Transitions** sets transitions between clips; splitting inside an active crossfade is disabled. Use the **Clip** menu to rotate footage, or **Transform** to reframe it.
 
 Click the ruler to seek and press **Space** to preview.
 
@@ -38,15 +38,15 @@ Click the ruler to seek and press **Space** to preview.
 
 Click **Add text** at the playhead. Edit its words and style in **Text**, drag it in the viewer to position it, and move or resize its timeline block to set timing.
 
-Open **Captions** to import SRT files or enter captions manually. Export them as SRT or enable **Burn captions into video**. Automatic transcription is not built in.
+Open **Captions** to import SRT files or enter captions manually. Open **Files and all captions** to export SRT or choose **Burn captions into video**. Automatic transcription is not built in.
 
 ![Text inspector, a title positioned in the viewer, and its timing block on the timeline](docs/screenshots/add-titles.jpg)
 
 ### 4. Mix audio
 
-In **Audio**, use **Choose file** under Narration or Background music. **Browse Mixkit** opens a music library; **Recent** lists audio downloads. Narration is imported from a file; microphone recording is not built in.
+In **Audio**, choose **Selected clip audio**, **Narration**, or **Music**. Empty sources offer **Add narration** or **Add music**; **File…** contains file replacement, recent downloads and Mixkit. Narration is imported from a file; microphone recording is not built in.
 
-Choose a source under **Mix and fades** to adjust gain, mute, fades, and music looping. You can also drag gain lines and fade handles on the timeline. **Solo preview** affects playback only.
+Volume, mute and music looping stay visible for the selected source. Open **Timing and fades** for fade lengths and narration placement, or **Preview and levels** for solo and metering. You can also drag gain lines and fade handles on the timeline. **Solo preview** affects playback only.
 
 ![Audio inspector with Music selected, gain controls, and the music waveform below](docs/screenshots/mix-audio.jpg)
 

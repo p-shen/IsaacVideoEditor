@@ -130,6 +130,22 @@ private slots:
         QVERIFY(old.open(QIODevice::ReadOnly));QCOMPARE(old.readAll(),QByteArray("KEEP"));
         QCOMPARE(QDir(dir.path()).entryList({".isaac-*"},QDir::Files|QDir::Hidden).size(),0);
     }
+    void exportWorkerCrashPreservesDestinationAndEditor() {
+        QTemporaryDir dir;EditorController editor;QStringList clips;for(int i=0;i<40;++i)clips.append(fixture());QVERIFY(editor.importFiles(clips));
+        const auto output=dir.filePath("existing.mp4");QFile existing(output);QVERIFY(existing.open(QIODevice::WriteOnly));existing.write("KEEP");existing.close();
+        QVERIFY(editor.exportTo(output));
+        QTRY_VERIFY_WITH_TIMEOUT(editor.findChild<QProcess*>("exportWorker")!=nullptr,5000);
+        auto *worker=editor.findChild<QProcess*>("exportWorker");
+        QTRY_VERIFY_WITH_TIMEOUT(worker->state()==QProcess::Running,5000);
+        worker->kill();
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.exporting(),10000);
+        QCOMPARE(editor.exportState(),QString("Failed"));
+        QVERIFY(existing.open(QIODevice::ReadOnly));QCOMPARE(existing.readAll(),QByteArray("KEEP"));
+        QCOMPARE(QDir(dir.path()).entryList({".isaac-export-*"},QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
+        existing.close();editor.addText();QCOMPARE(editor.project().textOverlays.size(),1);QVERIFY(editor.canUndo());
+        QVERIFY(editor.trimClip(0,0,1));QVERIFY(editor.retryExport());QTRY_VERIFY_WITH_TIMEOUT(!editor.exporting(),20000);QCOMPARE(editor.exportState(),QString("Completed"));
+        QProcess inspect;inspect.start("ffprobe",{"-v","error","-select_streams","v:0","-show_entries","stream=nb_frames","-of","csv=p=0",output});QVERIFY(inspect.waitForFinished(5000));QCOMPARE(inspect.exitCode(),0);QCOMPARE(inspect.readAllStandardOutput().trimmed(),QByteArray("4800"));
+    }
     void exportUsesFrozenRevisionWhileEditingContinues() {
         QTemporaryDir dir;EditorController editor;QVERIFY(editor.importFiles({fixture()}));
         const auto output=dir.filePath("frozen.mp4");QVERIFY(editor.exportTo(output));

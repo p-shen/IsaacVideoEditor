@@ -1,4 +1,5 @@
 #include "media_cache.h"
+#include "mlt_engine.h"
 
 #include <QElapsedTimer>
 #include <QFile>
@@ -46,6 +47,12 @@ private slots:
     void thumbnailsRespectOrientation_data();
     void thumbnailsRespectOrientation();
     void exactFrameKeys();
+    void filmstripReusesNearbyCompletedFrames();
+    void filmstripReusesNearbyPendingFrames();
+    void trimComparisonMatchesTimeline_data();
+    void trimComparisonMatchesTimeline();
+    void trimComparisonKeepsFinalSourceFrame_data();
+    void trimComparisonKeepsFinalSourceFrame();
     void anamorphicSourceIsBounded();
     void retryWhileRunningKeepsReplacement();
     void waveformDistinguishesSilenceAndMissingAudio();
@@ -105,9 +112,61 @@ void MediaCacheTest::exactFrameKeys() {
     QVERIFY(cache.thumbnail(path, 4.0 / 60).isNull());
     QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, 4.0 / 60).isNull(), 10000);
     QCOMPARE(frameId(cache.thumbnail(path, 0)), 0);
-    QCOMPARE(frameId(cache.thumbnail(path, 1.0 / 60)), 0);
+    QCOMPARE(frameId(cache.thumbnail(path, 1.0 / 60)), 1);
     QCOMPARE(frameId(cache.thumbnail(path, 2.0 / 60)), 1);
     QCOMPARE(frameId(cache.thumbnail(path, 4.0 / 60)), 2);
+}
+
+void MediaCacheTest::trimComparisonMatchesTimeline_data() {
+    QTest::addColumn<QString>("fixture");
+    QTest::addColumn<int>("finalNativeFrame");
+    QTest::newRow("30fps") << QString("fixtures/proxy-timing-30.mp4") << 11;
+    QTest::newRow("29.97fps") << QString("fixtures/proxy-timing-2997.mp4") << 299;
+    QTest::newRow("59.94fps") << QString("fixtures/proxy-timing-5994.mp4") << 599;
+}
+
+void MediaCacheTest::trimComparisonMatchesTimeline() {
+    QFETCH(QString, fixture);
+    const QString path = QTest::qFindTestData(qPrintable(fixture), __FILE__, __LINE__);
+    Media::initializeMlt();
+    Mlt::Profile profile;
+    Media::configureOutputProfile(profile, 128, 72);
+    MediaCache cache;
+    const int frames = qRound(Media::mediaDurationSeconds(path) * 60);
+    // MLT can round a cold seek at EOF past the last native frame; test that preview separately.
+    for (int start : {0, 1, 2, 3, 7, 17, 21, 22, 30, 59, 60, 63, 121, 299, 300, 599}) {
+        if (start >= frames - 1) continue;
+        Project p;
+        p.clips = {{path, start / 60.0, frames / 60.0}};
+        QString error;
+        auto timeline = Media::buildTimeline(p, profile, &error);
+        QVERIFY2(timeline, qPrintable(error));
+        std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());
+        auto format = mlt_image_rgba;
+        int width = 128, height = 72;
+        uint8_t *pixels = nullptr;
+        QCOMPARE(mlt_frame_get_image(frame->get_frame(), &pixels, &format, &width, &height, 0), 0);
+        QVERIFY(pixels);
+        const QImage expected(pixels, width, height, width * 4, QImage::Format_RGBA8888);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, start / 60.0, 0, true).isNull(), 3000);
+        const int actual = frameId(cache.thumbnail(path, start / 60.0));
+        QVERIFY2(actual == frameId(expected), qPrintable(QString("At source frame %1: trim comparison %2, timeline %3")
+            .arg(start).arg(actual).arg(frameId(expected))));
+    }
+}
+
+void MediaCacheTest::trimComparisonKeepsFinalSourceFrame_data() {
+    trimComparisonMatchesTimeline_data();
+}
+
+void MediaCacheTest::trimComparisonKeepsFinalSourceFrame() {
+    QFETCH(QString, fixture);
+    QFETCH(int, finalNativeFrame);
+    const QString path = QTest::qFindTestData(qPrintable(fixture), __FILE__, __LINE__);
+    const int finalFrame = qRound(Media::mediaDurationSeconds(path) * 60) - 1;
+    MediaCache cache;
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, finalFrame / 60.0, 0, true).isNull(), 3000);
+    QCOMPARE(frameId(cache.thumbnail(path, finalFrame / 60.0)), finalNativeFrame);
 }
 
 void MediaCacheTest::anamorphicSourceIsBounded() {
@@ -362,4 +421,28 @@ void MediaCacheTest::queueIsBounded() {
 }
 
 QTEST_GUILESS_MAIN(MediaCacheTest)
+void MediaCacheTest::filmstripReusesNearbyCompletedFrames() {
+    const auto path=QFINDTESTDATA("fixtures/seek.mp4");
+    MediaCache cache;cache.thumbnail(path,.5);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path,.5).isNull(),10000);
+    const auto original=cache.thumbnail(path,.5);
+    cache.setInteractive(true);
+    QCOMPARE(cache.thumbnail(path,.6,0,false,12),original);
+    QVERIFY(cache.thumbnail(path,.6).isNull());
+    QVERIFY(cache.thumbnail(path,.8,0,false,1).isNull());
+    QVERIFY(cache.thumbnail(path,.6,90,false,12).isNull());
+}
+
+void MediaCacheTest::filmstripReusesNearbyPendingFrames() {
+    const auto path=QFINDTESTDATA("fixtures/seek.mp4");
+    MediaCache cache;cache.setInteractive(true);
+    cache.beginViewport();cache.thumbnail(path,.5);cache.endViewport();
+    cache.beginViewport();cache.thumbnail(path,.6,0,false,12);cache.endViewport();
+    cache.setInteractive(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path,.6,0,false,12).isNull(),10000);
+    cache.setInteractive(true);
+    QVERIFY(!cache.thumbnail(path,.5).isNull());
+    QVERIFY(cache.thumbnail(path,.6).isNull());
+}
+
 #include "media_cache_test.moc"

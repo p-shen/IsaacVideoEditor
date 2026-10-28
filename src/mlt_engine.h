@@ -40,14 +40,17 @@ std::optional<VideoSize> projectOutputSize(const Project &project, QString *erro
 void configureOutputProfile(Mlt::Profile &profile, int width = 1920, int height = 1080);
 
 // The caller must keep profile alive while using the returned timeline.
+// A stopped previous timeline with the same profile can lend unchanged video decoders.
 std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
                                             Mlt::Profile &profile,
-                                            QString *error = nullptr, bool allowOffline = false);
+                                            QString *error = nullptr, bool allowOffline = false,
+                                            Mlt::Tractor *previousTimeline = nullptr);
 
 // The progress callback receives a percentage. Export runs on the calling thread.
 bool exportMp4(const Project &project, const QString &path,
                std::function<void(int)> progress = {}, QString *error = nullptr,
-               std::function<bool()> canceled = {});
+               std::function<bool()> canceled = {},
+               std::function<void(const QString &)> diagnostic = {}, bool softwareOnly = false);
 
 // Used when adding a clip or audio file to display its available duration.
 double mediaDurationSeconds(const QString &path, QString *error = nullptr);

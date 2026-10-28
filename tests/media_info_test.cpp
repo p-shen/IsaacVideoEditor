@@ -1,4 +1,5 @@
 #include "mlt_engine.h"
+#include "visual_renderer.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -27,6 +28,8 @@ private slots:
     void prefersHardwareWhenAvailable();
     void failedExportPreservesDestination();
     void successfulExportReplacesDestination();
+    void playbackBuildReusesUnchangedSources();
+    void playbackReuseInvalidatesChangedSettings();
 private:
     bool makeMedia(const QString &path, const QString &source, const QStringList &encoding);
     QString file(const QString &name) const { return directory_.filePath(name); }
@@ -286,6 +289,79 @@ void MediaInfoTest::failedExportPreservesDestination() {
     QVERIFY(destination.open(QIODevice::ReadOnly));
     QCOMPARE(destination.readAll(), QByteArray("keep existing video"));
     QVERIFY(QDir(directory_.path()).entryList({".isaac-*.mp4"}, QDir::Files | QDir::Hidden).isEmpty());
+}
+
+namespace {
+mlt_producer clipSource(Mlt::Tractor &timeline, int row) {
+    std::unique_ptr<Mlt::Producer> track(timeline.track(0));
+    Mlt::Playlist video(*track);
+    std::unique_ptr<Mlt::Producer> cut(video.get_clip(row));
+    return cut->get_parent();
+}
+int centerRed(Mlt::Tractor &timeline, int position) {
+    timeline.seek(position);
+    std::unique_ptr<Mlt::Frame> frame(timeline.get_frame());
+    int width=160,height=90;auto format=mlt_image_rgba;uint8_t *pixels=nullptr;
+    if(!frame||mlt_frame_get_image(frame->get_frame(),&pixels,&format,&width,&height,0)||!pixels)return -1;
+    return pixels[(height/2*width+width/2)*4];
+}
+}
+
+void MediaInfoTest::playbackBuildReusesUnchangedSources() {
+    Mlt::Profile profile;Media::configureOutputProfile(profile,160,90);
+    Project project;project.clips={{file("hd.mp4"),0,.1},{file("2k.mp4"),0,.1}};
+    QString error;auto original=Media::buildTimeline(project,profile,&error);QVERIFY2(original,qPrintable(error));
+    const auto first=clipSource(*original,0),second=clipSource(*original,1);
+    project.clips.append({file("portrait.mp4"),0,.1});
+    auto appended=Media::buildTimeline(project,profile,&error,false,original.get());QVERIFY2(appended,qPrintable(error));
+    QCOMPARE(clipSource(*appended,0),first);QCOMPARE(clipSource(*appended,1),second);
+    const auto third=clipSource(*appended,2);
+    // A ready proxy replaces one source while the other decoders remain warm.
+    project.clips[1].path=file("4k.mp4");
+    auto replaced=Media::buildTimeline(project,profile,&error,false,appended.get());QVERIFY2(replaced,qPrintable(error));
+    QCOMPARE(clipSource(*replaced,0),first);QVERIFY(clipSource(*replaced,1)!=second);QCOMPARE(clipSource(*replaced,2),third);
+    original.reset();appended.reset();
+    QVERIFY(centerRed(*replaced,0)>180);
+    project.clips[0].transform.opacity.value=0;
+    VisualRendering::update(*replaced,project);
+    QVERIFY(centerRed(*replaced,1)<20);
+}
+
+void MediaInfoTest::playbackReuseInvalidatesChangedSettings() {
+    const auto path=file("reuse.mp4");QVERIFY(QFile::copy(file("hd.mp4"),path));
+    Mlt::Profile profile;Media::configureOutputProfile(profile,160,90);
+    Project project;project.clips={{path,0,.1}};
+    auto original=Media::buildTimeline(project,profile);QVERIFY(original);
+    const auto source=clipSource(*original,0);
+    for(int change=0;change<4;++change){
+        auto edited=project;
+        if(change==0)edited.clips[0].audio.gainDb=-6;
+        if(change==1)edited.clips[0].rotationDegrees=90;
+        if(change==2)edited.clips[0].inSeconds=1./60;
+        if(change==3)Media::configureOutputProfile(profile,320,180);
+        auto next=Media::buildTimeline(edited,profile,nullptr,false,original.get());QVERIFY(next);
+        QVERIFY(clipSource(*next,0)!=source);
+    }
+    Media::configureOutputProfile(profile,160,90);
+    QFile changed(path);QVERIFY(changed.open(QIODevice::Append));QCOMPARE(changed.write("padding"),7);changed.close();
+    auto replaced=Media::buildTimeline(project,profile,nullptr,false,original.get());QVERIFY(replaced);
+    QVERIFY(clipSource(*replaced,0)!=source);
+    QVERIFY(QFile::remove(path));
+    auto offline=Media::buildTimeline(project,profile,nullptr,true,original.get());QVERIFY(offline);
+    QVERIFY(clipSource(*offline,0)!=source);
+
+#ifdef Q_OS_UNIX
+    const auto link=file("linked.mp4"),other=file("same-metadata.mp4");
+    QVERIFY(QFile::copy(file("hd.mp4"),other));
+    QFile copy(other);QVERIFY(copy.open(QIODevice::ReadWrite));
+    QVERIFY(copy.setFileTime(QFileInfo(file("hd.mp4")).lastModified(),QFileDevice::FileModificationTime));copy.close();
+    QVERIFY(QFile::link(file("hd.mp4"),link));
+    project.clips[0].path=link;
+    auto linked=Media::buildTimeline(project,profile);QVERIFY(linked);
+    QVERIFY(QFile::remove(link));QVERIFY(QFile::link(other,link));
+    auto relinked=Media::buildTimeline(project,profile,nullptr,false,linked.get());QVERIFY(relinked);
+    QVERIFY(clipSource(*relinked,0)!=clipSource(*linked,0));
+#endif
 }
 
 QTEST_GUILESS_MAIN(MediaInfoTest)

@@ -3,6 +3,15 @@
 #include "text_renderer.h"
 #include "preview_item.h"
 #include <QQuickWindow>
+#include <QElapsedTimer>
+#include <QFontDatabase>
+#include <QTextLayout>
+#include <algorithm>
+#ifdef Q_OS_MACOS
+#include <mach/mach.h>
+#elif defined(Q_OS_LINUX)
+#include <unistd.h>
+#endif
 #include <QImage>
 #include <QPainter>
 #include <QDir>
@@ -14,6 +23,58 @@
 #include <QtTest>
 
 namespace {
+// Frozen uncached painter: changing the cache must preserve its per-primitive blending.
+struct ReferenceLayout {
+    QTextLayout text;
+    QRectF rect;
+    qreal padding=0,scale=1;
+    ReferenceLayout(const TextOverlay &t,const QSize &canvas) {
+        if(canvas.isEmpty() || t.text.isEmpty())return;
+        scale=canvas.height()/1080.0;
+        const QSizeF logicalCanvas(canvas.width()/scale,1080);
+        QFont font(t.fontFamily);font.setPixelSize(t.fontSize);font.setBold(t.bold);
+        QString content=t.text;content.replace('\n',QChar::LineSeparator);
+        text.setText(content);text.setFont(font);
+        QTextOption option;option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        option.setAlignment(t.style=="box"?Qt::AlignLeft:Qt::AlignHCenter);text.setTextOption(option);
+        text.beginLayout();qreal y=0,w=0;
+        while(true){auto line=text.createLine();if(!line.isValid())break;line.setLineWidth(logicalCanvas.width()*.86);line.setPosition({0,y});y+=line.height();w=std::max(w,line.naturalTextWidth());}
+        text.endLayout();
+        text.beginLayout();y=0;
+        while(true){auto line=text.createLine();if(!line.isValid())break;line.setLineWidth(w+1);line.setPosition({0,y});y+=line.height();}
+        text.endLayout();
+        padding=18;
+        const QSizeF size(std::min(logicalCanvas.width(),w+1+2*padding),std::min(logicalCanvas.height(),y+2*padding));
+        const qreal x=std::clamp(t.x*logicalCanvas.width()-size.width()/2,0.0,logicalCanvas.width()-size.width());
+        const qreal top=std::clamp(t.y*logicalCanvas.height()-size.height()/2,0.0,logicalCanvas.height()-size.height());
+        rect={QPointF(x,top),size};
+    }
+};
+void referencePaint(QImage &image,const QVector<TextOverlay> &texts,int frame) {
+    QPainter p(&image);p.setRenderHint(QPainter::Antialiasing);p.setRenderHint(QPainter::TextAntialiasing);
+    for(const auto &t:texts){
+        if(frame<t.startFrame || frame>=t.startFrame+t.durationFrames || t.text.isEmpty())continue;
+        ReferenceLayout layout(t,image.size());if(layout.rect.isEmpty())continue;
+        p.save();p.scale(layout.scale,layout.scale);p.setClipRect(layout.rect);
+        if(t.fade&&t.durationFrames>2){const double ramp=std::min(27.0,(t.durationFrames-1)/2.0);p.setOpacity(std::clamp(std::min(frame-t.startFrame,t.startFrame+t.durationFrames-1-frame)/ramp,0.0,1.0));}
+        if(t.style=="box"){p.setPen(Qt::NoPen);p.setBrush(QColor(10,24,23,220));p.drawRoundedRect(layout.rect,8,8);}
+        const QPointF origin=layout.rect.topLeft()+QPointF(layout.padding,layout.padding);
+        if(t.shadow){p.setPen(QColor(0,0,0,210));layout.text.draw(&p,origin+QPointF(2,3));}
+        p.setPen(QColor(t.color));layout.text.draw(&p,origin);p.restore();
+    }
+}
+
+qint64 residentBytes() {
+#ifdef Q_OS_MACOS
+    mach_task_basic_info_data_t info{};mach_msg_type_number_t count=MACH_TASK_BASIC_INFO_COUNT;
+    return task_info(mach_task_self(),MACH_TASK_BASIC_INFO,reinterpret_cast<task_info_t>(&info),&count)==KERN_SUCCESS?qint64(info.resident_size):0;
+#elif defined(Q_OS_LINUX)
+    QFile file("/proc/self/statm");if(!file.open(QIODevice::ReadOnly))return 0;
+    return file.readAll().split(' ').value(1).toLongLong()*sysconf(_SC_PAGESIZE);
+#else
+    return 0;
+#endif
+}
 QJsonObject titleJson() {
     return {{"text", "Adventure Park Day\nwith Isaac and Daddy"}, {"fontFamily", "Arial"},
             {"style", "clean"}, {"color", "#ffffff"}, {"fontSize", 84},
@@ -42,6 +103,67 @@ int magentaPixels(const QImage &image){int count=0;for(int y=0;y<image.height();
 class TextOverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void repeatedCaptionsReuseExpensiveTextWork() {
+        TextOverlay text;text.text=QString::fromUtf8("Adventure مرحبا 字幕 and Isaac ").repeated(55);text.fontSize=40;text.shadow=false;
+        QImage image(640,360,QImage::Format_RGBA8888);
+        const auto measure=[&](bool distinct,int sample){
+            QElapsedTimer timer;timer.start();
+            for(int i=0;i<80;++i){auto cue=text;if(distinct)cue.text+=QString::number(sample*80+i);image.fill(Qt::black);TextRendering::paint(image,{cue},30);}
+            return timer.nsecsElapsed();
+        };
+        image.fill(Qt::black);TextRendering::paint(image,{text},30);
+        QVector<qint64> repeated,distinct;
+        for(int sample=0;sample<3;++sample){distinct<<measure(true,sample);repeated<<measure(false,sample);}
+        std::sort(repeated.begin(),repeated.end());std::sort(distinct.begin(),distinct.end());
+        qInfo()<<"Caption render ns, repeated:"<<repeated[1]<<"distinct:"<<distinct[1];
+        QVERIFY2(repeated[1]<distinct[1]*.8,"Repeated captions must avoid most repeated text layout work");
+    }
+    void textCacheRetainsOnlyBoundedRecentCaptions() {
+        TextOverlay text;text.text=QString::fromUtf8("Adventure مرحبا 字幕 ").repeated(90);text.fontSize=40;text.shadow=false;
+        QImage image(320,180,QImage::Format_RGBA8888);image.fill(Qt::black);TextRendering::paint(image,{text},30);
+        const qint64 before=residentBytes();if(!before)QSKIP("Resident memory measurement unavailable");
+        qint64 growth=0;
+        for(int i=0;i<2000;++i){auto cue=text;cue.text+=QString::number(i);image.fill(Qt::black);TextRendering::paint(image,{cue},30);if(i%100==0)growth=std::max(growth,residentBytes()-before);}
+        growth=std::max(growth,residentBytes()-before);qInfo()<<"Distinct caption peak resident memory growth:"<<growth;
+        QVERIFY2(growth<32*1024*1024,"Rendering many cues must not retain every text layout");
+        QImage expected(image.size(),image.format());expected.fill(Qt::black);image.fill(Qt::black);
+        referencePaint(expected,{text},30);TextRendering::paint(image,{text},30);QCOMPARE(image,expected);
+    }
+    void cachedTextMatchesUncachedPainterAcrossFadesAndCanvases() {
+        for(const QSize size:{QSize(1920,1080),QSize(853,479),QSize(640,360)}){
+            for(const QString style:{QString("clean"),QString("box")}){
+                TextOverlay first;first.text=QString::fromUtf8("Adventure مرحبا 字幕\nwith Isaac and Daddy");first.style=style;first.fontSize=45;first.x=.04;first.y=.95;first.fade=true;first.durationFrames=60;
+                TextOverlay second=first;second.color="#ff40a0";second.x=.12;second.y=.9;second.fontFamily=QFontDatabase::families().first();second.bold=false;
+                for(int frame:{0,1,13,27,40,58,59}){
+                    QImage actual(size,QImage::Format_RGBA8888);actual.fill(QColor(35,70,110));auto expected=actual;
+                    referencePaint(expected,{first,second},frame);TextRendering::paint(actual,{first,second},frame);
+                    QCOMPARE(actual,expected);
+                }
+            }
+        }
+    }
+    void attachedTextUpdatesInvalidateCachedAppearance() {
+        auto project=footage();TextOverlay text;text.text="Cache before edit";text.shadow=false;project.textOverlays={text};
+        Mlt::Profile profile;Media::configureOutputProfile(profile,640,360);auto timeline=Media::buildTimeline(project,profile);QVERIFY(timeline);
+        const QImage background=frameAt(footage(),10);QVERIFY(!background.isNull());
+        const auto check=[&]{
+            TextRendering::update(*timeline,{text});timeline->seek(10);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());
+            auto format=mlt_image_rgba;uint8_t *pixels=nullptr;int width=640,height=360;
+            if(!frame||mlt_frame_get_image(frame->get_frame(),&pixels,&format,&width,&height,0)||!pixels)return QImage{};
+            return QImage(pixels,width,height,width*4,QImage::Format_RGBA8888).copy();
+        };
+        const auto verify=[&]{auto expected=background;referencePaint(expected,{text},10);QCOMPARE(check(),expected);};
+        verify();
+        text.text=QString::fromUtf8("Edited مرحبا\nnew line");verify();
+        text.fontFamily=QFontDatabase::families().first();verify();
+        text.fontSize=58;verify();text.bold=false;verify();text.style="box";verify();
+        text.color="#ff00ff";verify();text.shadow=true;verify();text.x=.25;verify();text.y=.7;verify();
+        text.fade=true;verify();
+        text.startFrame=11;QCOMPARE(check(),background);
+        TextRendering::update(*timeline,{});timeline->seek(10);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());
+        auto format=mlt_image_rgba;uint8_t *pixels=nullptr;int width=640,height=360;QVERIFY(frame);QCOMPARE(mlt_frame_get_image(frame->get_frame(),&pixels,&format,&width,&height,0),0);
+        QCOMPARE(QImage(pixels,width,height,width*4,QImage::Format_RGBA8888),background);
+    }
     void textSurvivesProjectRoundTrip() {
         QTemporaryDir dir; QString error;
         const auto path=writeProject(dir,titleJson());

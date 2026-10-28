@@ -178,6 +178,8 @@ private:
     int snappedSourceFrame(double raw, int minimum, int maximum, Qt::KeyboardModifiers);
     int boundaryAt(double x) const;
     QVector<int> reorderedIndices(int boundary) const;
+    QRectF reorderLandingRect() const;
+    QString reorderPlacementLabel() const;
     void updateTrimComparison();
     void finishGesture(bool canceled);
     void endSkim();

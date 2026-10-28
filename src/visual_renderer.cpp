@@ -70,6 +70,15 @@ mlt_frame overlayProcess(mlt_filter filter,mlt_frame frame) {
 }
 }
 bool attachTransform(Mlt::Producer &source,Mlt::Tractor &timeline,const Clip &clip,const QSizeF &size) {
+    for(int i=0;i<source.filter_count();++i){
+        std::unique_ptr<Mlt::Filter> existing(source.filter(i));
+        auto *state=static_cast<TransformState*>(existing->get_data(transformKey));
+        if(state){
+            *state={clip.id,clip.transform,size,clip.sourceFrameOffset};
+            liveState(timeline).clips.push_back(state);
+            return true;
+        }
+    }
     auto filter=mlt_filter_new();if(!filter)return false;
     auto *state=new TransformState{clip.id,clip.transform,size,clip.sourceFrameOffset};
     mlt_properties_set_data(MLT_FILTER_PROPERTIES(filter),transformKey,state,0,[](void *p){delete static_cast<TransformState*>(p);},nullptr);filter->process=transformProcess;

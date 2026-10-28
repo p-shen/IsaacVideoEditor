@@ -23,6 +23,7 @@ QMAKE=$(command -v "$qmake")
 QMAKE="$(CDPATH= cd -- "$(dirname -- "$QMAKE")" && pwd)/$(basename -- "$QMAKE")"
 qt_prefix=$("$QMAKE" -query QT_INSTALL_PREFIX)
 [[ -x "$build_dir/IsaacVideoEditor" ]] || fail "Missing executable: $build_dir/IsaacVideoEditor"
+[[ -x "$build_dir/IsaacVideoEditorUpdater" ]] || fail "Missing update installer: $build_dir/IsaacVideoEditorUpdater"
 repo=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 build_dir=$(CDPATH= cd -- "$build_dir" && pwd)
 mkdir -p -- "$output_dir"
@@ -52,7 +53,7 @@ fi
 [[ -d "$mlt_plugins" && -d "$mlt_data/profiles" ]] || fail "Cannot find MLT 7 plugins and profile data via pkg-config"
 bash "$repo/packaging/copy-mlt-modules.sh" "$mlt_plugins" "$appdir/usr/lib/mlt-7/" so
 cp -aL "$mlt_data/." "$appdir/usr/share/mlt-7/"
-cp "$build_dir/IsaacVideoEditor" "$appdir/usr/bin/"
+cp "$build_dir/IsaacVideoEditor" "$build_dir/IsaacVideoEditorUpdater" "$appdir/usr/bin/"
 cp "$(command -v ffmpeg)" "$(command -v ffprobe)" "$appdir/usr/bin/"
 cp "$repo/LICENSE" "$appdir/usr/share/licenses/IsaacVideoEditor/LICENSE"
 cat > "$appdir/usr/share/applications/IsaacVideoEditor.desktop" <<'DESKTOP'

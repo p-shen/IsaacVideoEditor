@@ -10,11 +10,10 @@
 #include <QTimer>
 #include <mlt++/Mlt.h>
 #include <memory>
-#include <atomic>
 class Preview;
 class PreviewCache;
 class MediaCache;
-class QThread;
+class ExportJob;
 class RecoveryStore;
 
 class EditorController final : public QObject {
@@ -62,7 +61,9 @@ class EditorController final : public QObject {
     Q_PROPERTY(QString format READ format NOTIFY stateChanged)
     Q_PROPERTY(QString previewStatus READ previewStatus NOTIFY stateChanged)
     Q_PROPERTY(QString notice READ notice NOTIFY stateChanged)
+    Q_PROPERTY(bool noticeCanUndo READ noticeCanUndo NOTIFY stateChanged)
     Q_PROPERTY(bool exporting READ exporting NOTIFY stateChanged)
+    Q_PROPERTY(QString exportLog READ exportLog NOTIFY stateChanged)
     Q_PROPERTY(int exportProgress READ exportProgress NOTIFY stateChanged)
     Q_PROPERTY(QString voicePath READ voicePath NOTIFY projectChanged)
     Q_PROPERTY(QString musicPath READ musicPath NOTIFY projectChanged)
@@ -207,7 +208,9 @@ public:
     QString format() const { return format_; }
     QString previewStatus() const { return previewStatus_; }
     QString notice() const { return notice_; }
-    bool exporting() const { return !exportThread_.isNull(); }
+    bool noticeCanUndo() const { return noticeCanUndo_ && undo_.canUndo(); }
+    bool exporting() const { return !exportJob_.isNull(); }
+    QString exportLog() const { return exportLog_; }
     int exportProgress() const { return exportProgress_; }
     QString voicePath() const { return project_.voicePath; }
     QString musicPath() const { return project_.musicPath; }
@@ -235,6 +238,7 @@ public:
     Q_INVOKABLE bool retryExport();
     Q_INVOKABLE void revealExport();
     Q_INVOKABLE void openExport();
+    Q_INVOKABLE void openExportLog();
     QVariantMap currentAudio() const;
     int audioLane() const {return audioLane_;}
     int soloLane() const {return soloLane_;}
@@ -350,6 +354,7 @@ private:
     int primary_=-1,anchor_=-1,position_=0;
     QUndoStack undo_;
     QString path_,format_="Auto resolution · 60 fps",previewStatus_="No media",notice_;
+    bool noticeCanUndo_=false;
     mutable QHash<QString,double> durations_;
     int selectedSource_=-1;
     bool sourceMode_=false,sourceViewDirty_=false,sourceScrubbing_=false;
@@ -365,11 +370,10 @@ private:
     QHash<int,QString> proxyPaths_;
     QHash<int,QString> overlayProxyPaths_;
     int proxyPriorityStart_=-1,proxyPriorityEnd_=-1;
-    QPointer<QThread> exportThread_;
+    QPointer<ExportJob> exportJob_;
     RecoveryStore *recovery_=nullptr;
     QVariantList recoveryCandidates_,relinkProposals_;
-    QString exportState_,exportDestination_,exportRevision_,exportDetails_;
-    std::shared_ptr<std::atomic_bool> exportCanceled_;
+    QString exportState_,exportDestination_,exportRevision_,exportDetails_,exportLog_;
     std::optional<Project> retryExportProject_;
     bool startExport(const Project &,const QString &,const QString &revision);
     QImage frame_;

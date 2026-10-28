@@ -12,6 +12,19 @@ class EditorControllerTest : public QObject {
     Q_OBJECT
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
 private slots:
+    void appendingPreservesPreviewWithMusicAndTransitions() {
+        EditorController e;const auto source=QFINDTESTDATA("fixtures/rotation.mp4");
+        QVERIFY(e.importFiles({source,source}));e.setCrossfade(.25);e.setMusicPath(source);e.seek(15);
+        const auto original=e.frame();QVERIFY(!original.isNull());const int before=e.duration();
+        QVERIFY(e.importFiles({source}));QCOMPARE(e.project().clips.size(),3);QVERIFY(e.duration()>before);
+        QCOMPARE(e.position(),15);QCOMPARE(e.frame(),original);
+        e.selectClip(0);e.beginVisualGesture();e.setTransform({{"opacity",0.}});
+        QTRY_VERIFY_WITH_TIMEOUT(e.frame().pixelColor(e.frame().width()/2,e.frame().height()/2).red()<20,3000);
+        e.endVisualGesture(true);QCOMPARE(e.frame(),original);
+        e.undo();QCOMPARE(e.duration(),before);QCOMPARE(e.frame(),original);
+        e.redo();QCOMPARE(e.project().clips.size(),3);QCOMPARE(e.frame(),original);
+        e.seek(e.duration()-1);QVERIFY(!e.frame().isNull());
+    }
     void preparesVideoOverlayPreviewWithoutChangingSavedMedia() {
         QTemporaryDir dir;
         const auto source=dir.filePath("overlay.mp4");

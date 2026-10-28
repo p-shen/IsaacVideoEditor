@@ -1,0 +1,351 @@
+{
+  "date": "2026-10-27",
+  "scope": "Investigation of slow exports and whole-app crashes reported for an 18-minute 1080p project. No production export changes.",
+  "environment": {
+    "os": "macOS 15.7.3",
+    "architecture": "arm64",
+    "logical_cpus": 8,
+    "qt": "6.12.0",
+    "mlt": "7.42.0",
+    "ffmpeg": "9.0.2",
+    "build": "Release",
+    "encoder": "VideoToolbox unless software=true",
+    "output": "1920x1080 at 60 fps H.264 and AAC"
+  },
+  "method": "Temporary instrumented copies of the real exporter and compositors, linked against isaac_core. Synthetic moving H.264 source and AAC tone. Single runs; timings are directional and are not estimates for the user project.",
+  "ten_second_cases": [
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 349110272,
+      "ms": 4629,
+      "ok": true,
+      "software": false,
+      "case": "plain-baseline",
+      "settings": {},
+      "wall": 4.939
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 265224192,
+      "ms": 4363,
+      "ok": true,
+      "software": false,
+      "case": "plain-buffer4",
+      "settings": {
+        "BENCH_BUFFER": "4"
+      },
+      "wall": 4.418
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 274972672,
+      "ms": 5019,
+      "ok": true,
+      "software": false,
+      "case": "plain-parallel4",
+      "settings": {
+        "BENCH_REAL_TIME": "-4",
+        "BENCH_BUFFER": "8"
+      },
+      "wall": 5.077
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 671481856,
+      "ms": 7557,
+      "ok": true,
+      "software": true,
+      "case": "plain-software",
+      "settings": {
+        "BENCH_FORCE_SW": "1"
+      },
+      "wall": 7.62
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 261898240,
+      "ms": 18532,
+      "ok": true,
+      "software": false,
+      "case": "text-baseline",
+      "settings": {},
+      "wall": 18.61
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 263110656,
+      "ms": 14193,
+      "ok": true,
+      "software": false,
+      "case": "text-buffer4",
+      "settings": {
+        "BENCH_BUFFER": "4"
+      },
+      "wall": 14.285
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 377733120,
+      "ms": 14777,
+      "ok": true,
+      "software": false,
+      "case": "text-parallel4",
+      "settings": {
+        "BENCH_REAL_TIME": "-4",
+        "BENCH_BUFFER": "8"
+      },
+      "wall": 14.869
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 591429632,
+      "ms": 24800,
+      "ok": true,
+      "software": true,
+      "case": "text-software",
+      "settings": {
+        "BENCH_FORCE_SW": "1"
+      },
+      "wall": 24.855
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 414384128,
+      "ms": 22993,
+      "ok": true,
+      "software": false,
+      "case": "text-transform-overlay-baseline",
+      "settings": {},
+      "wall": 23.19
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 415465472,
+      "ms": 33894,
+      "ok": true,
+      "software": false,
+      "case": "text-transform-overlay-buffer4",
+      "settings": {
+        "BENCH_BUFFER": "4"
+      },
+      "wall": 33.965
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 537853952,
+      "ms": 49621,
+      "ok": true,
+      "software": false,
+      "case": "text-transform-overlay-parallel4",
+      "settings": {
+        "BENCH_REAL_TIME": "-4",
+        "BENCH_BUFFER": "8"
+      },
+      "wall": 49.714
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 600,
+      "max_rss_bytes": 739999744,
+      "ms": 27598,
+      "ok": true,
+      "software": true,
+      "case": "text-transform-overlay-software",
+      "settings": {
+        "BENCH_FORCE_SW": "1"
+      },
+      "wall": 28.074
+    }
+  ],
+  "five_second_cases": [
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 271220736,
+      "ms": 12483,
+      "ok": true,
+      "software": false,
+      "case": "text-repeat",
+      "settings": {},
+      "wall": 12.557
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 257425408,
+      "ms": 6384,
+      "ok": true,
+      "software": false,
+      "case": "text-rgba-only",
+      "settings": {
+        "BENCH_TEXT_NOOP": "1"
+      },
+      "wall": 6.418
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 274366464,
+      "ms": 8629,
+      "ok": true,
+      "software": false,
+      "case": "text-cache",
+      "settings": {
+        "BENCH_TEXT_CACHE": "1"
+      },
+      "wall": 8.682
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 254820352,
+      "ms": 7802,
+      "ok": true,
+      "software": false,
+      "case": "inactive-before",
+      "settings": {},
+      "wall": 7.853
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 351666176,
+      "ms": 2812,
+      "ok": true,
+      "software": false,
+      "case": "inactive-after",
+      "settings": {
+        "BENCH_SKIP_INACTIVE": "1"
+      },
+      "wall": 2.867
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 254115840,
+      "ms": 6392,
+      "ok": true,
+      "software": false,
+      "case": "hidden-before",
+      "settings": {},
+      "wall": 6.438
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 350699520,
+      "ms": 3299,
+      "ok": true,
+      "software": false,
+      "case": "hidden-after",
+      "settings": {
+        "BENCH_SKIP_INACTIVE": "1"
+      },
+      "wall": 3.339
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 403324928,
+      "ms": 5720,
+      "ok": true,
+      "software": false,
+      "case": "brief-before",
+      "settings": {},
+      "wall": 5.755
+    },
+    {
+      "cpus": 8,
+      "error": "",
+      "frames": 300,
+      "max_rss_bytes": 455901184,
+      "ms": 3365,
+      "ok": true,
+      "software": false,
+      "case": "brief-after",
+      "settings": {
+        "BENCH_SKIP_INACTIVE": "1"
+      },
+      "wall": 3.396
+    }
+  ],
+  "one_minute_combined": {
+    "cpus": 8,
+    "error": "",
+    "frames": 3600,
+    "max_rss_bytes": 452280320,
+    "ms": 19856,
+    "ok": true,
+    "software": false,
+    "settings": {
+      "BENCH_SKIP_INACTIVE": "1",
+      "BENCH_BUFFER": "4"
+    },
+    "mode": "brief-overlay",
+    "verified_video_frames": 3600,
+    "peak_memory_stable_from_percent": 10
+  },
+  "still_preparation": [
+    {
+      "overlays": 0,
+      "max_rss_bytes": 68141056
+    },
+    {
+      "overlays": 1,
+      "max_rss_bytes": 94945280
+    },
+    {
+      "overlays": 12,
+      "max_rss_bytes": 346505216
+    }
+  ],
+  "still_preparation_method": "Separate processes build one 10-second 1080p timeline with zero, one, or twelve one-frame overlays referencing the same 3840x2160 PNG. Peak RSS is measured before requesting the first output frame.",
+  "cached_title_sample_ssim": {
+    "frame_seconds": 2,
+    "crop": "1700x230 at 110,380",
+    "all": 0.999777,
+    "scope": "One encoded frame, not complete visual regression coverage"
+  },
+  "verification": {
+    "isolated_exports_succeeded": 22,
+    "existing_focused_export_tests": "6 passed, 0 failed, 0 skipped including init/cleanup; hardware selection and software fallback exercised with normal hardware access",
+    "other_existing_suites": "recovery_export_test, text_overlay_test, composition_test passed",
+    "initial_four_suite_run": "media_info_test had a failure in playbackBuildReusesUnchangedSources while unrelated preview-reuse edits were occurring in the shared checkout; no claim of a passing full suite",
+    "independent_ffprobe_checks": {
+      "exports": 22,
+      "result": "All output files contain the expected H.264 video frame count, 1080p canvas, and 60 fps. All 21 short cases contain AAC audio; one-minute video also checked."
+    }
+  },
+  "crash_evidence": "Five local IsaacVideoEditor crash reports were Qt platform startup aborts from package tests. No report reproduces or identifies the reported export crash."
+}

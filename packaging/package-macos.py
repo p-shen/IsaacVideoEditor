@@ -297,6 +297,8 @@ def package(build_dir, output_dir, version):
     source_app = build_dir.resolve() / 'IsaacVideoEditor.app'
     if not (source_app / 'Contents/MacOS/IsaacVideoEditor').is_file():
         raise PackageError(f'Missing built app: {source_app}')
+    if not (source_app / 'Contents/MacOS/IsaacVideoEditorUpdater').is_file():
+        raise PackageError(f'Missing update installer in built app: {source_app}')
     for tool in ('brew', 'otool', 'install_name_tool', 'codesign', 'ditto', 'xattr'):
         if not shutil.which(tool):
             raise PackageError(f'Required packaging tool not found: {tool}')

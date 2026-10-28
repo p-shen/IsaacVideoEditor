@@ -12,7 +12,7 @@ Drag from Media onto the main timeline to insert its marked range. A drop into M
 
 ## Mix audio directly
 
-Drag a narration block to change its absolute start. Drag a gain line vertically to change dB, or the square end handles horizontally to set fades. The **Audio** inspector exposes the same values, single-step buttons, saved mute, and controls for selected-clip audio, narration and music. Moving narration changes placement; it does not trim its source.
+Drag a narration block to change its absolute start. Drag a gain line vertically to change dB, or the square end handles horizontally to set fades. The **Audio** inspector shows one source at a time, with volume, mute and music looping visible. **Timing and fades** contains fades and narration start in seconds; integrated steppers and Up/Down adjust one frame. **Preview and levels** contains solo and metering. File replacement, recent downloads and Mixkit live in **File…**. Moving narration changes placement; it does not trim its source.
 
 **Loop to end** explicitly controls music repetition. With looping disabled, music stops at its source end. Music fades apply at the outside of the playable block, rather than at each repetition. Waveform display scaling remains independent of gain.
 
@@ -32,7 +32,9 @@ Offline sources keep their timing and edits. Narration and music retain their la
 
 **File → Export…** captures the current revision and opens a nonmodal panel showing destination, dimensions, 60 fps, H.264/AAC, original-media use and revision. **Keep editing** hides the panel while the job continues. Changes made afterward do not affect that export.
 
-**Cancel export** stops the worker and removes its temporary output. Completed output replaces the destination atomically; canceling preserves an existing destination. A failed or canceled job offers **Retry same revision**. A completed job offers **Reveal in folder** and **Open video**. Original clip, audio, overlay and library files are protected from destination collisions.
+Export runs in a separate process. If the renderer crashes, the editor stays open and preserves the existing output. A hardware encoder crash is retried once with software. The panel shows the active encoder; **Open export log** opens diagnostics with progress, encoder selection, fallback reasons, and native errors.
+
+**Cancel export** stops the worker and removes its temporary output. Completed output replaces the destination atomically; canceling preserves an existing destination. A failed or canceled job offers **Retry same revision**. A completed job offers **Reveal in folder** and **Open video**. Original clip, audio, overlay and library files are protected from destination collisions. Text layouts are reused across frames in a bounded cache, preserving fonts, positions, fades, and live edits.
 
 ## Visual overlays paused
 
@@ -42,7 +44,7 @@ This removal passed all 23 automated test suites. Native Mac checks covered the 
 
 ## Reframe and animate
 
-**Transform / Canvas** opens the Visual inspector. Canvas presets include legacy **Auto resolution**, landscape, portrait, square and custom even dimensions. Changing a canvas starts a proposed preview with **Apply** and **Cancel**. Starting another editing action cancels an unapplied visual preview before creating the new command. Each instance retains its explicit **Fit**, **Fill** or **Crop** choice.
+**Transform** opens the Transform inspector. Framing, scale, rotation and preview manipulation are primary controls; **Position and opacity** and **Animation** reveal specialist controls. **Project canvas** separates project-wide format from selected-clip edits. Canvas presets include legacy **Auto resolution**, landscape, portrait, square and custom even dimensions, shown only for **Custom**. Changing a canvas starts a proposed preview with **Apply** and **Cancel**. Starting another editing action cancels an unapplied visual preview before creating the new command. Each instance retains its explicit **Fit**, **Fill** or **Crop** choice.
 
 In transform mode, drag the viewer picture to reposition it, corners to scale uniformly, or the rotation handle to turn it. Center guides and exact values accompany the gesture. Numeric position, scale, rotation, opacity and crop edges provide alternatives. Escape cancels, and Reset clears the transform and its animation. Existing quarter-turn rotations remain compatible.
 
@@ -50,9 +52,9 @@ The first keyframe diamond enables animation for that property. Editing it at an
 
 ## Set a transition at one cut
 
-Select a cut marker or choose a cut in **Fades**. Set **Hard cut** or **Dissolve**, enter a frame duration, use the single-frame buttons, drag a marker edge, or drop the dissolve preset onto a cut. The timeline previews effective overlap and total duration. **Remove** restores a hard cut.
+Select a cut marker or choose a cut in **Transitions**. Set **Cut** or **Dissolve** and enter seconds. **Precision and presets** retains frame values and the draggable dissolve preset; select a cut before clicking or dragging the preset. Steppers and Up/Down adjust one frame. The timeline previews effective overlap and total duration. Choosing **Cut** removes the dissolve.
 
-Neighboring cuts retain their settings. Available media bounds local overlap and reserves a playable frame in short clips; the inspector reports clamping. The first individual edit preserves the existing effective overlaps at other cuts. The global crossfade control remains a convenience; split-created hard cuts remain hard cuts.
+Neighboring cuts retain their settings. Available media bounds local overlap and reserves a playable frame in short clips; the inspector shows the requested and actual duration when a fade is shortened. **All existing cuts** stages a crossfade duration without changing the edit. **Apply to all existing cuts** replaces transitions at every current boundary, including appended clips, split points, and cuts previously set to **Cut**. Short clips shorten only nearby crossfades; distant fades keep the requested duration. The result notice reports the duration, number of cuts, and how many fades were shortened, with **Undo** to restore the previous transitions. Set the duration to zero and apply it to remove crossfades. Cuts added or split afterward keep their own settings; apply again to include them. Older projects retain their timing until you explicitly apply the new behavior.
 
 ## Files and verification
 

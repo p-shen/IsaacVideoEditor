@@ -20,6 +20,7 @@ concurrency:
 
 env:
   VERSION: ${{ github.event.release.tag_name || format('validation-{0}', github.run_number) }}
+  APP_VERSION: ${{ github.event.release.tag_name || '0.2' }}
   QT_QPA_PLATFORM: offscreen
   QT_QUICK_BACKEND: software
   SDL_AUDIODRIVER: dummy
@@ -39,6 +40,7 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DISAAC_APP_VERSION="$APP_VERSION" \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           cmake --build build-release --target IsaacVideoEditor --parallel 3
       - name: Package
@@ -103,7 +105,8 @@ jobs:
           done
       - name: Build
         run: |
-          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DISAAC_APP_VERSION="$APP_VERSION"
           cmake --build build-release --target IsaacVideoEditor --parallel 4
       - name: Package
         env:
@@ -157,6 +160,7 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DISAAC_APP_VERSION="$APP_VERSION" \
             -DBUILD_TESTING=OFF -DCMAKE_PREFIX_PATH=/ucrt64
           cmake --build build-release --target IsaacVideoEditor --parallel 4
       - name: Package

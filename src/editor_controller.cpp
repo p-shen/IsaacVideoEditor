@@ -1,4 +1,5 @@
 #include "editor_controller.h"
+#include "export_job.h"
 #include "text_style.h"
 #include "media_cache.h"
 #include "mlt_engine.h"
@@ -24,7 +25,6 @@
 #include <QPushButton>
 #include <QSet>
 #include <QSignalBlocker>
-#include <QThread>
 #include <QUrl>
 #include <QUndoCommand>
 #include <QtMath>
@@ -99,7 +99,10 @@ EditorController::EditorController(QObject *parent):QObject(parent) {
     proxyCache_=new PreviewCache({},this);
     mediaCache_=new MediaCache(this);
     undo_.setUndoLimit(100);
-    connect(&undo_,&QUndoStack::indexChanged,this,[this]{ emit stateChanged(); });
+    connect(&undo_,&QUndoStack::indexChanged,this,[this]{
+        if(noticeCanUndo_){notice_.clear();noticeCanUndo_=false;}
+        emit stateChanged();
+    });
     connect(&undo_,&QUndoStack::cleanChanged,this,[this]{ emit stateChanged(); });
     connect(preview_.get(),&Preview::frameReady,this,[this](const QImage &image){ if(!sourceMode_){frame_=image; emit frameChanged();} });
     connect(preview_.get(),&Preview::positionChanged,this,[this](int frame){ if(sourceMode_||rebuilding_)return;position_=frame; prioritizeProxy(frame); emit positionChanged(); emit stateChanged(); });
@@ -147,7 +150,7 @@ EditorController::EditorController(QObject *parent):QObject(parent) {
 }
 EditorController::~EditorController() {
     disconnect(proxyCache_,nullptr,this,nullptr);
-    if(exportThread_) {cancelExport();exportThread_->wait();}
+    if(exportJob_) {disconnect(exportJob_,nullptr,this,nullptr);exportJob_->stopAndWait();}
     sourcePreview_->setProducer(nullptr);sourceProducer_.reset();
     preview_->setProducer(nullptr); timeline_.reset(); undo_.clear();
 }
@@ -324,8 +327,8 @@ int EditorController::splitCandidate() const {
     return -1;
 }
 bool EditorController::canSplit() const { return splitCandidate()>=0; }
-void EditorController::report(const QString &message) { notice_=message; emit stateChanged(); }
-void EditorController::dismissNotice() { notice_.clear(); emit stateChanged(); }
+void EditorController::report(const QString &message) { noticeCanUndo_=false;notice_=message; emit stateChanged(); }
+void EditorController::dismissNotice() { noticeCanUndo_=false;notice_.clear(); emit stateChanged(); }
 
 bool EditorController::addImported(Project &next,const QStringList &paths,bool append,QStringList &problems) {
     bool changed=false;
@@ -343,7 +346,7 @@ bool EditorController::addImported(Project &next,const QStringList &paths,bool a
         if(frames<1 || frames>86400*60) {problems.append(file.fileName()+": No usable media duration.");continue;}
         bool exists=false;for(const auto &a:next.assets)exists|=a.path==path;
         if(!exists){next.assets.append({path,hasVideo?"video":"audio",frames,0,0,frames});changed=true;}
-        if(append){next.clips.append({path,0,frames/60.0});changed=true;}
+        if(append){next.clips.append({path,0,frames/60.0,!next.clips.isEmpty()});changed=true;}
     }
     return changed;
 }
@@ -491,7 +494,22 @@ void EditorController::setMusicPath(const QString &path) {cancelPendingVisual();
 }
 void EditorController::setVoiceStart(double s) {cancelPendingVisual(); if(!std::isfinite(s)||s<0||s>86400) return;updateAudio(1,{{"startFrame",qRound(s*60)}}); }
 void EditorController::setMusicDb(double db) {cancelPendingVisual(); if(!std::isfinite(db))return;updateAudio(2,{{"gainDb",qBound(-60.0,db,12.0)}}); }
-void EditorController::setCrossfade(double seconds) { if(!std::isfinite(seconds)||seconds<0) return; auto next=project_; next.crossfadeFrames=qRound(std::min(seconds,10.0)*60); for(auto &c:next.clips){cancelPendingVisual();c.transitionFrames=-1;c.transitionType=c.hardCutBefore?"cut":"dissolve";} commit(next,selection_,primary_,"Crossfade duration"); }
+void EditorController::setCrossfade(double seconds) {
+    if(!std::isfinite(seconds)||seconds<0) return;
+    cancelPendingVisual();
+    auto next=project_;next.crossfadeFrames=qRound(std::min(seconds,10.0)*Project::fps);
+    for(auto &c:next.clips){c.hardCutBefore=false;c.transitionFrames=next.crossfadeFrames;c.transitionType="dissolve";}
+    const bool changed=commit(next,selection_,primary_,"Crossfade duration");
+    if(!changed&&!sameProject(next,project_))return;
+    const int cuts=std::max(0,int(project_.clips.size())-1);
+    int shortened=0;for(int i=1;i<project_.clips.size();++i)shortened+=project_.transitionFramesBefore(i)<project_.crossfadeFrames;
+    const auto count=QString("%1 existing %2").arg(cuts).arg(cuts==1?"cut":"cuts");
+    QString message=project_.crossfadeFrames==0
+        ?QString("%1 crossfades from %2.").arg(changed?"Removed":"Already removed",count)
+        :QString("%1 %2 s crossfades to %3.").arg(changed?"Applied":"Already applied",QString::number(project_.crossfadeFrames/double(Project::fps),'g',4),count);
+    if(shortened>0)message+=QString(" %1 shortened to fit nearby clips.").arg(shortened);
+    report(message);noticeCanUndo_=changed;emit stateChanged();
+}
 int EditorController::audioPlayableFrames(const Project &p,int lane) const {
     if(lane==0)return primary_>=0&&primary_<p.clips.size()?p.clipFrames(p.clips[primary_]):0;
     if(lane==1)return std::max(0,std::min(qRound(sourceDuration(p.voicePath)*60),p.durationFrames()-qRound(p.voiceStartSeconds*60)));
@@ -549,9 +567,12 @@ void EditorController::setSolo(int lane){
 void EditorController::resetClipping(){masterClipped_=false;emit stateChanged();}
 QVariantList EditorController::transitions() const {
     QVariantList list;const auto &p=visibleProject();
-    for(int i=1;i<p.clips.size();++i)list.append(QVariantMap{{"index",i},{"name",QString("Cut %1 → %2").arg(i).arg(i+1)},
-        {"type",p.transitionFramesBefore(i)>0?"dissolve":"cut"},{"frames",p.transitionFramesBefore(i)},
-        {"requestedFrames",p.clips[i].transitionFrames<0?p.crossfadeFrames:p.clips[i].transitionFrames}});
+    for(int i=1;i<p.clips.size();++i){
+        const int frames=p.transitionFramesBefore(i),requested=p.clips[i].transitionFrames<0?p.crossfadeFrames:p.clips[i].transitionFrames;
+        list.append(QVariantMap{{"index",i},{"name",QString("Cut %1 → %2").arg(i).arg(i+1)},
+            {"type",frames>0?"dissolve":"cut"},{"frames",frames},{"requestedFrames",requested},
+            {"shortened",!p.clips[i].hardCutBefore&&p.clips[i].transitionType!="cut"&&frames<requested}});
+    }
     return list;
 }
 QVariantMap EditorController::currentTransition() const {const auto list=transitions();return transitionIndex_>0&&transitionIndex_<=list.size()?list[transitionIndex_-1].toMap():QVariantMap{};}
@@ -629,7 +650,8 @@ void EditorController::rebuild() {
     const int desiredPosition=position_;
     proxyPriorityStart_=proxyPriorityEnd_=-1;
     proxyPending_=false;
-    preview_->setProducer(nullptr); timeline_.reset();
+    preview_->setProducer(nullptr);
+    auto previousTimeline=std::move(timeline_);
     QStringList sources;for(const auto &asset:project_.assets)sources.append(asset.path); for(const auto &c:renderProject.clips) if(!sources.contains(c.path)) sources.append(c.path);
     for(const auto &overlay:renderProject.visualOverlays)if(!sources.contains(overlay.path))sources.append(overlay.path);
     if(!renderProject.voicePath.isEmpty()) sources.append(renderProject.voicePath);
@@ -689,7 +711,7 @@ void EditorController::rebuild() {
     applySolo(view);
     const bool allReady=std::all_of(requests.cbegin(),requests.cend(),[this](const PreviewCache::Request &r){return !proxyCache_->readyCopy(r.source,r.inFrame,r.outFrame).path.isEmpty();});
     previewStatus_=requests.isEmpty()?"Original media":(allReady?"Smooth preview":(proxyCache_->isBusy()?"Preparing smooth preview…":"Using original media"));
-    timeline_=Media::buildTimeline(view,profile_,&error,true);
+    timeline_=Media::buildTimeline(view,profile_,&error,true,previousTimeline.get());
     bool connected=timeline_&&preview_->setProducer(timeline_.get());
     if(!connected&&ready>0) {
         preview_->setProducer(nullptr); timeline_.reset();
