@@ -1,0 +1,626 @@
+{
+  "method": "Actual baseline and current export-worker executables, frozen identical project snapshots, --software; elapsed wall time includes process startup and validation. Three paired serial runs per workload, alternating order, no tests/builds concurrent.",
+  "environment": {
+    "os": "macOS15.7.3",
+    "arch": "arm64",
+    "logical_cpus": 8,
+    "physical_ram_gib": 8,
+    "qt": "6.12.0",
+    "mlt": "7.42.0",
+    "ffmpeg": "9.0.2"
+  },
+  "summary": [
+    {
+      "case": "plain",
+      "baseline": {
+        "median_seconds": 1.7780128329999911,
+        "median_peak_rss_mib": 641.515625,
+        "min_seconds": 1.7077030829999984,
+        "max_seconds": 2.989009417
+      },
+      "current": {
+        "median_seconds": 1.7166315829999945,
+        "median_peak_rss_mib": 581.484375,
+        "min_seconds": 1.7113580000000042,
+        "max_seconds": 1.7924377919999999
+      },
+      "elapsed_reduction_percent": 3.452238862440027
+    },
+    {
+      "case": "complex",
+      "baseline": {
+        "median_seconds": 7.024764375000004,
+        "median_peak_rss_mib": 623.953125,
+        "min_seconds": 6.9985258749999995,
+        "max_seconds": 7.1256860409999945
+      },
+      "current": {
+        "median_seconds": 7.225764083000001,
+        "median_peak_rss_mib": 632.640625,
+        "min_seconds": 6.854478417000001,
+        "max_seconds": 7.295937166999998
+      },
+      "elapsed_reduction_percent": -2.861301778538272
+    },
+    {
+      "case": "video",
+      "baseline": {
+        "median_seconds": 9.70855825000001,
+        "median_peak_rss_mib": 723.75,
+        "min_seconds": 9.091497208,
+        "max_seconds": 9.742284790999996
+      },
+      "current": {
+        "median_seconds": 9.359979749999994,
+        "median_peak_rss_mib": 720.71875,
+        "min_seconds": 4.118201834000001,
+        "max_seconds": 9.565413917
+      },
+      "elapsed_reduction_percent": 3.590424973759787
+    },
+    {
+      "case": "inactive",
+      "baseline": {
+        "median_seconds": 4.166019375000005,
+        "median_peak_rss_mib": 608.1875,
+        "min_seconds": 4.058523167000001,
+        "max_seconds": 4.207664500000007
+      },
+      "current": {
+        "median_seconds": 1.7189764160000038,
+        "median_peak_rss_mib": 619.609375,
+        "min_seconds": 1.7188747920000083,
+        "max_seconds": 1.7261645419999994
+      },
+      "elapsed_reduction_percent": 58.73815598853278
+    }
+  ],
+  "samples": [
+    {
+      "version": "baseline",
+      "case": "plain",
+      "repeat": 0,
+      "seconds": 2.989009417,
+      "peak_rss_bytes": 661504000,
+      "cpu_seconds": 9.32627,
+      "output": "baseline-plain-0.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 111/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "plain",
+      "repeat": 0,
+      "seconds": 1.7924377919999999,
+      "peak_rss_bytes": 573833216,
+      "cpu_seconds": 8.32324,
+      "output": "current-plain-0.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1387 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 256/300",
+        "Encoded 300 frames in 1.37 s (219.2 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "complex",
+      "repeat": 0,
+      "seconds": 6.9985258749999995,
+      "peak_rss_bytes": 654262272,
+      "cpu_seconds": 13.945241,
+      "output": "baseline-complex-0.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 43/300",
+        "Frame 88/300",
+        "Frame 136/300",
+        "Frame 185/300",
+        "Frame 236/300",
+        "Frame 288/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "complex",
+      "repeat": 0,
+      "seconds": 6.854478417000001,
+      "peak_rss_bytes": 696696832,
+      "cpu_seconds": 13.639458000000001,
+      "output": "current-complex-0.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=2045 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 43/300",
+        "Frame 92/300",
+        "Frame 142/300",
+        "Frame 192/300",
+        "Frame 241/300",
+        "Frame 291/300",
+        "Encoded 300 frames in 6.48 s (46.3 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "video",
+      "repeat": 0,
+      "seconds": 9.091497208,
+      "peak_rss_bytes": 797032448,
+      "cpu_seconds": 16.543391,
+      "output": "baseline-video-0.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 32/300",
+        "Frame 69/300",
+        "Frame 107/300",
+        "Frame 145/300",
+        "Frame 183/300",
+        "Frame 220/300",
+        "Frame 257/300",
+        "Frame 296/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "video",
+      "repeat": 0,
+      "seconds": 4.118201834000001,
+      "peak_rss_bytes": 888848384,
+      "cpu_seconds": 20.652092000000003,
+      "output": "current-video-0.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=2117 totalMiB=8192 real_time=-4 buffer=8 prefill=1 queueMiB=253 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 81/300",
+        "Frame 181/300",
+        "Frame 270/300",
+        "Encoded 300 frames in 3.67 s (81.7 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "inactive",
+      "repeat": 0,
+      "seconds": 4.058523167000001,
+      "peak_rss_bytes": 637730816,
+      "cpu_seconds": 8.895605,
+      "output": "baseline-inactive-0.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 85/300",
+        "Frame 176/300",
+        "Frame 267/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "inactive",
+      "repeat": 0,
+      "seconds": 1.7261645419999994,
+      "peak_rss_bytes": 645693440,
+      "cpu_seconds": 8.58622,
+      "output": "current-inactive-0.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1816 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 263/300",
+        "Encoded 300 frames in 1.32 s (227.6 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "complex",
+      "repeat": 1,
+      "seconds": 7.295937166999998,
+      "peak_rss_bytes": 663371776,
+      "cpu_seconds": 14.315828,
+      "output": "current-complex-1.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1686 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 42/300",
+        "Frame 90/300",
+        "Frame 140/300",
+        "Frame 190/300",
+        "Frame 238/300",
+        "Frame 286/300",
+        "Encoded 300 frames in 6.90 s (43.4 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "complex",
+      "repeat": 1,
+      "seconds": 7.024764375000004,
+      "peak_rss_bytes": 655261696,
+      "cpu_seconds": 13.985407,
+      "output": "baseline-complex-1.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 44/300",
+        "Frame 96/300",
+        "Frame 147/300",
+        "Frame 199/300",
+        "Frame 250/300",
+        "Frame 299/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "video",
+      "repeat": 1,
+      "seconds": 9.565413917,
+      "peak_rss_bytes": 755728384,
+      "cpu_seconds": 17.280495000000002,
+      "output": "current-video-1.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1672 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 32/300",
+        "Frame 69/300",
+        "Frame 106/300",
+        "Frame 144/300",
+        "Frame 181/300",
+        "Frame 218/300",
+        "Frame 253/300",
+        "Frame 288/300",
+        "Encoded 300 frames in 9.10 s (33.0 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "video",
+      "repeat": 1,
+      "seconds": 9.742284790999996,
+      "peak_rss_bytes": 758906880,
+      "cpu_seconds": 17.378497,
+      "output": "baseline-video-1.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 28/300",
+        "Frame 64/300",
+        "Frame 103/300",
+        "Frame 140/300",
+        "Frame 176/300",
+        "Frame 213/300",
+        "Frame 250/300",
+        "Frame 286/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "inactive",
+      "repeat": 1,
+      "seconds": 1.7188747920000083,
+      "peak_rss_bytes": 656441344,
+      "cpu_seconds": 8.370712,
+      "output": "current-inactive-1.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1765 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 273/300",
+        "Encoded 300 frames in 1.31 s (228.7 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "inactive",
+      "repeat": 1,
+      "seconds": 4.166019375000005,
+      "peak_rss_bytes": 623280128,
+      "cpu_seconds": 8.975683,
+      "output": "baseline-inactive-1.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 85/300",
+        "Frame 174/300",
+        "Frame 264/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "plain",
+      "repeat": 1,
+      "seconds": 1.7113580000000042,
+      "peak_rss_bytes": 609730560,
+      "cpu_seconds": 8.483318,
+      "output": "current-plain-1.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1806 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 263/300",
+        "Encoded 300 frames in 1.30 s (230.6 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "plain",
+      "repeat": 1,
+      "seconds": 1.7077030829999984,
+      "peak_rss_bytes": 679591936,
+      "cpu_seconds": 8.419393,
+      "output": "baseline-plain-1.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 262/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "video",
+      "repeat": 2,
+      "seconds": 9.70855825000001,
+      "peak_rss_bytes": 742653952,
+      "cpu_seconds": 17.224375000000002,
+      "output": "baseline-video-2.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 32/300",
+        "Frame 69/300",
+        "Frame 107/300",
+        "Frame 145/300",
+        "Frame 172/300",
+        "Frame 209/300",
+        "Frame 246/300",
+        "Frame 284/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "video",
+      "repeat": 2,
+      "seconds": 9.359979749999994,
+      "peak_rss_bytes": 755073024,
+      "cpu_seconds": 17.034358,
+      "output": "current-video-2.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1589 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 31/300",
+        "Frame 69/300",
+        "Frame 106/300",
+        "Frame 144/300",
+        "Frame 181/300",
+        "Frame 220/300",
+        "Frame 258/300",
+        "Frame 295/300",
+        "Encoded 300 frames in 8.90 s (33.7 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "inactive",
+      "repeat": 2,
+      "seconds": 4.207664500000007,
+      "peak_rss_bytes": 637779968,
+      "cpu_seconds": 8.98292,
+      "output": "baseline-inactive-2.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 89/300",
+        "Frame 177/300",
+        "Frame 264/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "inactive",
+      "repeat": 2,
+      "seconds": 1.7189764160000038,
+      "peak_rss_bytes": 649707520,
+      "cpu_seconds": 8.429086,
+      "output": "current-inactive-2.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1629 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 270/300",
+        "Encoded 300 frames in 1.31 s (228.4 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "plain",
+      "repeat": 2,
+      "seconds": 1.7780128329999911,
+      "peak_rss_bytes": 672677888,
+      "cpu_seconds": 8.553059000000001,
+      "output": "baseline-plain-2.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 238/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "plain",
+      "repeat": 2,
+      "seconds": 1.7166315829999945,
+      "peak_rss_bytes": 612335616,
+      "cpu_seconds": 8.442916,
+      "output": "current-plain-2.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1789 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 270/300",
+        "Encoded 300 frames in 1.31 s (229.0 fps)"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "baseline",
+      "case": "complex",
+      "repeat": 2,
+      "seconds": 7.1256860409999945,
+      "peak_rss_bytes": 640237568,
+      "cpu_seconds": 14.049977,
+      "output": "baseline-complex-2.mp4",
+      "diagnostics": [
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 44/300",
+        "Frame 96/300",
+        "Frame 145/300",
+        "Frame 198/300",
+        "Frame 246/300",
+        "Frame 293/300"
+      ],
+      "verified_decoded_frames": 300
+    },
+    {
+      "version": "current",
+      "case": "complex",
+      "repeat": 2,
+      "seconds": 7.225764083000001,
+      "peak_rss_bytes": 662749184,
+      "cpu_seconds": 14.232324,
+      "output": "current-complex-2.mp4",
+      "diagnostics": [
+        "Resources: cpus=8 availableMiB=1621 totalMiB=8192 real_time=-1 buffer=2 prefill=1 queueMiB=63 codecThreads=auto",
+        "Encoder: libx264",
+        "Frame 0/300",
+        "Frame 44/300",
+        "Frame 93/300",
+        "Frame 142/300",
+        "Frame 193/300",
+        "Frame 241/300",
+        "Frame 288/300",
+        "Encoded 300 frames in 6.82 s (44.0 fps)"
+      ],
+      "verified_decoded_frames": 300
+    }
+  ],
+  "pixel_comparisons": [
+    {
+      "case": "plain",
+      "baseline": "SHA256=fe0c52263dacb9119c8541594e4499cd33b87d7fb1f5e1a5b7d18bd61d463108",
+      "current": "SHA256=fe0c52263dacb9119c8541594e4499cd33b87d7fb1f5e1a5b7d18bd61d463108",
+      "exact_match": true
+    },
+    {
+      "case": "complex",
+      "baseline": "SHA256=8de16e3d710721235a87d9b3b9c1c7255b95e81364768e3b4722b15795cf2a86",
+      "current": "SHA256=8de16e3d710721235a87d9b3b9c1c7255b95e81364768e3b4722b15795cf2a86",
+      "exact_match": true
+    },
+    {
+      "case": "video",
+      "baseline": "SHA256=0808ac4a4eaa48a4dc8102c79ff602ea5126414cf00087ae8282268adb059ffe",
+      "current": "SHA256=0808ac4a4eaa48a4dc8102c79ff602ea5126414cf00087ae8282268adb059ffe",
+      "exact_match": true
+    }
+  ],
+  "executables": {
+    "baseline": "ef722a91de1cce4df43c64462a76d372ac5bf358993d15d6baf507cc279cc288",
+    "current": "e1f180512cf6c911abf7b58d9216049c2be9e91705112010eb69a1621ff8210c"
+  },
+  "inactive_pixel_reference": "Old implementation needlessly round-tripped inactive frames through RGBA. Correctness is established against plain-frame YUV bytes/metadata by composition_test, not exact old inactive pixels.",
+  "verification": {
+    "ctest_targets": 30,
+    "ctest_failed": 0,
+    "ctest_seconds": 155.5,
+    "packaging_portable_tests": 10,
+    "packaging_macos_tests": 7,
+    "review": "Independent read-only review; all four material findings corrected with failing-then-passing regressions; 32-bit expectation corrected.",
+    "coverage": [
+      "Hardware probe crash, hang, bounded software retry and cancellation",
+      "Concurrent preparation bounds, stale generations, identity changes and source replacement",
+      "Source proxy corruption falls back to originals",
+      "Repeated seeks, LRU eviction, producer/edits/source-identity invalidation and render failures",
+      "Inactive overlay YUV bytes and metadata match plain video",
+      "Shared active still residency under LRU pressure, canonical aliases, oversized photos and pending frames",
+      "Concurrent Unicode/fade text and out-of-order video overlay rendering"
+    ],
+    "limits": [
+      "No physical NVIDIA/Threadripper, Windows or Linux runtime validation on this Mac",
+      "GPU-resident decode/scale/composite, import probing and proxy disk eviction are deferred audit work"
+    ]
+  },
+  "policy_examples": {
+    "32_cpus_168_gib_total_128_gib_available": {
+      "max_render_threads_before_raster_limits": 8,
+      "proxy_jobs": 2,
+      "media_jobs": 2,
+      "background_threads": 4,
+      "preview": [
+        1920,
+        1080
+      ],
+      "frame_cache_bytes_per_viewer": 8589934592,
+      "thumbnail_cache_bytes": 268435456,
+      "waveform_cache_bytes": 67108864,
+      "export_queue_allowance_bytes": 2147483648
+    },
+    "low_memory": "Available memory under2GiB limits render and background thread counts; frame caches recheck available memory and shrink."
+  },
+  "local_adaptive_behavior": "The eight-core8GiB host generally reported less than2GiB available and selected one frame worker. One video-overlay run had2117MiB available, selected four workers, and completed in4.118s; other video-overlay runs selected one. This explains the broad timing range and is not a Threadripper speedup estimate.",
+  "source_sha256": {
+    "CMakeLists.txt": "975b7939af7e235dac3ee8f5241837902ad3594f5c1dd62b49d51afe32752284",
+    "src/performance.h": "daec9a641d391a617670c35b21f8bb84fa7ecd0407fb678df4dcc874ea6a93fd",
+    "src/performance.cpp": "2bfefb9fa559d9263a8283341e39c9243d80024353c251e0453f77912655ea63",
+    "src/encoding.h": "20cd19b8def42551f1bef002639b459cff95087c5af9be24ff8b0e582475c36f",
+    "src/encoding.cpp": "a4e5f3173445c6bc3fdc256f391871a5d50e9373e7ceab83f1598fa9c7b8eca3",
+    "src/preview.h": "2585b69eec9ecf47511163960865051f8623ce7adba329c37367598af178deb3",
+    "src/preview.cpp": "046dac1018f1869fd7282c47ac3fbf34ba9e1a9efb847d2ac1aecc57736e6665",
+    "src/mlt_engine.h": "28dee6b4cbdf6127551fc68bdace2c77f6b220748c01568c93ab08d8d03c22c0",
+    "src/mlt_engine.cpp": "1fed86c0463491e1b9385fbda36124ebc875bac23b0be991c38aeb05a92d75dc",
+    "src/editor_controller.h": "56cab86da52658ddcb3897b2b694c21f6b939ac8e3b63114680fbedbcd3a831b",
+    "src/editor_controller.cpp": "3aa6a069743352f50cfafbf48f7efa56cabf1b39c16f01194f221aefc9a58d8e",
+    "src/editor_jobs.cpp": "07aa06945246b12e8cb411f324b9029d12cb7cc2496ebf1547b4c068895edc0c",
+    "src/export_job.h": "49f6ee98e3750f2289372a0d0bde07c085f1ca3753407fa3747b63d18cee1ff5",
+    "src/export_job.cpp": "8de88bcd446a32304a77027621c25aacc7d9bad9de6af2c2c707aec91d8b2406",
+    "src/media_cache.h": "4eff92619dff142a44c401b5a8f7ba047bc77441325cb9d484f8242b3691327b",
+    "src/media_cache.cpp": "2599f2ba99974233a90cac392ad938f4417837e9fe1bfcaeaed0ab352bc293a3",
+    "src/preview_cache.h": "0293f104f295e4cc4d01404d82ad266b54deabcb6ef603cc4d8a879af5cde7dc",
+    "src/preview_cache.cpp": "5bc9c1c060122d1378f2530384780f559851773008df2aa13e2b59aeb21a57e5",
+    "src/visual_renderer.h": "4c4e701242c2dc2a97fe7fa7c6d313d78d371edf105f092a8fafafa5a105bb2b",
+    "src/visual_renderer.cpp": "7730f0cd5a5f9f559f1746f33d7e4bf8c74e75495e2f3a31d413b40cb794342c",
+    "src/text_renderer.cpp": "2e979cf817d90314d5ba32be5fa8bffcc5943af0a84d1e71df0cc01b452a03fe",
+    "src/caption_controller.cpp": "32f07f37445d92867ffb83e8ecdb72fe3d38644008cb388f8af4bab4ca599b9b"
+  },
+  "baseline_git_revision": "75e21a762245ddcb33145ad501961fc3285ac1ae"
+}

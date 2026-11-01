@@ -1,5 +1,6 @@
 #pragma once
 #include "project.h"
+#include "performance.h"
 #include <QObject>
 #include <QImage>
 #include <QVariantList>
@@ -88,7 +89,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(QString exportRevision READ exportRevision NOTIFY stateChanged)
     Q_PROPERTY(QString exportDetails READ exportDetails NOTIFY stateChanged)
 public:
-    explicit EditorController(QObject *parent=nullptr);
+    explicit EditorController(QObject *parent=nullptr,const Performance::Budget &budget=Performance::budget());
     ~EditorController() override;
     const Project &project() const { return project_; }
     QVector<double> sourceDurations() const;
@@ -311,6 +312,7 @@ signals:
     void stateChanged();
     void frameChanged();
 private:
+    Performance::Budget performanceBudget_;
     struct State { Project project; QVariantList selection; int primary=-1; int text=-1; int overlay=-1; int caption=-1; QVariantList captions; };
     State state() const;
     void apply(const State &state,int position,bool forceRebuild=false);

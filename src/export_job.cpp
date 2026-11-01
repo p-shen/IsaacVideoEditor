@@ -1,5 +1,6 @@
 #include "export_job.h"
 #include "mlt_engine.h"
+#include "encoding.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -43,6 +44,10 @@ ExportJob::ExportJob(const QString &program,QObject *parent):QObject(parent),pro
     process_.setParent(this);process_.setObjectName("exportWorker");
     cancelDeadline_.setSingleShot(true);cancelDeadline_.setInterval(2000);
     connect(&cancelDeadline_,&QTimer::timeout,this,[this]{if(process_.state()!=QProcess::NotRunning)process_.kill();});
+    probeDeadline_.setSingleShot(true);probeDeadline_.setInterval(10000);
+    connect(&probeDeadline_,&QTimer::timeout,this,[this]{
+        if(running_&&!canceled_&&process_.state()!=QProcess::NotRunning){probeTimedOut_=true;process_.kill();}
+    });
     connect(&process_,&QProcess::readyReadStandardOutput,this,&ExportJob::readOutput);
     connect(&process_,&QProcess::readyReadStandardError,this,&ExportJob::readErrors);
     connect(&process_,&QProcess::finished,this,&ExportJob::workerFinished);
@@ -78,7 +83,8 @@ bool ExportJob::start(const Project &snapshot,const QString &destination,QString
     launch(false);return true;
 }
 void ExportJob::launch(bool software){
-    resultReceived_=resultSuccess_=protocolFailed_=hardware_=false;workerError_.clear();output_.clear();
+    probeDeadline_.stop();
+    resultReceived_=resultSuccess_=protocolFailed_=hardware_=probeTimedOut_=false;workerError_.clear();output_.clear();
     QStringList args={"--export-worker",staging_->filePath("snapshot.isaac.json"),staging_->filePath("render.mp4"),staging_->filePath("cancel")};
     if(software)args.append("--software");
     auto environment=QProcessEnvironment::systemEnvironment();environment.insert("QT_QPA_PLATFORM","offscreen");
@@ -97,19 +103,26 @@ void ExportJob::readOutput(){
             emit progressChanged(std::min(99,int(value)));
         }else if(kind=="diagnostic"&&event["message"].isString()){
             const auto message=event["message"].toString();
-            if(message.startsWith("Encoder: "))hardware_=message.contains("h264_videotoolbox");
+            if(message.startsWith("Encoder: ")){probeDeadline_.stop();hardware_=Media::isHardwareH264Encoder(message.mid(9).trimmed());}
+            else if(message.startsWith("Hardware probe: ")){
+                hardware_=Media::isHardwareH264Encoder(message.mid(16).trimmed());
+                if(hardware_&&!canceled_&&!probeDeadline_.isActive())probeDeadline_.start();
+            }else if(message.startsWith("Hardware probe succeeded: ")||message.startsWith("Hardware encoder unavailable: "))probeDeadline_.stop();
             emit diagnostic(message);
         }else if(kind=="result"&&event["ok"].isBool()){
-            resultReceived_=true;resultSuccess_=event["ok"].toBool();workerError_=event["error"].toString();
+            probeDeadline_.stop();resultReceived_=true;resultSuccess_=event["ok"].toBool();workerError_=event["error"].toString();
         }else protocolFailed_=true;
     }
     if(output_.size()>65536){protocolFailed_=true;output_.clear();}
 }
 void ExportJob::workerFinished(int code,QProcess::ExitStatus status){
-    readOutput();readErrors();if(!running_)return;
+    readOutput();readErrors();probeDeadline_.stop();if(!running_)return;
     if(!output_.trimmed().isEmpty())protocolFailed_=true;
-    if(!canceled_&&status==QProcess::CrashExit&&hardware_&&!retried_&&!protocolFailed_){
-        retried_=true;log("Hardware worker crashed. Retrying with software.\n");emit diagnostic("Retrying with software after an encoder crash");emit progressChanged(0);launch(true);return;
+    if(!canceled_&&(probeTimedOut_||status==QProcess::CrashExit)&&hardware_&&!retried_&&!protocolFailed_){
+        retried_=true;
+        log(probeTimedOut_?"Hardware probe timed out. Retrying with software.\n":"Hardware worker crashed. Retrying with software.\n");
+        emit diagnostic(probeTimedOut_?"Retrying with software after hardware probe timeout":"Retrying with software after an encoder crash");
+        emit progressChanged(0);launch(true);return;
     }
     if(canceled_){complete(false,"Export canceled.");return;}
     const auto staged=staging_->filePath("render.mp4");const QFileInfo file(staged);
@@ -126,13 +139,13 @@ void ExportJob::workerFinished(int code,QProcess::ExitStatus status){
 }
 void ExportJob::complete(bool success,const QString &error){
     if(!running_)return;
-    running_=false;cancelDeadline_.stop();log((success?QString("Completed\n"):error+'\n').toUtf8());log_.close();staging_.reset();
+    running_=false;cancelDeadline_.stop();probeDeadline_.stop();log((success?QString("Completed\n"):error+'\n').toUtf8());log_.close();staging_.reset();
     if(success)emit progressChanged(100);
     emit finished(success,!success&&canceled_,error);
 }
 void ExportJob::cancel(){
     if(!running_||canceled_)return;
-    canceled_=true;if(staging_){QFile marker(staging_->filePath("cancel"));if(marker.open(QIODevice::WriteOnly))marker.close();}
+    canceled_=true;probeDeadline_.stop();if(staging_){QFile marker(staging_->filePath("cancel"));if(marker.open(QIODevice::WriteOnly))marker.close();}
     cancelDeadline_.start();
 }
 void ExportJob::stopAndWait(){

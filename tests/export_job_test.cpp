@@ -66,14 +66,16 @@ private slots:
         connect(&job,&ExportJob::progressChanged,&job,[&](int value){if(value==100)job.cancel();});
         QVERIFY(job.start(sample(),output,&error));QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY(done[0][0].toBool());QVERIFY(!done[0][1].toBool());QVERIFY(Media::mediaInfo(output).has_value());
     }
-    void unavailableHardwareReasonIsLogged() {
-#ifndef Q_OS_MACOS
-        QSKIP("The automatic hardware probe targets macOS");
+    void hardwareProbeUsesTheMltRuntime() {
+#ifndef Q_OS_UNIX
+        QSKIP("The test command wrapper needs a POSIX shell");
 #else
-        QTemporaryDir dir;const auto tools=dir.filePath("tools");QVERIFY(QDir().mkpath(tools));QFile probe(tools+"/ffmpeg");QVERIFY(probe.open(QIODevice::WriteOnly));probe.write("#!/bin/sh\nprintf 'hardware-probe-test unavailable\\n' >&2\nexit 7\n");probe.close();QVERIFY(probe.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
-        const auto previous=qgetenv("PATH");qputenv("PATH",QFile::encodeName(tools)+':'+previous);const auto restore=qScopeGuard([&]{qputenv("PATH",previous);});
-        ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;const auto output=dir.filePath("software.mp4");QVERIFY(job.start(sample(),output,&error));
-        QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,10000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));QVERIFY(contents(output).contains("x264 - core"));QVERIFY(contents(job.logPath()).contains("hardware-probe-test unavailable"));
+        QTemporaryDir dir;const auto tools=dir.filePath("tools");QVERIFY(QDir().mkpath(tools));QFile probe(tools+"/ffmpeg");QVERIFY(probe.open(QIODevice::WriteOnly));probe.write("#!/bin/sh\nprintf 'external ffmpeg was called\n' > \"$ISAAC_TEST_FFMPEG_MARKER\"\nexit 7\n");probe.close();QVERIFY(probe.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
+        const auto previous=qgetenv("PATH"),previousMarker=qgetenv("ISAAC_TEST_FFMPEG_MARKER");qputenv("PATH",QFile::encodeName(tools)+':'+previous);qputenv("ISAAC_TEST_FFMPEG_MARKER",QFile::encodeName(dir.filePath("external-probe")));const auto restore=qScopeGuard([&]{qputenv("PATH",previous);qputenv("ISAAC_TEST_FFMPEG_MARKER",previousMarker);});
+        ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;const auto output=dir.filePath("runtime.mp4");QVERIFY(job.start(sample(),output,&error));
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));
+        QVERIFY2(!QFileInfo::exists(dir.filePath("external-probe")),"Hardware availability must be established by the actual MLT consumer, not a separate FFmpeg executable");
+        QVERIFY(contents(job.logPath()).contains("Hardware probe: h264_"));
 #endif
     }
     void failedLaunchPreservesDestination() {
@@ -99,19 +101,61 @@ private slots:
         ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;QVERIFY(job.start(sample(),output,&error));
         QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,10000);QVERIFY(!done[0][0].toBool());QCOMPARE(contents(output),QByteArray("KEEP"));QVERIFY(QFileInfo(job.logPath()).size()<=512*1024);
     }
+    void hardwareWorkerCrashRetriesOnceWithSoftware_data() {
+        QTest::addColumn<QByteArray>("mode");
+        QTest::newRow("Apple encode")<<QByteArray("crash-hardware");
+        QTest::newRow("NVIDIA encode")<<QByteArray("crash-nvenc");
+        QTest::newRow("NVIDIA probe")<<QByteArray("crash-nvenc-probe");
+    }
     void hardwareWorkerCrashRetriesOnceWithSoftware() {
-        const auto previous=qgetenv("ISAAC_TEST_EXPORT_MODE");qputenv("ISAAC_TEST_EXPORT_MODE","crash-hardware");const auto restore=qScopeGuard([&]{qputenv("ISAAC_TEST_EXPORT_MODE",previous);});
+        QFETCH(QByteArray,mode);
+        const auto previous=qgetenv("ISAAC_TEST_EXPORT_MODE");qputenv("ISAAC_TEST_EXPORT_MODE",mode);const auto restore=qScopeGuard([&]{qputenv("ISAAC_TEST_EXPORT_MODE",previous);});
         QTemporaryDir dir;ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;QVERIFY(job.start(sample(),dir.filePath("retried.mp4"),&error));
         QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));
         QVERIFY(contents(dir.filePath("retried.mp4")).contains("x264 - core"));QVERIFY(contents(job.logPath()).contains("Retrying with software"));
     }
+    void stuckHardwareProbeTimesOutAndRetriesWithSoftware() {
+        const auto previous=qgetenv("ISAAC_TEST_EXPORT_MODE");qputenv("ISAAC_TEST_EXPORT_MODE","stuck-probe");const auto restore=qScopeGuard([&]{qputenv("ISAAC_TEST_EXPORT_MODE",previous);});
+        QTemporaryDir dir;const auto output=dir.filePath("existing.mp4");QFile old(output);QVERIFY(old.open(QIODevice::WriteOnly));old.write("KEEP");old.close();
+        ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;bool preserved=true;
+        connect(&job,&ExportJob::progressChanged,&job,[&](int value){if(value<100)preserved&=contents(output)==QByteArray("KEEP");});
+        QVERIFY(job.start(sample(),output,&error));QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,18000);
+        QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));QVERIFY(!done[0][1].toBool());QVERIFY(preserved);
+        QVERIFY(contents(output).contains("x264 - core"));QCOMPARE(contents(job.logPath()).count("Hardware probe timed out. Retrying with software."),1);
+        QVERIFY(contents(job.logPath()).contains("Encoder: libx264"));QCOMPARE(QDir(dir.path()).entryList(QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
+    }
+    void cancelStuckHardwareProbeDoesNotRetry() {
+        const auto previous=qgetenv("ISAAC_TEST_EXPORT_MODE");qputenv("ISAAC_TEST_EXPORT_MODE","stuck-probe");const auto restore=qScopeGuard([&]{qputenv("ISAAC_TEST_EXPORT_MODE",previous);});
+        QTemporaryDir dir;const auto output=dir.filePath("existing.mp4");QFile old(output);QVERIFY(old.open(QIODevice::WriteOnly));old.write("KEEP");old.close();
+        ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;QVERIFY(job.start(sample(),output,&error));
+        QTRY_VERIFY_WITH_TIMEOUT(contents(job.logPath()).contains("Hardware probe: h264_nvenc"),5000);job.cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,6000);QVERIFY(!done[0][0].toBool());QVERIFY(done[0][1].toBool());QCOMPARE(contents(output),QByteArray("KEEP"));
+        QVERIFY(!contents(job.logPath()).contains("Retrying with software"));
+    }
+    void softwareCrashAfterHardwareRetryPreservesDestination() {
+        const auto previous=qgetenv("ISAAC_TEST_EXPORT_MODE");qputenv("ISAAC_TEST_EXPORT_MODE","crash-both");const auto restore=qScopeGuard([&]{qputenv("ISAAC_TEST_EXPORT_MODE",previous);});
+        QTemporaryDir dir;const auto output=dir.filePath("existing.mp4");QFile old(output);QVERIFY(old.open(QIODevice::WriteOnly));old.write("KEEP");old.close();
+        ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;QVERIFY(job.start(sample(),output,&error));
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,10000);QVERIFY(!done[0][0].toBool());QCOMPARE(contents(output),QByteArray("KEEP"));
+        QCOMPARE(contents(job.logPath()).count("Hardware worker crashed. Retrying with software."),1);
+        QVERIFY(contents(job.logPath()).contains("Encoder: libx264"));
+    }
+
 };
 int main(int argc,char **argv){
     QGuiApplication app(argc,argv);app.setApplicationName("IsaacExportJobTest");
     const auto args=app.arguments();
     if(args.value(1)=="--export-worker"){
         const auto mode=qgetenv("ISAAC_TEST_EXPORT_MODE");
-        if(mode=="crash-hardware"&&!args.contains("--software")){fputs("{\"event\":\"diagnostic\",\"message\":\"Encoder: h264_videotoolbox\"}\n",stdout);fflush(stdout);std::abort();}
+        if(mode=="stuck-probe"&&!args.contains("--software")) {
+            fputs("{\"event\":\"diagnostic\",\"message\":\"Hardware probe: h264_nvenc\"}\n",stdout);fflush(stdout);
+            QFile staged(args.value(3));if(!staged.open(QIODevice::WriteOnly))return 3;staged.write("INCOMPLETE");staged.close();
+            return app.exec();
+        }
+        if(mode.startsWith("crash-")&&(!args.contains("--software")||mode=="crash-both")){
+            const auto message=args.contains("--software")?"Encoder: libx264":mode=="crash-hardware"?"Encoder: h264_videotoolbox":mode=="crash-nvenc-probe"?"Hardware probe: h264_nvenc":"Encoder: h264_nvenc";
+            const auto event=QJsonDocument(QJsonObject{{"event","diagnostic"},{"message",message}}).toJson(QJsonDocument::Compact)+'\n';fwrite(event.constData(),1,event.size(),stdout);fflush(stdout);std::abort();
+        }
         if(mode=="missing"||mode=="malformed"||mode=="flood"){
             QFile staged(args.value(3));if(!staged.open(QIODevice::WriteOnly))return 3;staged.write("INVALID VIDEO");staged.close();
             if(mode=="flood"){const QByteArray flood(700*1024,'x');fwrite(flood.constData(),1,flood.size(),stderr);}

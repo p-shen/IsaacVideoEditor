@@ -3,6 +3,7 @@
 #include "recovery_store.h"
 #include "media_cache.h"
 #include "mlt_engine.h"
+#include "encoding.h"
 #include "preview.h"
 #include "preview_cache.h"
 #include <QDateTime>
@@ -144,14 +145,14 @@ bool EditorController::startExport(const Project &snapshot,const QString &path,c
     QString error=snapshot.validate();const auto size=error.isEmpty()?Media::projectOutputSize(snapshot,&error):std::nullopt;
     if(!size){exportState_="Failed";report(error);return false;}
     exportDetails_=QString("%1×%2 · 60 fps · H.264 / AAC · original media").arg(size->width).arg(size->height);
-    scrubbing_=skim_=resumeAfterScrub_=resumeWhenSettled_=false;preview_->pause();proxyCache_->setPaused(true);
-    sourcePreview_->pause();mediaCache_->setInteractive(true);
+    scrubbing_=skim_=resumeAfterScrub_=resumeWhenSettled_=false;preview_->pause();proxyCache_->setPaused(!performanceBudget_.prepareDuringExport);
+    sourcePreview_->pause();mediaCache_->setInteractive(!performanceBudget_.prepareDuringExport);
     auto *job=new ExportJob(exportWorkerExecutable(),this);exportJob_=job;
     const auto details=exportDetails_;
     connect(job,&ExportJob::progressChanged,this,[this](int percent){exportProgress_=percent;emit stateChanged();});
     connect(job,&ExportJob::diagnostic,this,[this,details](const QString &message){
         if(message.startsWith("Encoder: ")){
-            exportDetails_=details+(message.contains("h264_videotoolbox")?" · Apple hardware encoding":" · software encoding");emit stateChanged();
+            exportDetails_=details+" · "+Media::h264EncoderLabel(message.mid(9).trimmed());emit stateChanged();
         }else if(message.startsWith("Retrying with software")){
             exportDetails_=details+" · retrying with software";emit stateChanged();
         }

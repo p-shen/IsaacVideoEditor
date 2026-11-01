@@ -609,7 +609,8 @@ void TransportTest::trimmedPreviewUsesPartialCopy() {
     dialogTimer.stop();
     dialogDeadline.stop();
     QVERIFY(!window.centralWidget()->isEnabled());
-    QCOMPARE(process->state(), QProcess::NotRunning);
+    // Pausing stops work immediately; Qt reaps the killed process asynchronously.
+    QTRY_COMPARE_WITH_TIMEOUT(process->state(), QProcess::NotRunning, 3000);
     QTRY_VERIFY_WITH_TIMEOUT(window.centralWidget()->isEnabled(), 15000);
     QVERIFY(QFileInfo(dialogPath).size() > 0);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 2, 10000);
@@ -625,7 +626,7 @@ void TransportTest::trimmedPreviewUsesPartialCopy() {
     QTest::mouseClick(exportButton, Qt::LeftButton);
     dialogDeadline.stop();
     QVERIFY(!window.centralWidget()->isEnabled());
-    QCOMPARE(process->state(), QProcess::NotRunning);
+    QTRY_COMPARE_WITH_TIMEOUT(process->state(), QProcess::NotRunning, 3000);
     QTRY_VERIFY_WITH_TIMEOUT(window.centralWidget()->isEnabled(), 15000);
     QTRY_VERIFY_WITH_TIMEOUT(exportErrorSeen, 10000);
     dialogTimer.stop();

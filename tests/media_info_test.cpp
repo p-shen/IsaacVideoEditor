@@ -1,5 +1,6 @@
 #include "mlt_engine.h"
 #include "visual_renderer.h"
+#include "performance.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -7,7 +8,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QImageReader>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -24,9 +27,13 @@ private slots:
     void invalidatesChangedAndMissingSources();
     void rejectsEmptyAndNonVideoProjects();
     void exportUsesLowestResolution();
+    void exportResourcesAreBoundedAndKeepEveryFrame_data();
+    void exportResourcesAreBoundedAndKeepEveryFrame();
     void findsRecentAudioFiles();
-    void prefersHardwareWhenAvailable();
+    void directExportKeepsHardwareOutsideTheEditorProcess();
     void failedExportPreservesDestination();
+    void unusedSourceAssetCannotBeExportDestination();
+    void corruptStillOverlayCannotPublishIncompleteComposition();
     void successfulExportReplacesDestination();
     void playbackBuildReusesUnchangedSources();
     void playbackReuseInvalidatesChangedSettings();
@@ -182,6 +189,30 @@ void MediaInfoTest::exportUsesLowestResolution() {
     QCOMPARE(stream.value("nb_frames").toString(), QString("12"));
 }
 
+void MediaInfoTest::exportResourcesAreBoundedAndKeepEveryFrame_data() {
+    QTest::addColumn<bool>("composition");QTest::newRow("plain")<<false;QTest::newRow("composed")<<true;
+}
+void MediaInfoTest::exportResourcesAreBoundedAndKeepEveryFrame() {
+    QFETCH(bool,composition);
+    Project project;project.clips={{file("hd.mp4"),0,.1}};if(composition)project.clips[0].transform.scale.value=.8;
+    QStringList diagnostics;QString error;const auto output=file("bounded.mp4");
+    QVERIFY2(Media::exportMp4(project,output,{},&error,{},[&](const QString &line){diagnostics.append(line);},true),qPrintable(error));
+    const auto resource=diagnostics.filter(QRegularExpression("^Resources: "));
+    QCOMPARE(resource.size(),1);
+    const auto match=QRegularExpression("real_time=(-[0-9]+) buffer=([0-9]+) prefill=([0-9]+)").match(resource.first());
+    QVERIFY2(match.hasMatch(),qPrintable(resource.first()));
+    QVERIFY(match.captured(1).toInt()<0);QVERIFY(match.captured(1).toInt()>=-8);
+    const auto available=Performance::resources();
+    if(!composition)QCOMPARE(match.captured(1).toInt(),-1);
+    else if(available.logicalCpus>=4 && available.availableMemoryBytes>=quint64(8)*1024*1024*1024)
+        QVERIFY2(match.captured(1).toInt()<-1,"A composed 1080p export should use spare render workers on a capable machine");
+    qInfo().noquote()<<resource.first();
+    QVERIFY(match.captured(2).toInt()>0);QVERIFY(match.captured(2).toInt()<=32);
+    QVERIFY(match.captured(3).toInt()>0);QVERIFY(match.captured(3).toInt()<=match.captured(2).toInt());
+    QProcess inspect;inspect.start(QStandardPaths::findExecutable("ffprobe"),{"-v","error","-select_streams","v:0","-count_frames","-show_entries","stream=nb_read_frames","-of","csv=p=0",output});
+    QVERIFY(inspect.waitForFinished(10000));QCOMPARE(inspect.exitCode(),0);QCOMPARE(inspect.readAllStandardOutput().trimmed(),QByteArray("6"));
+}
+
 void MediaInfoTest::findsRecentAudioFiles() {
     QTemporaryDir downloads;
     QVERIFY(downloads.isValid());
@@ -210,41 +241,13 @@ void MediaInfoTest::findsRecentAudioFiles() {
     QCOMPARE(Media::recentAudioFiles(downloads.path(), 1), QStringList{downloads.filePath("just downloaded.m4a")});
 }
 
-void MediaInfoTest::prefersHardwareWhenAvailable() {
-#ifndef Q_OS_MACOS
-    QSKIP("The automatic hardware export currently targets macOS.");
-#else
-    QProcess probe;
-    probe.start(ffmpeg_, {"-v", "error", "-f", "lavfi", "-i", "color=s=320x180:r=60:d=0.1",
-        "-c:v", "h264_videotoolbox", "-allow_sw", "0", "-f", "null", "-"});
-    QVERIFY(probe.waitForFinished(10000));
-    if (probe.exitCode() != 0) QSKIP("VideoToolbox is unavailable in this execution environment.");
-    Project project;
-    project.clips = {{file("2k.mp4"), 0, 0.1}};
-    const QString output = file("hardware.mp4");
-    QString error;
-    QVERIFY2(Media::exportMp4(project, output, {}, &error), qPrintable(error));
-    QFile encoded(output);
-    QVERIFY(encoded.open(QIODevice::ReadOnly));
-    // libx264 identifies itself in its H.264 user-data SEI; VideoToolbox does not.
-    QVERIFY2(!encoded.readAll().contains("x264 - core"), "Export selected libx264 despite available hardware.");
-    // Simulate an inspector reporting an incomplete hardware video, then verify a real software retry.
-    const QString tools = file("tools");
-    QVERIFY(QDir().mkpath(tools));
-    QFile inspect(tools + "/ffprobe");
-    QVERIFY(inspect.open(QIODevice::WriteOnly));
-    QVERIFY(inspect.write("#!/bin/sh\nprintf '1\\n'\n") > 0);
-    inspect.close();
-    QVERIFY(inspect.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
-    const QByteArray previousPath = qgetenv("PATH");
-    const auto restorePath = qScopeGuard([&] { qputenv("PATH", previousPath); });
-    qputenv("PATH", QFile::encodeName(tools) + QDir::listSeparator().toLatin1() + previousPath);
-    const QString retried = file("retried.mp4");
-    QVERIFY2(Media::exportMp4(project, retried, {}, &error), qPrintable(error));
-    QFile software(retried);
-    QVERIFY(software.open(QIODevice::ReadOnly));
-    QVERIFY2(software.readAll().contains("x264 - core"), "An incomplete hardware export was not retried with software.");
-#endif
+void MediaInfoTest::directExportKeepsHardwareOutsideTheEditorProcess() {
+    Project project;project.clips={{file("2k.mp4"),0,.1}};
+    QString error;QStringList diagnostics;const auto output=file("in-process.mp4");
+    QVERIFY2(Media::exportMp4(project,output,{},&error,{},[&](const QString &line){diagnostics.append(line);}),qPrintable(error));
+    QFile encoded(output);QVERIFY(encoded.open(QIODevice::ReadOnly));QVERIFY(encoded.readAll().contains("x264 - core"));
+    QVERIFY(diagnostics.filter(QRegularExpression("^Hardware probe: ")).isEmpty());
+    QCOMPARE(diagnostics.filter(QRegularExpression("^Encoder: ")),QStringList{"Encoder: libx264"});
 }
 
 void MediaInfoTest::successfulExportReplacesDestination() {
@@ -273,6 +276,23 @@ void MediaInfoTest::successfulExportReplacesDestination() {
     // Windows refuses this move if the exporter or validator retains a file handle.
     QVERIFY(QFile::rename(output, file("renamed export.mp4")));
     QVERIFY(QDir(directory_.path()).entryList({".isaac-*.mp4"}, QDir::Files | QDir::Hidden).isEmpty());
+}
+
+void MediaInfoTest::unusedSourceAssetCannotBeExportDestination() {
+    const auto asset=file("protected-asset.mp4");QVERIFY(QFile::copy(file("hd.mp4"),asset));QFile source(asset);QVERIFY(source.open(QIODevice::ReadOnly));const auto original=source.readAll();source.close();
+    Project project;project.clips={{file("hd.mp4"),0,.1}};project.assets.append({asset,"video",6,0,0,6});
+    QString error;QVERIFY(!Media::exportMp4(project,asset,{},&error,{}, {},true));QVERIFY(!error.isEmpty());
+    QVERIFY(source.open(QIODevice::ReadOnly));QCOMPARE(source.readAll(),original);
+}
+
+void MediaInfoTest::corruptStillOverlayCannotPublishIncompleteComposition() {
+    const auto still=file("corrupt-still.png");QImage image(8,8,QImage::Format_RGB32);image.fill(Qt::yellow);QVERIFY(image.save(still));
+    QFile source(still);QVERIFY(source.open(QIODevice::ReadOnly));const auto header=source.read(33);source.close();QVERIFY(source.open(QIODevice::WriteOnly));QCOMPARE(source.write(header),header.size());source.close();
+    QImageReader reader(still);QVERIFY(reader.canRead());QVERIFY(reader.read().isNull());
+    const auto output=file("composition-must-stay.mp4");QFile destination(output);QVERIFY(destination.open(QIODevice::WriteOnly));destination.write("KEEP");destination.close();
+    Project project;project.clips={{file("hd.mp4"),0,.1}};VisualOverlay overlay;overlay.path=still;overlay.durationFrames=6;project.visualOverlays={overlay};
+    QString error;QVERIFY(!Media::exportMp4(project,output,{},&error,{}, {},true));QVERIFY2(error.contains("overlay",Qt::CaseInsensitive),qPrintable(error));
+    QVERIFY(destination.open(QIODevice::ReadOnly));QCOMPARE(destination.readAll(),QByteArray("KEEP"));
 }
 
 void MediaInfoTest::failedExportPreservesDestination() {

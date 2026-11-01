@@ -52,9 +52,8 @@ size_t qHash(const LayoutKey &key,size_t seed=0) {
     return qHashMulti(seed,key.text,key.fontFamily,key.canvas,key.fontSize,key.bold,key.box,key.x,key.y);
 }
 struct LayoutCache {
-    QMutex mutex;
     // QTextLayout owns glyph/line storage; conservatively charge 256 bytes per character,
-    // plus 64 KiB per entry so at most 128 recent layouts survive the 8 MiB budget.
+    // plus 64 KiB per entry so at most 128 recent layouts survive each thread's 8 MiB budget.
     QCache<LayoutKey,Layout> layouts{8*1024*1024};
     Layout &get(const TextOverlay &text,const QSize &canvas,std::unique_ptr<Layout> &transient) {
         const LayoutKey key{text.text,text.fontFamily,canvas,text.fontSize,text.bold,text.style=="box",text.x,text.y};
@@ -65,7 +64,7 @@ struct LayoutCache {
         auto *layout=transient.release();layouts.insert(key,layout,int(cost));return *layout;
     }
 };
-LayoutCache &layoutCache(){static LayoutCache cache;return cache;}
+LayoutCache &layoutCache(){thread_local LayoutCache cache;return cache;}
 int getImage(mlt_frame frame,uint8_t **pixels,mlt_image_format *format,int *width,int *height,int) {
     const int position=mlt_frame_pop_service_int(frame);
     auto *state=static_cast<RenderState*>(mlt_frame_pop_service(frame));
@@ -88,14 +87,14 @@ mlt_frame process(mlt_filter filter,mlt_frame frame) {
 }
 namespace TextRendering {
 QRectF bounds(const TextOverlay &text,const QSize &canvas){
-    auto &cache=layoutCache();QMutexLocker lock(&cache.mutex);std::unique_ptr<Layout> transient;
+    auto &cache=layoutCache();std::unique_ptr<Layout> transient;
     const auto &layout=cache.get(text,canvas,transient);return {layout.rect.topLeft()*layout.scale,layout.rect.size()*layout.scale};
 }
 void paint(QImage &image,const QVector<TextOverlay> &texts,int frame) {
     QPainter p(&image);p.setRenderHint(QPainter::Antialiasing);p.setRenderHint(QPainter::TextAntialiasing);
     for(const auto &t:texts){
         if(frame<t.startFrame || frame>=t.startFrame+t.durationFrames || t.text.isEmpty())continue;
-        auto &cache=layoutCache();QMutexLocker lock(&cache.mutex);std::unique_ptr<Layout> transient;
+        auto &cache=layoutCache();std::unique_ptr<Layout> transient;
         auto &layout=cache.get(t,image.size(),transient);if(layout.rect.isEmpty())continue;
         p.save();p.scale(layout.scale,layout.scale);p.setClipRect(layout.rect);
         if(t.fade&&t.durationFrames>2){const double ramp=std::min(27.0,(t.durationFrames-1)/2.0);p.setOpacity(std::clamp(std::min(frame-t.startFrame,t.startFrame+t.durationFrames-1-frame)/ramp,0.0,1.0));}

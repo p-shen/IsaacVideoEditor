@@ -6,12 +6,47 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QtTest>
 
 class EditorControllerTest : public QObject {
     Q_OBJECT
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
 private slots:
+    void damagedSourceProxyFallsBackToOriginal() {
+        QTemporaryDir dir;const auto source=dir.filePath("source.mp4");QVERIFY(QFile::copy(fixture(),source));
+        EditorController e;QVERIFY(e.importMedia({source}));auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);
+        cache->request(source,120);QTRY_VERIFY_WITH_TIMEOUT(!cache->readyCopy(source,0,120).path.isEmpty(),10000);
+        const auto proxy=cache->readyCopy(source,0,120).path;QFile corrupt(proxy);QVERIFY(corrupt.open(QIODevice::WriteOnly));
+        corrupt.write("invalid proxy");corrupt.close();
+        QSignalSpy frames(&e,&EditorController::frameChanged);e.selectSource(0);e.seekSource(30);
+        QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(),3000);QVERIFY(!e.frame().isNull());
+        QVERIFY(!e.notice().contains("Could not open source preview"));QCOMPARE(e.sourcePosition(),30);
+        QVERIFY(cache->readyCopy(source,0,120).path.isEmpty());
+    }
+    void workstationPreviewBudgetIsCoordinated() {
+        QTemporaryDir dir;const auto source=dir.filePath("large.mp4");QProcess encode;
+        auto ffmpeg=QStandardPaths::findExecutable("ffmpeg");
+        if(ffmpeg.isEmpty())ffmpeg=QStandardPaths::findExecutable("ffmpeg",{"/opt/homebrew/bin","/usr/local/bin"});
+        QVERIFY2(!ffmpeg.isEmpty(),"FFmpeg is required for the preview integration test");
+        encode.start(ffmpeg,{"-v","error","-f","lavfi","-i","testsrc2=size=2048x1152:rate=30:duration=1",
+            "-c:v","libx264","-preset","ultrafast","-pix_fmt","yuv420p",source});
+        QVERIFY(encode.waitForFinished(15000));QCOMPARE(encode.exitCode(),0);
+        const auto budget=Performance::budgetFor({32,quint64(168)<<30,quint64(128)<<30});
+        EditorController e(nullptr,budget);QVERIFY(e.importFiles({source}));
+        QCOMPARE(e.frame().size(),QSize(1920,1080));
+        auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache->readyCopy(source,0,60).path.isEmpty(),20000);
+        QTRY_COMPARE_WITH_TIMEOUT(e.previewStatus(),QString("Smooth preview"),5000);
+        QSignalSpy changed(&e,&EditorController::frameChanged);
+        e.seek(10);QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(),3000);
+        const QImage timelineFrame=e.frame();
+        e.selectSource(0);e.seekSource(10);
+        QTRY_COMPARE_WITH_TIMEOUT(e.sourcePosition(),10,3000);
+        QTRY_COMPARE_WITH_TIMEOUT(e.frame(),timelineFrame,3000);
+        QCOMPARE(e.frame().size(),QSize(1920,1080));
+        cache->discard(source);
+    }
     void appendingPreservesPreviewWithMusicAndTransitions() {
         EditorController e;const auto source=QFINDTESTDATA("fixtures/rotation.mp4");
         QVERIFY(e.importFiles({source,source}));e.setCrossfade(.25);e.setMusicPath(source);e.seek(15);

@@ -12,6 +12,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(MLT REQUIRED IMPORTED_TARGET mlt++-7)
 
 add_library(isaac_core
+    src/performance.cpp
+    src/encoding.cpp
     src/runtime_paths.cpp
     src/export_job.cpp
     src/project.cpp
@@ -82,6 +84,12 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
 find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+add_executable(performance_test tests/performance_test.cpp)
+target_link_libraries(performance_test PRIVATE isaac_core Qt6::Test)
+add_test(NAME performance_test COMMAND performance_test)
+add_executable(encoding_test tests/encoding_test.cpp)
+target_link_libraries(encoding_test PRIVATE isaac_core Qt6::Test)
+add_test(NAME encoding_test COMMAND encoding_test)
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
     add_test(NAME update_installer_test COMMAND "${Python3_EXECUTABLE}"

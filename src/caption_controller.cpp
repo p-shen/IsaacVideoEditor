@@ -32,7 +32,7 @@ QStringList EditorController::captionWarnings() const {
     return messages;
 }
 void EditorController::updateTextPreview(){
-    if(timeline_){TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}emit stateChanged();
+    if(timeline_){preview_->invalidateFrames();TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}emit stateChanged();
 }
 TextOverlay *EditorController::selectedTimedText(Project &project) const {
     if(selectedCaption_>=0&&selectedCaption_<project.captions.size())return &project.captions[selectedCaption_];

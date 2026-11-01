@@ -1,14 +1,17 @@
 #include "preview.h"
+#include "visual_renderer.h"
+#include "mlt_engine.h"
 
 #include <QMetaObject>
 #include <QtMath>
+#include <QCryptographicHash>
+#include <QFileInfo>
+#include <QDateTime>
 
 #include <algorithm>
+#include <limits>
 
 namespace {
-constexpr int previewWidth = 960;
-constexpr int previewHeight = 540;
-
 QImage imageFromFrame(mlt_frame frame, int width, int height)
 {
     if (!frame) {
@@ -25,10 +28,12 @@ QImage imageFromFrame(mlt_frame frame, int width, int height)
 }
 } // namespace
 
-Preview::Preview(Mlt::Profile &profile, QObject *parent)
+Preview::Preview(Mlt::Profile &profile, QObject *parent, const Performance::Budget &budget)
     : QObject(parent)
+    , budget_(budget)
     , consumer_(std::make_unique<Mlt::Consumer>(profile, "sdl2_audio"))
 {
+    refreshCacheBudget();
     if (!consumer_->is_valid()) {
         return;
     }
@@ -60,6 +65,8 @@ bool Preview::setProducer(Mlt::Producer *producer)
 {
     quiesceSeek(true);
     stopConsumer();
+    invalidateFrames();
+    sourcePaths_.clear();
     if (playing_.exchange(false)) {
         emit playbackChanged(false);
     }
@@ -91,6 +98,7 @@ bool Preview::setProducer(Mlt::Producer *producer)
         return false;
     }
     producer_ = producer;
+    sourcePaths_=Media::sourceFiles(*producer);
     producerLength_ = producer->get_playtime();
     if (!renderStill()) {
         producer_ = nullptr;
@@ -101,8 +109,8 @@ bool Preview::setProducer(Mlt::Producer *producer)
 
 void Preview::updateRenderProfile(mlt_profile profile)
 {
-    const double scale = std::min({1.0, previewWidth / double(profile->width),
-                                   previewHeight / double(profile->height)});
+    const double scale = std::min({1.0, std::clamp(budget_.previewWidth,2,1920) / double(profile->width),
+                                   std::clamp(budget_.previewHeight,2,1080) / double(profile->height)});
     renderWidth_ = std::max(1, qRound(profile->width * scale));
     renderHeight_ = std::max(1, qRound(profile->height * scale));
     consumer_->set_profile(profile);
@@ -176,6 +184,8 @@ void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> 
     if (!producer_) {
         return;
     }
+    refreshCacheBudget();
+    if(edit)invalidateFrames();
     const bool wasPlaying = playing_.exchange(false);
     resumeAfterSeek_ = resumeAfterSeek_ || wasPlaying;
     // The consumer must release the producer before the still worker uses it.
@@ -189,7 +199,7 @@ void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> 
         const std::lock_guard<std::mutex> lock(seekMutex_);
         // A newer seek still needs the latest edit that has not reached the worker.
         if (edit) pendingEdit_ = std::move(edit);
-        pendingSeek_ = SeekRequest{frame, position_, commitPosition, generation};
+        pendingSeek_ = SeekRequest{frame, position_, commitPosition, generation, frameRevision()};
         if (!seekWorker_.joinable()) {
             seekWorker_ = std::thread(&Preview::seekLoop, this);
         }
@@ -253,6 +263,7 @@ void Preview::seekLoop()
             seekBusy_ = true;
         }
         QImage image;
+        QString decodeError;
         if (request.generation == generation_.load()) {
             std::function<void()> edit;
             {
@@ -260,16 +271,21 @@ void Preview::seekLoop()
                 if(request.generation==generation_.load())edit=std::move(pendingEdit_);
             }
             if (edit) edit();
-            producer_->seek(request.frame);
-            {
+            const auto revision=refreshSourceIdentity(request.frameRevision);
+            image=cachedFrame(request.frame,revision);
+            if(image.isNull()){
+                producer_->seek(request.frame);
                 std::unique_ptr<Mlt::Frame> frame(producer_->get_frame());
                 if (frame && frame->is_valid()) {
                     image = imageFromFrame(frame->get_frame(), renderWidth_, renderHeight_);
                 }
             }
+            decodeError=VisualRendering::renderError(*producer_);
+            if(decodeError.isEmpty())cacheFrame(request.frame,image,revision);
+            else image={};
             producer_->seek(request.restorePosition);
         }
-        QMetaObject::invokeMethod(this, [this, request, image] {
+        QMetaObject::invokeMethod(this, [this, request, image, decodeError] {
             if (request.generation != generation_.load() || !producer_) {
                 return;
             }
@@ -281,7 +297,7 @@ void Preview::seekLoop()
                 return;
             }
             if (image.isNull()) {
-                emit errorOccurred(tr("Could not decode this preview frame."));
+                emit errorOccurred(decodeError.isEmpty()?tr("Could not decode this preview frame."):decodeError);
             } else {
                 emit frameReady(image);
                 if (request.generation == generation_.load()) {
@@ -313,14 +329,22 @@ bool Preview::renderStill()
     if (!producer_) {
         return false;
     }
-    producer_->seek(position_);
-    std::unique_ptr<Mlt::Frame> frame(producer_->get_frame());
-    if (!frame || !frame->is_valid()) {
-        emit errorOccurred(tr("Could not render this preview frame."));
-        return false;
+    refreshCacheBudget();
+    const auto revision=refreshSourceIdentity(frameRevision());
+    auto image=cachedFrame(position_,revision);
+    if(image.isNull()){
+        producer_->seek(position_);
+        std::unique_ptr<Mlt::Frame> frame(producer_->get_frame());
+        if (!frame || !frame->is_valid()) {
+            emit errorOccurred(tr("Could not render this preview frame."));
+            return false;
+        }
+        image=imageFromFrame(frame->get_frame(),renderWidth_,renderHeight_);
+        producer_->seek(position_); // get_frame advances the producer.
     }
-    const auto image = imageFromFrame(frame->get_frame(), renderWidth_, renderHeight_);
-    producer_->seek(position_); // get_frame advances the producer.
+    const auto error=VisualRendering::renderError(*producer_);
+    if(!error.isEmpty()){emit errorOccurred(error);return false;}
+    cacheFrame(position_,image,revision);
     if (image.isNull()) {
         emit errorOccurred(tr("Could not decode this preview frame."));
         return false;
@@ -341,20 +365,34 @@ void Preview::frameShown(mlt_properties, void *context, mlt_event_data data)
 
 void Preview::publishFrame(mlt_frame frame, std::uint64_t generation)
 {
+    const auto revision=frameRevision();
     const auto image = imageFromFrame(frame, renderWidth_, renderHeight_);
     double peak=0;
     if(frame){const auto props=MLT_FRAME_PROPERTIES(frame);
         peak=std::max(mlt_properties_get_double(props,"meta.media.audio_level.0"),mlt_properties_get_double(props,"meta.media.audio_level.1"));}
     const int framePosition = frame ? mlt_frame_get_position(frame) : 0;
+    const auto error=producer_?VisualRendering::renderError(*producer_):QString{};
+    if(!error.isEmpty()){
+        QMetaObject::invokeMethod(this,[this,generation,error]{
+            deliveryPending_=false;
+            if(generation!=generation_.load())return;
+            const bool wasPlaying=playing_.exchange(false);stopConsumer();
+            if(wasPlaying)emit playbackChanged(false);
+            emit errorOccurred(error);
+        },Qt::QueuedConnection);
+        return;
+    }
     if (image.isNull()) {
         deliveryPending_ = false;
         return;
     }
+    if(generation==generation_.load())cacheFrame(framePosition,image,revision);
     QMetaObject::invokeMethod(this, [this, image, framePosition, generation, peak] {
         deliveryPending_ = false;
         if (generation != generation_.load() || !playing_) {
             return;
         }
+        refreshCacheBudget();
         position_ = framePosition;
         emit frameReady(image);
         emit audioPeak(peak);
@@ -364,6 +402,57 @@ void Preview::publishFrame(mlt_frame frame, std::uint64_t generation)
             pause();
         }
     }, Qt::QueuedConnection);
+}
+
+void Preview::invalidateFrames(){
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    ++frameRevision_;frameCache_.clear();
+}
+
+std::uint64_t Preview::frameRevision(){
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    return frameRevision_;
+}
+
+QImage Preview::cachedFrame(int frame,std::uint64_t revision){
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    if(revision!=frameRevision_)return {};
+    const auto *image=frameCache_.object(frame);
+    return image?*image:QImage{};
+}
+
+void Preview::cacheFrame(int frame,const QImage &image,std::uint64_t revision){
+    if(image.isNull())return;
+    const auto cost=(image.sizeInBytes()+1023)/1024;
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    if(revision==frameRevision_&&cost<=frameCache_.maxCost())
+        frameCache_.insert(frame,new QImage(image),int(cost));
+}
+
+void Preview::refreshCacheBudget(){
+    if(memoryCheck_.isValid()&&memoryCheck_.elapsed()<1000)return;
+    memoryCheck_.start();
+    auto bytes=std::max(qsizetype(0),budget_.frameCacheBytes);
+    const auto available=Performance::resources().availableMemoryBytes;
+    if(available)bytes=std::min(bytes,qsizetype(std::min(available/16,quint64(std::numeric_limits<qsizetype>::max()))));
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    frameCache_.setMaxCost(int(std::min(bytes/1024,qsizetype(std::numeric_limits<int>::max()))));
+}
+
+std::uint64_t Preview::refreshSourceIdentity(std::uint64_t revision){
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    for(const auto &path:sourcePaths_){
+        const QFileInfo file(path);
+        const auto canonical=file.canonicalFilePath();
+        hash.addData((canonical.isEmpty()?file.absoluteFilePath():canonical).toUtf8());hash.addData(QByteArray(1,'\0'));
+        hash.addData(QByteArray::number(file.size()));hash.addData(QByteArray(1,'\0'));
+        hash.addData(QByteArray::number(file.lastModified().toMSecsSinceEpoch()));hash.addData(QByteArray(1,'\0'));
+    }
+    const auto identity=hash.result();
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    if(revision!=frameRevision_)return revision;
+    if(identity!=sourceIdentity_){sourceIdentity_=identity;frameCache_.clear();++frameRevision_;}
+    return frameRevision_;
 }
 
 void Preview::consumerStopped(mlt_properties, void *context, mlt_event_data)

@@ -14,7 +14,6 @@ namespace {
 constexpr int MaximumQueuedJobs = 128;
 constexpr int MaximumQueuedPriorityJobs = 2;
 constexpr int MaximumImageBytes = 1024 * 1024;
-constexpr int MaximumWaveformBins = 8 * 1024 * 1024 / sizeof(float);
 QString ffmpegPath() {
     const QString path = QStandardPaths::findExecutable("ffmpeg");
     return path.isEmpty()
@@ -22,28 +21,39 @@ QString ffmpegPath() {
 }
 }
 
-MediaCache::MediaCache(QObject *parent) : QObject(parent), process_(new QProcess(this)) {
-    connect(process_, &QProcess::readyReadStandardOutput, this, &MediaCache::readOutput);
-    connect(process_, &QProcess::readyReadStandardError, this, [this] { process_->readAllStandardError(); });
-    connect(process_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
-        readOutput();
-        complete(code == 0 && status == QProcess::NormalExit);
-    });
-    connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart) {
-            ffmpegUnavailable_ = true;
-            complete(false);
-        }
-    });
+MediaCache::MediaCache(QObject *parent, const Performance::Budget &budget) : QObject(parent), budget_(budget) {
+    images_.setMaxCost(std::max(1, budget_.thumbnailBytes));
+    waveforms_.setMaxCost(std::max(int(sizeof(float)), budget_.waveformBytes));
+    for (int index = 0; index < std::clamp(budget_.mediaJobs, 1, 2); ++index) {
+        auto *worker = new Worker;
+        worker->process = new QProcess(this);
+        workers_.append(worker);
+        connect(worker->process, &QProcess::readyReadStandardOutput, this, [this, worker] { readOutput(worker); });
+        connect(worker->process, &QProcess::readyReadStandardError, this, [worker] { worker->process->readAllStandardError(); });
+        connect(worker->process, &QProcess::finished, this, [this, worker](int code, QProcess::ExitStatus status) {
+            readOutput(worker);
+            complete(worker, code == 0 && status == QProcess::NormalExit);
+        });
+        connect(worker->process, &QProcess::errorOccurred, this, [this, worker](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) {
+                ffmpegUnavailable_ = true;
+                complete(worker, false);
+            }
+        });
+    }
 }
 
 MediaCache::~MediaCache() {
-    // Let the event loop reap a killed process without blocking the GUI on destruction.
-    process_->disconnect(this);
-    if (process_->state() != QProcess::NotRunning) {
-        process_->setParent(nullptr);
-        connect(process_, &QProcess::finished, process_, &QObject::deleteLater);
-        process_->kill();
+    for (auto *worker : workers_) {
+        auto *process = worker->process;
+        process->disconnect(this);
+        // Let the event loop reap a killed process without blocking the GUI on destruction.
+        if (process->state() != QProcess::NotRunning) {
+            process->setParent(nullptr);
+            connect(process, &QProcess::finished, process, &QObject::deleteLater);
+            process->kill();
+        }
+        delete worker;
     }
 }
 
@@ -92,8 +102,9 @@ QImage MediaCache::thumbnail(const QString &path, double sourceSeconds, int rota
             consider(key.mid(prefix.size(), key.size() - prefix.size() - suffix.size()).toLongLong());
         }
         if (nearest > toleranceFrames) {
-            if (!current_.cancelled && current_.kind == Thumbnail && current_.identity == entry.identity && current_.rotation == rotation)
-                consider(current_.frame);
+            for (const auto *worker : workers_)
+                if (!worker->job.cancelled && worker->job.kind == Thumbnail && worker->job.identity == entry.identity && worker->job.rotation == rotation)
+                    consider(worker->job.frame);
             for (const auto &job : queue_)
                 if (job.kind == Thumbnail && job.identity == entry.identity && job.rotation == rotation) consider(job.frame);
         }
@@ -179,11 +190,8 @@ void MediaCache::discardSource(const QString &key) {
             it = queue_.erase(it);
         } else ++it;
     }
-    if (!current_.key.isEmpty() && current_.source == key) {
-        current_.cancelled = true;
-        pending_.remove(current_.key);
-        process_->kill();
-    }
+    for (auto *worker : workers_)
+        if (!worker->job.key.isEmpty() && worker->job.source == key) cancel(worker, false);
     sources_.remove(key);
 }
 
@@ -222,107 +230,136 @@ void MediaCache::schedule() {
     });
 }
 
-bool MediaCache::currentIsFresh() const {
-    const auto found = sources_.constFind(current_.source);
-    return !current_.cancelled && found != sources_.cend() && found->generation == current_.generation &&
-        found->identity == current_.identity && fingerprint(current_.path) == current_.identity;
+bool MediaCache::isFresh(const Job &job) const {
+    const auto found = sources_.constFind(job.source);
+    return !job.cancelled && found != sources_.cend() && found->generation == job.generation &&
+        found->identity == job.identity && fingerprint(job.path) == job.identity;
+}
+
+void MediaCache::cancel(Worker *worker, bool requeue) {
+    if (worker->job.key.isEmpty() || worker->job.cancelled) return;
+    const Job job = worker->job;
+    worker->job.cancelled = true;
+    pending_.remove(job.key);
+    if (requeue && !enqueue(job)) {
+        auto source = sources_.find(job.source);
+        if (source != sources_.end() && source->generation == job.generation) source->waveformState.clear();
+    }
+    if (worker->process->state() != QProcess::NotRunning) worker->process->kill();
+    else complete(worker, false);
 }
 
 void MediaCache::startNext() {
-    if (!current_.key.isEmpty() || process_->state() != QProcess::NotRunning || queue_.isEmpty()) return;
-    auto next = std::find_if(queue_.begin(), queue_.end(), [](const Job &job) { return job.priority; });
-    if (next == queue_.end()) {
-        if (interactive_) return;
-        next = queue_.begin();
+    // A waveform can run for hours; release a slot for comparison frames even on a one-worker machine.
+    if (std::any_of(queue_.cbegin(), queue_.cend(), [](const Job &job) { return job.priority; }) &&
+        std::none_of(workers_.cbegin(), workers_.cend(), [](const Worker *worker) { return worker->job.key.isEmpty(); })) {
+        const auto waveform = std::find_if(workers_.begin(), workers_.end(), [](const Worker *worker) {
+            return !worker->job.cancelled && worker->job.kind == Waveform;
+        });
+        if (waveform != workers_.end()) cancel(*waveform, true);
     }
-    current_ = *next;
-    queue_.erase(next);
-    imageBytes_.clear();
-    peaks_.clear();
-    binSamples_ = 0;
-    binPeak_ = 0;
-    pcmLowByte_ = -1;
-    outputOverflow_ = false;
-    const QFileInfo info(current_.path);
-    const QString ffmpeg = ffmpegUnavailable_ ? QString() : ffmpegPath();
-    if (ffmpeg.isEmpty()) ffmpegUnavailable_ = true;
-    if (!currentIsFresh() || !info.isFile() || info.size() == 0 || ffmpeg.isEmpty()) {
-        complete(false);
-        return;
-    }
-    QStringList arguments{"-nostdin", "-hide_banner", "-loglevel", "error"};
-    if (current_.kind == Thumbnail) {
-        arguments << "-ss" << QString::number(current_.frame / 60.0, 'f', 9) << "-noaccurate_seek"
-                  << "-i" << current_.path << "-ss" << "0" << "-map" << "0:v:0";
-        QString filter;
-        if (current_.rotation == 90) filter = "transpose=clock,";
-        else if (current_.rotation == 180) filter = "hflip,vflip,";
-        else if (current_.rotation == 270) filter = "transpose=cclock,";
-        else if (current_.rotation != 0) {
-            const QString angle = QString::number(current_.rotation) + "*PI/180";
-            filter = "rotate=" + angle + ":ow=rotw(" + angle + "):oh=roth(" + angle + "),";
+    for (auto *worker : workers_) {
+        if (!worker->job.key.isEmpty() || worker->process->state() != QProcess::NotRunning || queue_.isEmpty()) continue;
+        auto next = std::find_if(queue_.begin(), queue_.end(), [](const Job &job) { return job.priority; });
+        if (next == queue_.end()) {
+            if (interactive_ && !budget_.prepareDuringExport) return;
+            next = queue_.begin();
         }
-        // Match MLT's nearest native frame, including half-frame ties on 30 fps footage.
-        // FFmpeg applies camera orientation before this explicit user rotation.
-        filter = "tpad=stop=1:stop_mode=clone,setpts=ceil(PTS-0.5/(FRAME_RATE*TB)),fps=60:round=up," + filter;
-        filter += "scale=w='max(1,trunc(min(160,min(iw*sar,90*dar))))':h='max(1,trunc(ow/dar))',setsar=1";
-        arguments << "-vf" << filter << "-frames:v" << "1" << "-an" << "-c:v" << "png" << "-f" << "image2pipe" << "pipe:1";
-    } else {
-        arguments << "-i" << current_.path << "-map" << "0:a:0" << "-vn" << "-ac" << "1" << "-ar" << "2000"
-                  << "-c:a" << "pcm_s16le" << "-f" << "s16le" << "pipe:1";
+        worker->job = *next;
+        queue_.erase(next);
+        worker->imageBytes.clear();
+        worker->peaks.clear();
+        worker->binSamples = 0;
+        worker->binPeak = 0;
+        worker->pcmLowByte = -1;
+        worker->outputOverflow = false;
+        const auto &job = worker->job;
+        const QFileInfo info(job.path);
+        const QString ffmpeg = ffmpegUnavailable_ ? QString() : ffmpegPath();
+        if (ffmpeg.isEmpty()) ffmpegUnavailable_ = true;
+        if (!isFresh(job) || !info.isFile() || info.size() == 0 || ffmpeg.isEmpty()) {
+            complete(worker, false);
+            continue;
+        }
+        const QString threads = QString::number(std::clamp(budget_.backgroundThreads, 1, 8));
+        QStringList arguments{"-nostdin", "-hide_banner", "-loglevel", "error", "-threads", threads, "-filter_threads", threads};
+        if (worker->job.kind == Thumbnail) {
+            arguments << "-ss" << QString::number(worker->job.frame / 60.0, 'f', 9) << "-noaccurate_seek"
+                      << "-i" << worker->job.path << "-ss" << "0" << "-map" << "0:v:0";
+            QString filter;
+            if (worker->job.rotation == 90) filter = "transpose=clock,";
+            else if (worker->job.rotation == 180) filter = "hflip,vflip,";
+            else if (worker->job.rotation == 270) filter = "transpose=cclock,";
+            else if (worker->job.rotation != 0) {
+                const QString angle = QString::number(worker->job.rotation) + "*PI/180";
+                filter = "rotate=" + angle + ":ow=rotw(" + angle + "):oh=roth(" + angle + "),";
+            }
+            // Match MLT's nearest native frame, including half-frame ties on 30 fps footage.
+            // FFmpeg applies camera orientation before this explicit user rotation.
+            filter = "tpad=stop=1:stop_mode=clone,setpts=ceil(PTS-0.5/(FRAME_RATE*TB)),fps=60:round=up," + filter;
+            filter += "scale=w='max(1,trunc(min(160,min(iw*sar,90*dar))))':h='max(1,trunc(ow/dar))',setsar=1";
+            arguments << "-vf" << filter << "-frames:v" << "1" << "-an" << "-c:v" << "png" << "-threads" << threads << "-f" << "image2pipe" << "pipe:1";
+        } else {
+            arguments << "-i" << worker->job.path << "-map" << "0:a:0" << "-vn" << "-ac" << "1" << "-ar" << "2000"
+                      << "-c:a" << "pcm_s16le" << "-threads" << threads << "-f" << "s16le" << "pipe:1";
+        }
+        worker->process->start(ffmpeg, arguments);
     }
-    process_->start(ffmpeg, arguments);
 }
 
-void MediaCache::readOutput() {
-    const QByteArray bytes = process_->readAllStandardOutput();
-    if (current_.key.isEmpty() || current_.cancelled || outputOverflow_) return;
-    if (current_.kind == Thumbnail) {
-        if (imageBytes_.size() + bytes.size() <= MaximumImageBytes) imageBytes_.append(bytes);
-        else { outputOverflow_ = true; process_->kill(); }
+void MediaCache::readOutput(Worker *worker) {
+    const int maximumBins = waveforms_.maxCost() / int(sizeof(float));
+    const QByteArray bytes = worker->process->readAllStandardOutput();
+    if (worker->job.key.isEmpty() || worker->job.cancelled || worker->outputOverflow) return;
+    if (worker->job.kind == Thumbnail) {
+        if (worker->imageBytes.size() + bytes.size() <= MaximumImageBytes) worker->imageBytes.append(bytes);
+        else { worker->outputOverflow = true; worker->process->kill(); }
         return;
     }
     for (const unsigned char byte : bytes) {
-        if (pcmLowByte_ < 0) { pcmLowByte_ = byte; continue; }
-        const qint16 sample = qint16(pcmLowByte_ | (int(byte) << 8));
-        pcmLowByte_ = -1;
-        binPeak_ = std::max(binPeak_, std::abs(int(sample)) / 32768.0f);
-        if (++binSamples_ != 100) continue;
-        // shortcut: about 29 hours of 20 Hz peaks, raise the budget if longer assets are required.
-        if (peaks_.size() >= MaximumWaveformBins) { outputOverflow_ = true; process_->kill(); break; }
-        peaks_.append(std::clamp(binPeak_, 0.0f, 1.0f));
-        binSamples_ = 0;
-        binPeak_ = 0;
+        if (worker->pcmLowByte < 0) { worker->pcmLowByte = byte; continue; }
+        const qint16 sample = qint16(worker->pcmLowByte | (int(byte) << 8));
+        worker->pcmLowByte = -1;
+        worker->binPeak = std::max(worker->binPeak, std::abs(int(sample)) / 32768.0f);
+        if (++worker->binSamples != 100) continue;
+        if (worker->peaks.size() >= maximumBins) { worker->outputOverflow = true; worker->process->kill(); break; }
+        worker->peaks.append(std::clamp(worker->binPeak, 0.0f, 1.0f));
+        worker->binSamples = 0;
+        worker->binPeak = 0;
     }
 }
 
-void MediaCache::complete(bool success) {
-    if (current_.key.isEmpty()) return;
-    const Job job = current_;
-    const bool fresh = currentIsFresh();
-    success = success && !outputOverflow_;
+void MediaCache::complete(Worker *worker, bool success) {
+    const int maximumBins = waveforms_.maxCost() / int(sizeof(float));
+    if (worker->job.key.isEmpty()) return;
+    const Job job = worker->job;
+    const bool fresh = isFresh(job);
+    success = success && !worker->outputOverflow;
     if (fresh) {
         if (job.kind == Thumbnail) {
-            const QImage image = success ? QImage::fromData(imageBytes_, "PNG") : QImage();
+            const QImage image = success ? QImage::fromData(worker->imageBytes, "PNG") : QImage();
             success = !image.isNull() && image.width() <= 160 && image.height() <= 90;
             if (success) images_.insert(job.key, new QImage(image), int(image.sizeInBytes()));
             else failures_.insert(job.key, new bool(true));
         } else {
-            if (success && binSamples_ > 0) {
-                if (peaks_.size() < MaximumWaveformBins) peaks_.append(std::clamp(binPeak_, 0.0f, 1.0f));
+            if (success && worker->binSamples > 0) {
+                if (worker->peaks.size() < maximumBins) worker->peaks.append(std::clamp(worker->binPeak, 0.0f, 1.0f));
                 else success = false;
             }
-            success = success && !peaks_.isEmpty();
-            if (success) waveforms_.insert(job.key, new QVector<float>(peaks_), int(peaks_.size() * sizeof(float)));
+            success = success && !worker->peaks.isEmpty();
+            if (success) waveforms_.insert(job.key, new QVector<float>(worker->peaks), int(worker->peaks.size() * sizeof(float)));
             sources_[job.source].waveformState = success ? "ready" : "unavailable";
         }
     }
     // A replacement may already have queued the same key while a cancelled process exits.
-    const bool replacementPending = std::any_of(queue_.cbegin(), queue_.cend(), [&job](const Job &queued) { return queued.key == job.key; });
+    const bool replacementPending = std::any_of(queue_.cbegin(), queue_.cend(), [&job](const Job &queued) { return queued.key == job.key; }) ||
+        std::any_of(workers_.cbegin(), workers_.cend(), [worker, &job](const Worker *other) {
+            return other != worker && !other->job.cancelled && other->job.key == job.key;
+        });
     if (!replacementPending) pending_.remove(job.key);
-    current_ = {};
-    imageBytes_ = {};
-    peaks_ = {};
+    worker->job = {};
+    worker->imageBytes = {};
+    worker->peaks = {};
     if (fresh) emit changed();
     schedule();
 }

@@ -14,6 +14,10 @@ namespace Media {
 // Must run before creating any MLT service, including preview consumers.
 void initializeMlt();
 
+// Preview tracks source identity independently of the producer's decoded-frame caches.
+QStringList sourceFiles(Mlt::Producer &producer);
+void setSourceFiles(Mlt::Producer &producer,const QStringList &paths);
+
 struct MediaInfo {
     double durationSeconds = 0;
     int width = 0;

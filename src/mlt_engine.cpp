@@ -2,6 +2,8 @@
 #include "text_renderer.h"
 #include "visual_renderer.h"
 #include "runtime_paths.h"
+#include "encoding.h"
+#include "performance.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -23,6 +25,18 @@
 #include <thread>
 
 namespace Media {
+
+namespace { constexpr auto sourceFilesKey="isaac.source.files"; }
+void setSourceFiles(Mlt::Producer &producer,const QStringList &paths){
+    auto *files=new QStringList(paths);files->removeAll(QString{});files->removeDuplicates();
+    mlt_properties_set_data(producer.get_properties(),sourceFilesKey,files,0,
+        [](void *p){delete static_cast<QStringList*>(p);},nullptr);
+}
+QStringList sourceFiles(Mlt::Producer &producer){
+    if(const auto *files=static_cast<QStringList*>(producer.get_data(sourceFilesKey)))return *files;
+    const auto resource=QString::fromUtf8(producer.get("resource"));const QFileInfo file(resource);
+    return !resource.isEmpty()&&(file.isFile()||file.isAbsolute())?QStringList{resource}:QStringList{};
+}
 
 void initializeMlt() {
     static std::once_flag once;
@@ -380,7 +394,69 @@ std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
         if(error)*error="Could not create the text compositor.";
         return {};
     }
+    QStringList files{project.voicePath,project.musicPath};
+    for(const auto &clip:project.clips)files.append(clip.path);
+    for(const auto &overlay:project.visualOverlays)files.append(overlay.path);
+    setSourceFiles(*timeline,files);
     return timeline;
+}
+
+namespace {
+struct ExportResources {
+    int workers=1, buffer=1;
+    quint64 queueBytes=0;
+};
+ExportResources exportResources(const Project &project, const VideoSize &size,
+                                const Performance::Resources &resources) {
+    bool composition=!project.renderedTexts().isEmpty();
+    for(const auto &clip:project.clips)
+        composition|=clip.transform!=VisualTransform{} || clip.rotationDegrees!=0;
+    for(int i=0;i<project.clips.size();++i)
+        composition|=project.transitionFramesBefore(i)>0;
+    for(const auto &overlay:project.visualOverlays)
+        composition|=overlay.lane>=0 && overlay.lane<project.visualLaneVisible.size() && project.visualLaneVisible[overlay.lane];
+    // Reserve working RGBA/YUV copies as well as queued frames; codecs have their own allocations.
+    const quint64 frameBytes=std::max(quint64(1),quint64(size.width)*quint64(size.height)*16);
+    const auto budget=Performance::budgetFor(resources);
+    const quint64 queueBudget=budget.exportQueueBytes;
+    const int capacity=int(std::clamp(queueBudget/frameBytes,quint64(1),quint64(32)));
+    ExportResources result;
+    const int requested=composition?budget.renderThreads:1;
+    result.workers=std::clamp(requested,1,std::min(8,std::max(1,capacity/2)));
+    result.buffer=std::min(capacity,result.workers*2);
+    result.queueBytes=quint64(result.buffer)*frameBytes;
+    return result;
+}
+void configureMp4Consumer(Mlt::Consumer &consumer, const QString &encoder, const VideoSize &size) {
+    consumer.set("f","mp4");consumer.set("vcodec",encoder.toLatin1().constData());
+    consumer.set("acodec","aac");consumer.set("pix_fmt","yuv420p");consumer.set("movflags","+faststart");
+    if(isHardwareH264Encoder(encoder)) {
+        const qint64 bitrate=std::clamp(qint64(size.width)*size.height*Project::fps*75/1000,qint64(2000000),qint64(150000000));
+        consumer.set("vb",static_cast<std::int64_t>(bitrate));consumer.set("color_range","tv");
+        if(encoder==QLatin1String("h264_videotoolbox"))consumer.set("allow_sw",0);
+        else {consumer.set("preset","p4");consumer.set("rc","vbr");consumer.set("cq",20);}
+    } else {consumer.set("preset","veryfast");consumer.set("crf",20);}
+}
+bool completeMp4(Mlt::Profile &profile, const QString &path, int frames,
+                  const VideoSize &size, bool hardware) {
+    auto check=openMedia(profile,path,nullptr);
+    const int videoIndex=check?check->get_int("video_index"):-1;
+    const QByteArray prefix=QString("meta.media.%1.codec.").arg(videoIndex).toLatin1();
+    if(!check || videoIndex<0 || check->get_length()<frames ||
+       check->get_int((prefix+"width").constData())!=size.width ||
+       check->get_int((prefix+"height").constData())!=size.height)return false;
+    if(!hardware)return true;
+    QString inspector=QStandardPaths::findExecutable("ffprobe");
+    if(inspector.isEmpty())inspector=QStandardPaths::findExecutable("ffprobe",{"/opt/homebrew/bin","/usr/local/bin"});
+    if(inspector.isEmpty())return false;
+    QProcess inspect;
+    inspect.start(inspector,{"-v","error","-select_streams","v:0","-show_entries","stream=nb_frames","-of","csv=p=0",path});
+    if(!inspect.waitForFinished(5000)) {
+        inspect.kill();inspect.waitForFinished(1000);return false;
+    }
+    bool valid=false;const auto count=inspect.readAllStandardOutput().trimmed().toLongLong(&valid);
+    return inspect.exitStatus()==QProcess::NormalExit && inspect.exitCode()==0 && valid && count==frames;
+}
 }
 
 bool exportMp4(const Project &project, const QString &path,
@@ -403,6 +479,7 @@ bool exportMp4(const Project &project, const QString &path,
                 return false;
             }
         }
+        for(const auto &asset:project.assets)if(QFileInfo(asset.path).canonicalFilePath()==canonicalDestination){if(error)*error="Output file cannot be a source media asset.";return false;}
         for(const auto &o:project.visualOverlays)if(QFileInfo(o.path).canonicalFilePath()==canonicalDestination){if(error)*error="Output file cannot be an overlay source.";return false;}
         if (QFileInfo(project.voicePath).canonicalFilePath() == canonicalDestination ||
             QFileInfo(project.musicPath).canonicalFilePath() == canonicalDestination) {
@@ -430,109 +507,86 @@ bool exportMp4(const Project &project, const QString &path,
     const QByteArray encodedPath = QFile::encodeName(temporaryPath);
     if (progress) progress(0);
     const int total = project.durationFrames();
-    const auto render = [&](bool hardware) {
+    const auto resources=Performance::resources();
+    const auto settings=exportResources(project,*size,resources);
+    if(diagnostic)diagnostic(QString("Resources: cpus=%1 availableMiB=%2 totalMiB=%3 real_time=%4 buffer=%5 prefill=1 queueMiB=%6 codecThreads=auto")
+        .arg(resources.logicalCpus).arg(resources.availableMemoryBytes/1024/1024).arg(resources.totalMemoryBytes/1024/1024)
+        .arg(-settings.workers).arg(settings.buffer).arg(settings.queueBytes/1024/1024));
+    const auto render = [&](const QString &encoder) {
         if(wasCanceled())return false;
-        if(diagnostic)diagnostic(hardware?"Encoder: h264_videotoolbox":"Encoder: libx264");
-        auto timeline = buildTimeline(project, profile, error);
-        if (!timeline) return false;
-        if(wasCanceled())return false;
-        Mlt::Consumer consumer(profile, "avformat", encodedPath.constData());
-        if (!consumer.is_valid()) {
-            if (error) *error = "MP4 exporter is unavailable.";
-            return false;
+        if(diagnostic)diagnostic("Encoder: "+encoder);
+        auto timeline=buildTimeline(project,profile,error);
+        if(!timeline || wasCanceled())return false;
+        Mlt::Consumer consumer(profile,"avformat",encodedPath.constData());
+        if(!consumer.is_valid()){if(error)*error="MP4 exporter is unavailable.";return false;}
+        configureMp4Consumer(consumer,encoder,*size);
+        consumer.set("real_time",-settings.workers);consumer.set("buffer",settings.buffer);consumer.set("prefill",1);
+        if(consumer.connect(*timeline)!=0 || consumer.start()!=0) {
+            if(error)*error="Could not start MP4 export.";return false;
         }
-        consumer.set("f", "mp4");
-        consumer.set("vcodec", hardware ? "h264_videotoolbox" : "libx264");
-        consumer.set("acodec", "aac");
-        consumer.set("pix_fmt", "yuv420p");
-        if (hardware) {
-            // VideoToolbox uses bitrate control instead of libx264's CRF setting.
-            const qint64 bitrate = std::clamp(qint64(size->width) * size->height * Project::fps * 75 / 1000,
-                                              qint64(2000000), qint64(150000000));
-            consumer.set("vb", static_cast<std::int64_t>(bitrate));
-            consumer.set("allow_sw", 0);
-            consumer.set("color_range", "tv");
-        } else {
-            consumer.set("preset", "veryfast");
-            consumer.set("crf", 20);
-        }
-        consumer.set("movflags", "+faststart");
-        consumer.set("real_time", -1);
-        if (consumer.connect(*timeline) != 0 || consumer.start() != 0) {
-            if (error) *error = "Could not start MP4 export.";
-            return false;
-        }
-        auto lastDiagnostic=std::chrono::steady_clock::now()-std::chrono::seconds(1);
-        while (!consumer.is_stopped()) {
+        const auto started=std::chrono::steady_clock::now();auto lastDiagnostic=started-std::chrono::seconds(1);
+        while(!consumer.is_stopped()) {
             if(wasCanceled()){consumer.stop();return false;}
             const auto now=std::chrono::steady_clock::now();
-            if(diagnostic&&now-lastDiagnostic>=std::chrono::seconds(1)){
+            if(diagnostic && now-lastDiagnostic>=std::chrono::seconds(1)) {
                 diagnostic(QString("Frame %1/%2").arg(consumer.position()).arg(total));lastDiagnostic=now;
             }
-            if (progress && total > 0) progress(std::clamp(consumer.position() * 100 / total, 0, 99));
+            if(progress && total>0)progress(std::clamp(consumer.position()*100/total,0,99));
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        consumer.stop();
-        if(wasCanceled())return false;
-        // MLT can finish without video when an encoder fails but audio succeeds.
-        auto check = openMedia(profile, temporaryPath, nullptr);
-        const int videoIndex = check ? check->get_int("video_index") : -1;
-        const QByteArray prefix = QString("meta.media.%1.codec.").arg(videoIndex).toLatin1();
-        bool completeVideo = !hardware;
-        if (hardware) {
-            QString inspector = QStandardPaths::findExecutable("ffprobe");
-            if (inspector.isEmpty()) inspector = QStandardPaths::findExecutable("ffprobe", {"/opt/homebrew/bin", "/usr/local/bin"});
-            if (!inspector.isEmpty()) {
-                QProcess inspect;
-                // MP4's sample count checks completeness without decoding the exported video.
-                inspect.start(inspector, {"-v", "error", "-select_streams", "v:0", "-show_entries",
-                    "stream=nb_frames", "-of", "csv=p=0", temporaryPath});
-                if (inspect.waitForFinished(5000) && inspect.exitStatus() == QProcess::NormalExit && inspect.exitCode() == 0) {
-                    bool valid = false;
-                    completeVideo = inspect.readAllStandardOutput().trimmed().toLongLong(&valid) == total && valid;
-                } else if (inspect.state() != QProcess::NotRunning) {
-                    inspect.kill();
-                    inspect.waitForFinished(1000);
-                }
-            }
+        consumer.stop();if(wasCanceled())return false;
+        const auto compositionError=VisualRendering::renderError(*timeline);
+        if(!compositionError.isEmpty()){if(error)*error=compositionError;return false;}
+        if(consumer.get_int("error") || !completeMp4(profile,temporaryPath,total,*size,isHardwareH264Encoder(encoder))) {
+            if(error)*error="MP4 export failed. Check the source files and free disk space.";return false;
         }
-        if (consumer.get_int("error") || !check || videoIndex < 0 || check->get_length() < total ||
-            !completeVideo ||
-            check->get_int((prefix + "width").constData()) != size->width ||
-            check->get_int((prefix + "height").constData()) != size->height) {
-            if (error) *error = "MP4 export failed. Check the source files and free disk space.";
-            return false;
+        if(diagnostic) {
+            const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+            diagnostic(QString("Encoded %1 frames in %2 s (%3 fps)").arg(total).arg(seconds,0,'f',2).arg(total/std::max(.001,seconds),0,'f',1));
         }
         return true;
     };
-    bool rendered = false;
-#ifdef Q_OS_MACOS
-    QString ffmpeg = QStandardPaths::findExecutable("ffmpeg");
-    if (ffmpeg.isEmpty()) ffmpeg = QStandardPaths::findExecutable("ffmpeg", {"/opt/homebrew/bin", "/usr/local/bin"});
-    if (!softwareOnly && !ffmpeg.isEmpty()) {
-        if(diagnostic)diagnostic("Checking hardware encoder");
-        QProcess probe;
-        probe.start(ffmpeg, {"-nostdin", "-hide_banner", "-v", "error", "-f", "lavfi", "-i",
-            QString("color=s=%1x%2:r=60").arg(size->width).arg(size->height), "-frames:v", "1", "-an",
-            "-c:v", "h264_videotoolbox", "-allow_sw", "0", "-f", "null", "-"});
-        if (probe.waitForFinished(5000) && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0)
-            rendered = render(true);
-        else {
-            if (probe.state() != QProcess::NotRunning) {
-                probe.kill();probe.waitForFinished(1000);
-            }
-            if(diagnostic){
-                const auto detail=QString::fromUtf8(probe.readAllStandardError().right(4096)).trimmed();
-                diagnostic("Hardware encoder unavailable: "+(detail.isEmpty()?probe.errorString():detail));
-            }
+    const auto probeHardware=[&](const QString &encoder) {
+        if(wasCanceled())return false;
+        QString probePath;
+        {
+            QTemporaryFile probeFile(target.absoluteDir().filePath(".isaac-probe-XXXXXX.mp4"));
+            if(!probeFile.open())return false;
+            probePath=probeFile.fileName();probeFile.setAutoRemove(false);
         }
-    }else if(!softwareOnly&&diagnostic)diagnostic("Hardware probe unavailable: FFmpeg executable was not found");
-#endif
+        const auto removeProbe=qScopeGuard([&]{QFile::remove(probePath);});
+        if(diagnostic)diagnostic("Hardware probe: "+encoder);
+        Mlt::Producer color(profile,"color","black");
+        constexpr int probeFrames=4;color.set("length",probeFrames);color.set_in_and_out(0,probeFrames-1);
+        const auto probeEncoded=QFile::encodeName(probePath);
+        Mlt::Consumer consumer(profile,"avformat",probeEncoded.constData());
+        if(!color.is_valid() || !consumer.is_valid())return false;
+        configureMp4Consumer(consumer,encoder,*size);
+        consumer.set("an",1);consumer.set("audio_off",1);consumer.set("real_time",-1);consumer.set("buffer",1);consumer.set("prefill",1);
+        if(consumer.connect(color)!=0 || consumer.start()!=0)return false;
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        while(!consumer.is_stopped() && std::chrono::steady_clock::now()<deadline) {
+            if(wasCanceled()){consumer.stop();return false;}
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        const bool completed=consumer.is_stopped();consumer.stop();
+        return completed && !wasCanceled() && !consumer.get_int("error") && completeMp4(profile,probePath,probeFrames,*size,true);
+    };
+    bool rendered=false;
+    const auto hardware=hardwareH264Encoder();
+    // Driver faults must stay inside the worker so the editor can retry with software.
+    const bool isolatedWorker=QCoreApplication::arguments().value(1)==QLatin1String("--export-worker");
+    if(!softwareOnly && isolatedWorker && !hardware.isEmpty()) {
+        if(probeHardware(hardware)) {
+            if(diagnostic)diagnostic("Hardware probe succeeded: "+hardware);
+            rendered=render(hardware);
+            if(!rendered && !wasCanceled() && diagnostic)diagnostic("Hardware export failed: "+(error?*error:QString{})+" Retrying with software.");
+        } else if(!wasCanceled() && diagnostic)diagnostic("Hardware encoder unavailable: "+hardware+" failed the MLT encode probe. Retrying with software.");
+    }
     if(wasCanceled())return false;
-    if (!rendered) {
-        if(diagnostic&&error&&!error->isEmpty())diagnostic("Hardware export failed: "+*error+" Retrying with software.");
-        if (error) error->clear();
-        if (!render(false)) return false;
+    if(!rendered) {
+        if(error)error->clear();
+        if(!render(QStringLiteral("libx264")))return false;
     }
     if(wasCanceled())return false;
     std::error_code saveError;

@@ -72,16 +72,16 @@ QVariantList validIndices(const QVariantList &input,int count) {
 }
 }
 
-EditorController::EditorController(QObject *parent):QObject(parent) {
+EditorController::EditorController(QObject *parent,const Performance::Budget &budget):QObject(parent),performanceBudget_(budget) {
     connect(this,&EditorController::projectChanged,this,&EditorController::compositionChanged);
     connect(this,&EditorController::selectionChanged,this,&EditorController::compositionChanged);
     connect(this,&EditorController::positionChanged,this,&EditorController::compositionChanged);
     Media::initializeMlt();
-    Media::configureOutputProfile(profile_,960,540);
-    preview_=std::make_unique<Preview>(profile_,this);
-    Media::configureOutputProfile(sourceProfile_,960,540);
+    Media::configureOutputProfile(profile_,std::clamp(budget.previewWidth,2,1920),std::clamp(budget.previewHeight,2,1080));
+    preview_=std::make_unique<Preview>(profile_,this,budget);
+    Media::configureOutputProfile(sourceProfile_,std::clamp(budget.previewWidth,2,1920),std::clamp(budget.previewHeight,2,1080));
     connect(this,&EditorController::sourceChanged,this,&EditorController::scheduleRecovery);
-    sourcePreview_=std::make_unique<Preview>(sourceProfile_,this);
+    sourcePreview_=std::make_unique<Preview>(sourceProfile_,this,budget);
     connect(sourcePreview_.get(),&Preview::frameReady,this,[this](const QImage &image){if(sourceMode_){frame_=image;emit frameChanged();}});
     connect(sourcePreview_.get(),&Preview::positionChanged,this,[this](int frame){
         if(sourceMode_ && selectedSource_>=0 && selectedSource_<project_.assets.size()){
@@ -96,8 +96,8 @@ EditorController::EditorController(QObject *parent):QObject(parent) {
         if(!std::isfinite(peak)||peak<0)return;
         masterPeak_=peak>0?std::max(-60.0,20*std::log10(peak)):-60;masterClipped_|=peak>=1;emit stateChanged();
     });
-    proxyCache_=new PreviewCache({},this);
-    mediaCache_=new MediaCache(this);
+    proxyCache_=new PreviewCache({},this,budget);
+    mediaCache_=new MediaCache(this,budget);
     undo_.setUndoLimit(100);
     connect(&undo_,&QUndoStack::indexChanged,this,[this]{
         if(noticeCanUndo_){notice_.clear();noticeCanUndo_=false;}
@@ -143,6 +143,9 @@ EditorController::EditorController(QObject *parent):QObject(parent) {
             const auto copy=proxyCache_->readyCopy(source,overlay.sourceInFrame,overlay.sourceInFrame+project_.overlayFrames(row));
             if(copy.path==path&&overlayProxyPaths_.value(row)!=path)needsRefresh=true;
         }
+        if(sourceMode_&&selectedSource_>=0&&selectedSource_<project_.assets.size()&&project_.assets[selectedSource_].path==source&&
+           !sourcePreview_->isPlaying()&&!sourcePreview_->isSeeking()&&
+           !proxyCache_->readyCopy(source,0,project_.assets[selectedSource_].durationFrames).path.isEmpty())rebuildSource();
         if(!needsRefresh) return;
         if(exporting()||preview_->isSeeking()||scrubbing_||skim_||visualBefore_) { proxyPending_=true; return; }
         bool resume=playing(); rebuild(); if(resume) preview_->play();
@@ -173,7 +176,7 @@ void EditorController::apply(const State &s,int position,bool forceRebuild) {
     primary_=selection_.contains(s.primary)?s.primary:(selection_.isEmpty()?-1:selection_.last().toInt());
     if(transitionIndex_>=project_.clips.size())transitionIndex_=-1;
     anchor_=primary_; position_=qBound(0,position,std::max(0,duration()-1));
-    if(textOnly){preview_->pause();TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}else rebuild();
+    if(textOnly){preview_->pause();preview_->invalidateFrames();TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}else rebuild();
     if(sourceMode_)rebuildSource();
     emit projectChanged(); emit selectionChanged(); emit positionChanged(); emit stateChanged(); emit sourceChanged();
 }
@@ -272,7 +275,7 @@ void EditorController::setTextTiming(int index,int start,int frames) {cancelPend
     if(index<0||index>=project_.textOverlays.size()||start<0||frames<1||start>duration()-frames)return;
     auto next=project_;if(!next.setTextTiming(index,false,start,frames))return;
     if(textDragBefore_){
-        project_=next;if(timeline_){TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}emit projectChanged();emit stateChanged();
+        project_=next;if(timeline_){preview_->invalidateFrames();TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}emit projectChanged();emit stateChanged();
     }else commit(next,{},-1,"Change text timing",false,index);
 }
 void EditorController::chooseTextColor(){
@@ -284,7 +287,7 @@ void EditorController::previewTextContent(const QString &text){
     if(!textDragBefore_&&selectedText_>=0)beginTextDrag();
     if(!textDragBefore_||selectedText_<0||selectedText_>=project_.textOverlays.size()||text.size()>2000)return;
     project_.textOverlays[selectedText_].text=text;
-    if(timeline_){TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}emit projectChanged();emit stateChanged();
+    if(timeline_){preview_->invalidateFrames();TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}emit projectChanged();emit stateChanged();
 }
 void EditorController::beginTextDrag(int index){cancelPendingVisual();
     if(textDragBefore_||index>=project_.textOverlays.size())return;
@@ -298,7 +301,7 @@ void EditorController::dragTextTo(double x,double y){
     auto *selected=selectedTimedText(project_);if(!selected)return;auto &t=*selected;t.x=qBound(0.0,x,1.0);t.y=qBound(0.0,y,1.0);
     const QSize canvas=frame_.isNull()?QSize(960,540):frame_.size();const auto rect=TextRendering::bounds(t,canvas);
     t.x=rect.center().x()/canvas.width();t.y=rect.center().y()/canvas.height();
-    if(timeline_){TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}
+    if(timeline_){preview_->invalidateFrames();TextRendering::update(*timeline_,project_.renderedTexts());preview_->requestSeek(position_);}
     emit projectChanged();emit selectionChanged();
 }
 void EditorController::endTextDrag(bool cancel){
@@ -662,7 +665,8 @@ void EditorController::rebuild() {
     }
     QString error; auto output=Media::projectOutputSize(renderProject,&error,true); if(!output) { report(error); return; }
     format_=QString("%1×%2 · 60 fps").arg(output->width).arg(output->height);
-    double scale=std::min({1.0,960.0/output->width,540.0/output->height});
+    double scale=std::min({1.0,double(std::clamp(performanceBudget_.previewWidth,2,1920))/output->width,
+                         double(std::clamp(performanceBudget_.previewHeight,2,1080))/output->height});
     Media::configureOutputProfile(profile_,std::max(2,qRound(output->width*scale/2)*2),std::max(2,qRound(output->height*scale/2)*2));
     struct Range {PreviewCache::Request request;int distance;};
     QVector<Range> ranges;
@@ -837,11 +841,22 @@ void EditorController::rebuildSource() {
     if(!sourceMode_||selectedSource_<0||selectedSource_>=project_.assets.size())return;
     const auto &a=project_.assets[selectedSource_];
     if(!QFileInfo::exists(a.path)){frame_=QImage();emit frameChanged();report("Source is offline. Locate its original file to preview it.");return;}
-    sourceProducer_=std::make_unique<Mlt::Producer>(sourceProfile_,"avformat",a.path.toUtf8().constData());
-    if(!sourceProducer_->is_valid()){sourceProducer_.reset();report("Could not open source preview.");return;}
-    sourceProducer_->set("eof","pause");sourceProducer_->set("length",a.durationFrames);
-    sourceProducer_->set_in_and_out(0,a.durationFrames-1);
-    if(!sourcePreview_->setProducer(sourceProducer_.get())){report("Could not connect source preview.");return;}
+    // A full-source copy preserves the source viewer's absolute positions and playback end.
+    const auto copy=proxyCache_->readyCopy(a.path,0,a.durationFrames);
+    QStringList candidates;if(!copy.path.isEmpty())candidates.append(copy.path);candidates.append(a.path);
+    bool connected=false;
+    for(const auto &path:candidates){
+        sourceProducer_=std::make_unique<Mlt::Producer>(sourceProfile_,"avformat",path.toUtf8().constData());
+        const bool proxy=path!=a.path;
+        if(sourceProducer_->is_valid()&&(!proxy||sourceProducer_->get_length()>=a.durationFrames)){
+            sourceProducer_->set("eof","pause");sourceProducer_->set("length",a.durationFrames);
+            sourceProducer_->set_in_and_out(0,a.durationFrames-1);
+            if(sourcePreview_->setProducer(sourceProducer_.get())){connected=true;break;}
+        }
+        sourcePreview_->setProducer(nullptr);sourceProducer_.reset();
+        if(proxy)proxyCache_->discard(a.path);
+    }
+    if(!connected){report("Could not open source preview.");return;}
     blocked.unblock();
     sourcePreview_->requestSeek(a.cursorFrame);
 }

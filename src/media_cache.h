@@ -1,5 +1,7 @@
 #pragma once
 
+#include "performance.h"
+
 #include <QCache>
 #include <QHash>
 #include <QImage>
@@ -14,7 +16,7 @@ class QProcess;
 class MediaCache final : public QObject {
     Q_OBJECT
 public:
-    explicit MediaCache(QObject *parent = nullptr);
+    explicit MediaCache(QObject *parent = nullptr, const Performance::Budget &budget = Performance::budget());
     ~MediaCache() override;
     // Filmstrips may reuse a nearby frame; trim/source comparisons keep the default exact request.
     QImage thumbnail(const QString &path, double sourceSeconds, int rotationDegrees = 0, bool priority = false, int toleranceFrames = 0);
@@ -44,6 +46,15 @@ private:
         bool priority = false;
         bool cancelled = false;
     };
+    struct Worker {
+        QProcess *process = nullptr;
+        Job job;
+        QByteArray imageBytes;
+        QVector<float> peaks;
+        int binSamples = 0, pcmLowByte = -1;
+        float binPeak = 0;
+        bool outputOverflow = false;
+    };
     static QString sourceKey(const QString &path);
     static QString fingerprint(const QString &path);
     Source &source(const QString &path);
@@ -51,9 +62,10 @@ private:
     bool enqueue(const Job &job);
     void schedule();
     void startNext();
-    void readOutput();
-    void complete(bool success);
-    bool currentIsFresh() const;
+    void readOutput(Worker *worker);
+    void complete(Worker *worker, bool success);
+    bool isFresh(const Job &job) const;
+    void cancel(Worker *worker, bool requeue);
 
     QCache<QString, QImage> images_{16 * 1024 * 1024};
     QCache<QString, QVector<float>> waveforms_{8 * 1024 * 1024};
@@ -61,17 +73,11 @@ private:
     QHash<QString, Source> sources_;
     QQueue<Job> queue_;
     QSet<QString> pending_, viewportRequests_;
-    QProcess *process_ = nullptr;
-    Job current_;
-    QByteArray imageBytes_;
-    QVector<float> peaks_;
+    QVector<Worker *> workers_;
+    Performance::Budget budget_;
     quint64 nextGeneration_ = 0;
-    int binSamples_ = 0;
-    float binPeak_ = 0;
-    int pcmLowByte_ = -1;
     bool interactive_ = false;
     bool viewport_ = false;
     bool scheduled_ = false;
-    bool outputOverflow_ = false;
     bool ffmpegUnavailable_ = false;
 };

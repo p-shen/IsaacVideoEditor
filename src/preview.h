@@ -1,8 +1,13 @@
 #pragma once
 
+#include "performance.h"
+
 #include <QImage>
+#include <QCache>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 #include <mlt++/Mlt.h>
 
@@ -23,7 +28,7 @@ class Preview final : public QObject
     Q_OBJECT
 
 public:
-    explicit Preview(Mlt::Profile &profile, QObject *parent = nullptr);
+    explicit Preview(Mlt::Profile &profile, QObject *parent = nullptr, const Performance::Budget &budget = Performance::budget());
     ~Preview() override;
 
     bool setProducer(Mlt::Producer *producer);
@@ -34,6 +39,8 @@ public:
     // Edits run before decoding; synchronous transport changes finish any pending edit.
     void requestSeek(int frame, bool commitPosition = true, std::function<void()> edit = {});
     void cancelPendingSeek();
+    // Call before changing filters outside requestSeek's edit callback.
+    void invalidateFrames();
 
     bool isPlaying() const { return playing_; }
     bool isSeeking() const { return seeking_; }
@@ -57,14 +64,27 @@ private:
     void publishFrame(mlt_frame frame, std::uint64_t generation);
     void seekLoop();
     void quiesceSeek(bool discardEdit = false);
+    std::uint64_t frameRevision();
+    QImage cachedFrame(int frame, std::uint64_t revision);
+    void cacheFrame(int frame, const QImage &image, std::uint64_t revision);
+    void refreshCacheBudget();
+    std::uint64_t refreshSourceIdentity(std::uint64_t revision);
 
     struct SeekRequest {
         int frame;
         int restorePosition;
         bool committed;
         std::uint64_t generation;
+        std::uint64_t frameRevision;
     };
 
+    Performance::Budget budget_;
+    std::mutex frameCacheMutex_;
+    QCache<int,QImage> frameCache_;
+    std::uint64_t frameRevision_ = 0;
+    QElapsedTimer memoryCheck_;
+    QStringList sourcePaths_;
+    QByteArray sourceIdentity_;
     std::unique_ptr<Mlt::Consumer> consumer_;
     std::unique_ptr<Mlt::Event> frameEvent_;
     std::unique_ptr<Mlt::Event> stoppedEvent_;

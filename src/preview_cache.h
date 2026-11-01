@@ -1,5 +1,7 @@
 #pragma once
 
+#include "performance.h"
+
 #include <QObject>
 #include <QHash>
 #include <QQueue>
@@ -22,7 +24,8 @@ public:
         QString path;
         int startFrame = 0;
     };
-    explicit PreviewCache(const QString &cacheDirectory = QString(), QObject *parent = nullptr);
+    explicit PreviewCache(const QString &cacheDirectory = QString(), QObject *parent = nullptr,
+                          const Performance::Budget &budget = Performance::budget());
     ~PreviewCache() override;
     // sourceFrames expresses the original duration on the editor's 60 fps timeline.
     void request(const QString &source, int sourceFrames);
@@ -45,33 +48,41 @@ private:
         QString source, key, outputPath, partialPath;
         int frames = 0, start = 0, end = 0;
         bool needsProbe = false;
+        quint64 generation = 0;
+    };
+    struct Worker {
+        QProcess *process = nullptr;
+        QTimer *probeTimer = nullptr;
+        Job job;
+        QByteArray errors, progressBuffer, probeBuffer;
+        int lastPercent = -1;
+        bool probing = false, cancelled = false, hardware = false;
     };
     QString sourceKey(const QString &source) const;
     QString fingerprint(const QString &source, int frames) const;
     QString jobKey(const Job &job) const;
     Job makeJob(const Request &request);
     bool usable(const Job &job) const;
-    void cancelCurrent(bool requeue);
-    void finishProbe(bool success);
+    void cancel(Worker *worker, bool requeue);
+    void finishProbe(Worker *worker, bool success);
+    void startEncoding(Worker *worker, bool software = false);
+    bool isFresh(const Worker *worker) const;
+    void registerJob(Job &job);
     void notifyReady(const Job &job);
     void startNext();
-    void complete(bool success, const QString &error = QString());
-    void readProgress();
+    void complete(Worker *worker, bool success, const QString &error = QString());
+    void readProgress(Worker *worker);
     void reportFailure(const Job &job, const QString &error);
 
     QString directory_;
-    QString cancelledPartial_;
-    QProcess *process_ = nullptr;
-    QTimer *probeTimer_ = nullptr;
+    Performance::Budget budget_;
+    QVector<Worker *> workers_;
+    quint64 nextGeneration_ = 0;
+    bool hardwareFailed_ = false;
     QHash<QString, Job> sources_;
     QHash<QString, int> cadencePeriods_;
     QQueue<Job> queue_;
-    QSet<QString> pending_, notified_, failed_;
-    Job current_;
-    QByteArray errors_, progressBuffer_;
-    QByteArray probeBuffer_;
+    QSet<QString> pending_, notified_, failed_, wanted_;
     QVector<Request> requests_;
-    int lastPercent_ = -1;
     bool paused_ = false;
-    bool probing_ = false;
 };

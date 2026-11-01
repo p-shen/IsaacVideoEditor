@@ -7,6 +7,7 @@
 #include <QFontDatabase>
 #include <QTextLayout>
 #include <algorithm>
+#include <future>
 #ifdef Q_OS_MACOS
 #include <mach/mach.h>
 #elif defined(Q_OS_LINUX)
@@ -103,6 +104,19 @@ int magentaPixels(const QImage &image){int count=0;for(int y=0;y<image.height();
 class TextOverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void concurrentTextRenderingMatchesUncachedUnicodeFades() {
+        TextOverlay text;text.text=QString::fromUtf8("Adventure مرحبا 字幕\nwith Isaac and Daddy");text.fontSize=50;text.style="box";text.fade=true;text.startFrame=5;text.durationFrames=60;
+        std::vector<std::future<bool>> workers;
+        for(int worker=0;worker<6;++worker)workers.emplace_back(std::async(std::launch::async,[text,worker]{
+            for(int pass=0;pass<10;++pass)for(int frame:{4,5,6,18,32,63,64,65}){
+                auto cue=text;cue.color=worker%2?"#ff40a0":"#ffffff";cue.x=.2+.1*worker;cue.shadow=pass%2;
+                const QSize size=pass%2?QSize(853,479):QSize(640,360);QImage actual(size,QImage::Format_RGBA8888);actual.fill(QColor(35,70,110));auto expected=actual;
+                referencePaint(expected,{cue},frame);TextRendering::paint(actual,{cue},frame);if(actual!=expected)return false;
+            }
+            return true;
+        }));
+        for(auto &worker:workers)QVERIFY(worker.get());
+    }
     void repeatedCaptionsReuseExpensiveTextWork() {
         TextOverlay text;text.text=QString::fromUtf8("Adventure مرحبا 字幕 and Isaac ").repeated(55);text.fontSize=40;text.shadow=false;
         QImage image(640,360,QImage::Format_RGBA8888);

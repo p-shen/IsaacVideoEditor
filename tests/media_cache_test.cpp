@@ -57,6 +57,7 @@ private slots:
     void retryWhileRunningKeepsReplacement();
     void waveformDistinguishesSilenceAndMissingAudio();
     void interactiveDefersLaunches();
+    void capablePolicyPreparesWhileInteractive();
     void priorityFramesCompleteDuringInteraction();
     void priorityFramesRunAheadOfBackground();
     void priorityKeepsLatestTwoQueuedFrames();
@@ -66,6 +67,11 @@ private slots:
     void missingSourceAndRetry();
     void failedFfmpegSpawnDoesNotLoop();
     void queueIsBounded();
+    void runsBoundedConcurrentJobs();
+    void priorityThumbnailPreemptsBlockedWaveforms_data();
+    void priorityThumbnailPreemptsBlockedWaveforms();
+    void configuredByteBudgetsEvictOldEntries();
+    void replacesSourcesWhileTwoJobsAreRunning();
 };
 
 void MediaCacheTest::thumbnailsRespectOrientation_data() {
@@ -87,7 +93,7 @@ void MediaCacheTest::thumbnailsRespectOrientation() {
     QFETCH(QByteArray, expected);
     QFETCH(bool, portrait);
     const QString path = QTest::qFindTestData(qPrintable(fixture), __FILE__, __LINE__);
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
     QElapsedTimer elapsed;
     elapsed.start();
@@ -105,7 +111,7 @@ void MediaCacheTest::thumbnailsRespectOrientation() {
 
 void MediaCacheTest::exactFrameKeys() {
     const QString path = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QVERIFY(cache.thumbnail(path, 0).isNull());
     QVERIFY(cache.thumbnail(path, 1.0 / 60).isNull());
     QVERIFY(cache.thumbnail(path, 2.0 / 60).isNull());
@@ -131,7 +137,7 @@ void MediaCacheTest::trimComparisonMatchesTimeline() {
     Media::initializeMlt();
     Mlt::Profile profile;
     Media::configureOutputProfile(profile, 128, 72);
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     const int frames = qRound(Media::mediaDurationSeconds(path) * 60);
     // MLT can round a cold seek at EOF past the last native frame; test that preview separately.
     for (int start : {0, 1, 2, 3, 7, 17, 21, 22, 30, 59, 60, 63, 121, 299, 300, 599}) {
@@ -164,7 +170,7 @@ void MediaCacheTest::trimComparisonKeepsFinalSourceFrame() {
     QFETCH(int, finalNativeFrame);
     const QString path = QTest::qFindTestData(qPrintable(fixture), __FILE__, __LINE__);
     const int finalFrame = qRound(Media::mediaDurationSeconds(path) * 60) - 1;
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, finalFrame / 60.0, 0, true).isNull(), 3000);
     QCOMPARE(frameId(cache.thumbnail(path, finalFrame / 60.0)), finalNativeFrame);
 }
@@ -173,7 +179,7 @@ void MediaCacheTest::anamorphicSourceIsBounded() {
     QTemporaryDir directory;
     const QString source = directory.filePath("wide-pixels.mp4");
     QVERIFY(encode({"-v", "error", "-i", QFINDTESTDATA("fixtures/rotation.mp4"), "-vf", "setsar=2/1", "-an", source}));
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     cache.thumbnail(source, 0);
     cache.thumbnail(source, 0, 90);
     QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(source, 0, 90).isNull(), 10000);
@@ -187,7 +193,7 @@ void MediaCacheTest::anamorphicSourceIsBounded() {
 
 void MediaCacheTest::retryWhileRunningKeepsReplacement() {
     const QString path = QFINDTESTDATA("fixtures/rotation.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
     cache.thumbnail(path, 0);
     QCoreApplication::processEvents();
@@ -208,7 +214,7 @@ void MediaCacheTest::waveformDistinguishesSilenceAndMissingAudio() {
     QVERIFY(encode({"-v", "error", "-f", "lavfi", "-i", "anullsrc=r=2000:cl=mono", "-t", "0.10", "-c:a", "pcm_s16le", silence}));
     QVERIFY(encode({"-v", "error", "-f", "lavfi", "-i", "aevalsrc=-1:s=2000:d=0.05", "-c:a", "pcm_s16le", negative}));
     const QString noAudio = QFINDTESTDATA("fixtures/rotation.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QCOMPARE(cache.waveformState(tone), QString());
     QVERIFY(cache.waveform(tone).isEmpty());
     QCOMPARE(cache.waveformState(tone), QString("loading"));
@@ -229,7 +235,7 @@ void MediaCacheTest::waveformDistinguishesSilenceAndMissingAudio() {
 
 void MediaCacheTest::interactiveDefersLaunches() {
     const QString path = QFINDTESTDATA("fixtures/rotation.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
     cache.setInteractive(true);
     cache.thumbnail(path, 0);
@@ -242,9 +248,26 @@ void MediaCacheTest::interactiveDefersLaunches() {
     QTRY_COMPARE_WITH_TIMEOUT(cache.waveformState(path), QString("unavailable"), 10000);
 }
 
+void MediaCacheTest::capablePolicyPreparesWhileInteractive() {
+    QTemporaryDir directory;
+    const auto audio = directory.filePath("tone.wav");
+    QVERIFY(encode({"-v", "error", "-f", "lavfi", "-i", "aevalsrc=0.25:s=2000:d=0.10", "-c:a", "pcm_s16le", audio}));
+    Performance::Budget budget;
+    budget.prepareDuringExport = true;
+    budget.mediaJobs = 2;
+    budget.backgroundThreads = 4;
+    MediaCache cache(nullptr, budget);
+    cache.setInteractive(true);
+    const auto video = QFINDTESTDATA("fixtures/rotation.mp4");
+    cache.thumbnail(video, 0);
+    cache.waveform(audio);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(video, 0).isNull() && cache.waveformState(audio) == "ready", 2000);
+    QCOMPARE(cache.waveform(audio), QVector<float>({0.25f, 0.25f}));
+}
+
 void MediaCacheTest::priorityFramesCompleteDuringInteraction() {
     const QString path = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
     cache.setInteractive(true);
     cache.thumbnail(path, 0);
@@ -267,7 +290,7 @@ void MediaCacheTest::priorityFramesCompleteDuringInteraction() {
 
 void MediaCacheTest::priorityFramesRunAheadOfBackground() {
     const QString path = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     bool sawCompletion = false;
     bool firstWasPriority = false;
     connect(&cache, &MediaCache::changed, &cache, [&] {
@@ -284,7 +307,7 @@ void MediaCacheTest::priorityFramesRunAheadOfBackground() {
 
 void MediaCacheTest::priorityKeepsLatestTwoQueuedFrames() {
     const QString path = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
     cache.setInteractive(true);
     cache.thumbnail(path, 0, 0, true);
@@ -300,7 +323,7 @@ void MediaCacheTest::priorityKeepsLatestTwoQueuedFrames() {
 
 void MediaCacheTest::viewportRetiresQueuedThumbnails() {
     const QString path = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     cache.setInteractive(true);
     cache.waveform(path);
     cache.beginViewport();
@@ -318,7 +341,7 @@ void MediaCacheTest::viewportRetiresQueuedThumbnails() {
 
 void MediaCacheTest::retainDropsAndCancels() {
     const QString path = QFINDTESTDATA("fixtures/rotation.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     cache.thumbnail(path, 0);
     QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, 0).isNull(), 10000);
     cache.retainSources({});
@@ -342,7 +365,7 @@ void MediaCacheTest::sourceIdentityInvalidates() {
     QTemporaryDir directory;
     const QString path = directory.filePath("source.mp4");
     QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), path));
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     cache.thumbnail(path, 0);
     QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, 0).isNull(), 10000);
     QFile file(path);
@@ -358,7 +381,7 @@ void MediaCacheTest::sourceIdentityInvalidates() {
 void MediaCacheTest::missingSourceAndRetry() {
     QTemporaryDir directory;
     const QString path = directory.filePath("missing.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
     cache.waveform(path);
     QTRY_COMPARE_WITH_TIMEOUT(cache.waveformState(path), QString("unavailable"), 1000);
@@ -387,7 +410,7 @@ void MediaCacheTest::failedFfmpegSpawnDoesNotLoop() {
     const QByteArray previousPath = qgetenv("PATH");
     const auto restorePath = qScopeGuard([previousPath] { qputenv("PATH", previousPath); });
     qputenv("PATH", directory.path().toUtf8());
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy errors(cache.findChild<QProcess *>(), &QProcess::errorOccurred);
     const QString source = QFINDTESTDATA("fixtures/rotation.mp4");
     QSignalSpy changed(&cache, &MediaCache::changed);
@@ -408,7 +431,7 @@ void MediaCacheTest::failedFfmpegSpawnDoesNotLoop() {
 
 void MediaCacheTest::queueIsBounded() {
     const QString path = QFINDTESTDATA("fixtures/rotation.mp4");
-    MediaCache cache;
+    MediaCache cache(nullptr, Performance::Budget{});
     cache.setInteractive(true);
     for (int i = 0; i < 130; ++i) cache.thumbnail(path, (i % 60) / 60.0, (i / 60) * 90);
     cache.setInteractive(false);
@@ -420,10 +443,162 @@ void MediaCacheTest::queueIsBounded() {
     QVERIFY(!cache.thumbnail(path, 2.0 / 60).isNull());
 }
 
+void MediaCacheTest::runsBoundedConcurrentJobs() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nexec /bin/sleep 30\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    Performance::Budget budget;
+    budget.mediaJobs = 2;
+    budget.backgroundThreads = 2;
+    MediaCache cache(nullptr, budget);
+    QSignalSpy changed(&cache, &MediaCache::changed);
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    for (int frame = 0; frame < 3; ++frame) cache.thumbnail(source, frame / 60.0);
+    const auto running = [&] {
+        int count = 0;
+        for (auto *process : cache.findChildren<QProcess *>()) count += process->state() != QProcess::NotRunning;
+        return count;
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(running(), 2, 1000);
+    for (auto *process : cache.findChildren<QProcess *>()) {
+        if (process->state() == QProcess::NotRunning) continue;
+        const auto arguments = process->arguments();
+        QCOMPARE(arguments.count("-threads"), 2);
+        QCOMPARE(arguments[arguments.indexOf("-threads") + 1], QString("2"));
+        QCOMPARE(arguments[arguments.lastIndexOf("-threads") + 1], QString("2"));
+        QCOMPARE(arguments[arguments.indexOf("-filter_threads") + 1], QString("2"));
+    }
+    cache.retainSources({});
+    QTRY_COMPARE_WITH_TIMEOUT(running(), 0, 1000);
+    QCOMPARE(changed.count(), 0);
+    qputenv("PATH", previousPath);
+    cache.thumbnail(source, 0);
+    cache.thumbnail(source, 1.0 / 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(source, 0).isNull() && !cache.thumbnail(source, 1.0 / 60).isNull(), 5000);
+#endif
+}
+
+void MediaCacheTest::priorityThumbnailPreemptsBlockedWaveforms_data() {
+    QTest::addColumn<int>("jobs");
+    QTest::newRow("conservative") << 1;
+    QTest::newRow("workstation") << 2;
+}
+
+void MediaCacheTest::priorityThumbnailPreemptsBlockedWaveforms() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QFETCH(int, jobs);
+    QTemporaryDir directory;
+    const auto realFfmpeg = executable("ffmpeg");
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = s16le ]; then exec /bin/sleep 30; fi; done\nexec \"" + realFfmpeg.toUtf8() + "\" \"$@\"\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    Performance::Budget budget;
+    budget.mediaJobs = jobs;
+    MediaCache cache(nullptr, budget);
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    QStringList sources;
+    for (int i = 0; i < jobs; ++i) {
+        const auto copy = directory.filePath(QString("waveform%1.mp4").arg(i));
+        QVERIFY(QFile::copy(source, copy));
+        sources.append(copy);
+        cache.waveform(copy);
+    }
+    QCoreApplication::processEvents();
+    int active = 0;
+    for (auto *process : cache.findChildren<QProcess *>()) active += process->state() != QProcess::NotRunning;
+    QCOMPARE(active, jobs);
+    cache.setInteractive(true);
+    cache.thumbnail(source, 0, 0, true);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(source, 0, 0, true).isNull(), 2000);
+    for (const auto &copy : sources) QCOMPARE(cache.waveformState(copy), QString("loading"));
+    cache.retainSources({});
+#endif
+}
+
+void MediaCacheTest::configuredByteBudgetsEvictOldEntries() {
+    QTemporaryDir directory;
+    const auto first = directory.filePath("first.wav"), second = directory.filePath("second.wav");
+    QVERIFY(encode({"-v", "error", "-f", "lavfi", "-i", "aevalsrc=0.25:s=2000:d=0.10", "-c:a", "pcm_s16le", first}));
+    QVERIFY(encode({"-v", "error", "-f", "lavfi", "-i", "aevalsrc=0.5:s=2000:d=0.10", "-c:a", "pcm_s16le", second}));
+    Performance::Budget budget;
+    budget.thumbnailBytes = 60000; // One 160 by 90 RGBA thumbnail.
+    budget.waveformBytes = 8; // Two float peaks, enough for one of these waveforms.
+    MediaCache cache(nullptr, budget);
+    cache.waveform(first);
+    cache.waveform(second);
+    QTRY_COMPARE_WITH_TIMEOUT(cache.waveformState(second), QString("ready"), 5000);
+    QCOMPARE(cache.waveform(second), QVector<float>({0.5f, 0.5f}));
+    const auto source = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
+    cache.thumbnail(source, 0);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(source, 0).isNull(), 5000);
+    cache.thumbnail(source, 2.0 / 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(source, 2.0 / 60).isNull(), 5000);
+    cache.setInteractive(true);
+    QVERIFY(cache.thumbnail(source, 0).isNull());
+    QVERIFY(!cache.thumbnail(source, 2.0 / 60).isNull());
+    QVERIFY(cache.waveform(first).isEmpty());
+    QCOMPARE(cache.waveformState(first), QString("loading"));
+    QCOMPARE(cache.waveform(second), QVector<float>({0.5f, 0.5f}));
+}
+
+void MediaCacheTest::replacesSourcesWhileTwoJobsAreRunning() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nexec /bin/sleep 30\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto source = directory.filePath("changing.mp4");
+    QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), source));
+    Performance::Budget budget;
+    budget.mediaJobs = 2;
+    MediaCache cache(nullptr, budget);
+    QSignalSpy changed(&cache, &MediaCache::changed);
+    cache.thumbnail(source, 0);
+    cache.thumbnail(source, 1.0 / 60);
+    QCoreApplication::processEvents();
+    int active = 0;
+    for (auto *process : cache.findChildren<QProcess *>()) active += process->state() != QProcess::NotRunning;
+    QCOMPARE(active, 2);
+    QVERIFY(QFile::remove(source));
+    QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/proxy-timing-30.mp4"), source));
+    qputenv("PATH", previousPath);
+    cache.thumbnail(source, 0);
+    cache.thumbnail(source, 2.0 / 60);
+    QTRY_COMPARE_WITH_TIMEOUT(changed.count(), 2, 5000);
+    QCOMPARE(frameId(cache.thumbnail(source, 0)), 0);
+    QCOMPARE(frameId(cache.thumbnail(source, 2.0 / 60)), 1);
+    cache.setInteractive(true);
+    QVERIFY(cache.thumbnail(source, 1.0 / 60).isNull());
+#endif
+}
+
 QTEST_GUILESS_MAIN(MediaCacheTest)
 void MediaCacheTest::filmstripReusesNearbyCompletedFrames() {
     const auto path=QFINDTESTDATA("fixtures/seek.mp4");
-    MediaCache cache;cache.thumbnail(path,.5);
+    MediaCache cache(nullptr, Performance::Budget{});cache.thumbnail(path,.5);
     QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path,.5).isNull(),10000);
     const auto original=cache.thumbnail(path,.5);
     cache.setInteractive(true);
@@ -435,7 +610,7 @@ void MediaCacheTest::filmstripReusesNearbyCompletedFrames() {
 
 void MediaCacheTest::filmstripReusesNearbyPendingFrames() {
     const auto path=QFINDTESTDATA("fixtures/seek.mp4");
-    MediaCache cache;cache.setInteractive(true);
+    MediaCache cache(nullptr, Performance::Budget{});cache.setInteractive(true);
     cache.beginViewport();cache.thumbnail(path,.5);cache.endViewport();
     cache.beginViewport();cache.thumbnail(path,.6,0,false,12);cache.endViewport();
     cache.setInteractive(false);

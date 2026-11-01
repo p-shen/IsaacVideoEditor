@@ -70,6 +70,8 @@ Choose **File → Export…** for H.264/AAC MP4 at 60 fps. Export reads the orig
 
 **Undo/Redo** is available in **Edit**. Hover or focus a control for help. High-resolution footage gets cached preview copies in the background; export uses the originals.
 
+CPU, memory caches, preview quality, and background preparation adapt to available resources. Exports and preview preparation try hardware H.264 encoding with software fallback. See [workstation performance](docs/performance.md) for resource budgets, diagnostics, and validation limits.
+
 ## More detail
 
 - [Advanced editing](docs/advanced-editing.md): source ranges, audio, recovery, transforms, and transitions.

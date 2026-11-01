@@ -33,9 +33,9 @@ private:
     QString program_, destination_, workerError_;
     std::unique_ptr<QTemporaryDir> staging_;
     QProcess process_;
-    QTimer cancelDeadline_;
+    QTimer cancelDeadline_, probeDeadline_;
     QFile log_;
     QByteArray output_;
-    bool running_=false, canceled_=false, hardware_=false, retried_=false;
+    bool running_=false, canceled_=false, hardware_=false, retried_=false, probeTimedOut_=false;
     bool resultReceived_=false, resultSuccess_=false, protocolFailed_=false;
 };

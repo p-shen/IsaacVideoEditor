@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -79,13 +80,22 @@ private slots:
     void priorityDoesNotRestartACoveringJob();
     void irregularTimestampsWithNominalRateKeepOrigin();
     void partialAudioMatchesSource();
+    void runsBoundedConcurrentJobsAndCancelsAll();
+    void hardwareFailureRetriesSoftwareOnce();
+    void configuredDimensionsHaveSeparateCopies();
+    void sourceReplacementRetiresBothWorkers();
+    void hardwareCrashAndBadSourcePreserveReadyCopy();
+    void pausingFullPoolKeepsQueueBounded();
+    void concurrentRangeProbesKeepIndependentTiming();
+    void retiredRequestsCannotDeliverQueuedReady_data();
+    void retiredRequestsCannotDeliverQueuedReady();
 };
 
 void PreviewCacheTest::generatesExactFramesAndReusesCache() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     const QString source = QFINDTESTDATA("fixtures/rotation.mp4");
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     QSignalSpy failed(&cache, &PreviewCache::failed);
     cache.request(source, 60);
@@ -108,7 +118,7 @@ void PreviewCacheTest::generatesExactFramesAndReusesCache() {
     QCOMPARE(ready.count(), 1);
     QCOMPARE(cache.readyPath(source), output);
 
-    PreviewCache fresh(directory.path());
+    PreviewCache fresh(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy reused(&fresh, &PreviewCache::ready);
     fresh.request(source, 60);
     QCOMPARE(reused.count(), 0);
@@ -121,7 +131,7 @@ void PreviewCacheTest::generatesExactFramesAndReusesCache() {
 void PreviewCacheTest::preservesCameraOrientation() {
     QTemporaryDir directory;
     const QString source = QFINDTESTDATA("fixtures/rotation-metadata.mp4");
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, 60);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -143,7 +153,7 @@ void PreviewCacheTest::retainsAudioAndPadsFinalFrame() {
     encode.start(executable("ffmpeg"), {"-v", "error", "-y", "-i", fixture, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "pcm_s16le", "-t", "1", source});
     QVERIFY(encode.waitForFinished(10000));
     QCOMPARE(encode.exitCode(), 0);
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, 121);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -160,7 +170,7 @@ void PreviewCacheTest::retainsAudioAndPadsFinalFrame() {
 
 void PreviewCacheTest::missingSourceFailsOnce() {
     QTemporaryDir directory;
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy failed(&cache, &PreviewCache::failed);
     const QString missing = directory.filePath("missing.mp4");
     cache.request(missing, 60);
@@ -175,7 +185,7 @@ void PreviewCacheTest::sourceChangeInvalidatesReadyCopy() {
     QTemporaryDir directory;
     const QString source = directory.filePath("source.mp4");
     QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), source));
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, 60);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -194,7 +204,7 @@ void PreviewCacheTest::sourceChangeInvalidatesReadyCopy() {
 void PreviewCacheTest::deletedCacheRegeneratesAndNotifies() {
     QTemporaryDir directory;
     const QString source = QFINDTESTDATA("fixtures/rotation.mp4");
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, 60);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -211,7 +221,7 @@ void PreviewCacheTest::removedSourcesCancelWithoutFailure() {
     const QString source = QFINDTESTDATA("fixtures/rotation.mp4");
     const QString other = directory.filePath("other.mp4");
     QVERIFY(QFile::copy(source, other));
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     QSignalSpy failed(&cache, &PreviewCache::failed);
     cache.request(source, 60);
@@ -236,7 +246,7 @@ void PreviewCacheTest::nonSquarePixelsKeepDisplayAspect() {
         "-vf", "setsar=2/1", "-c:v", "libx264", "-an", source});
     QVERIFY(encode.waitForFinished(10000));
     QCOMPARE(encode.exitCode(), 0);
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, 60);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -261,7 +271,7 @@ void PreviewCacheTest::nativeCadenceMatchesOriginalTimeline() {
     QVERIFY(info);
     const int frames = qRound(info->durationSeconds * Project::fps);
     QTemporaryDir directory;
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, frames);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -299,7 +309,7 @@ void PreviewCacheTest::discardedCorruptCopyNeverReused() {
     QVERIFY(original.open(QIODevice::ReadOnly));
     const QByteArray originalBytes = original.readAll();
     original.close();
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.request(source, 60);
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -309,7 +319,7 @@ void PreviewCacheTest::discardedCorruptCopyNeverReused() {
     QVERIFY(corrupted.write("not a video") > 0);
     corrupted.close();
 
-    PreviewCache fresh(directory.path());
+    PreviewCache fresh(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy reused(&fresh, &PreviewCache::ready);
     fresh.request(source, 60);
     fresh.discard(source);
@@ -351,7 +361,7 @@ void PreviewCacheTest::usedRangesKeepOriginalFrames() {
     run("ffmpeg", {"-v", "error", "-y", "-stream_loop", QString::number(loops), "-i", original, "-c", "copy", source});
     const int total = qRound(Media::mediaDurationSeconds(source) * 60);
     QVERIFY(total > 1440);
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.setRequests({{source, total, 1300, 1380}});
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -384,7 +394,7 @@ void PreviewCacheTest::pausesAndPrioritizesQueuedWork() {
     const QString a = directory.filePath("a.mp4"), b = directory.filePath("b.mp4");
     QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), a));
     QVERIFY(QFile::copy(a, b));
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     QSignalSpy failed(&cache, &PreviewCache::failed);
     cache.setPaused(true);
@@ -409,7 +419,7 @@ void PreviewCacheTest::replacedRangesCancelObsoleteWork() {
     QTemporaryDir directory;
     const QString source = QFINDTESTDATA("fixtures/proxy-timing-2997.mp4");
     const int total = qRound(Media::mediaDurationSeconds(source) * 60);
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     QSignalSpy failed(&cache, &PreviewCache::failed);
     cache.setRequests({{source, total, 0, total}});
@@ -428,7 +438,7 @@ void PreviewCacheTest::seekingPreemptsBackgroundPreparation() {
     const QString a = directory.filePath("a.mp4"), b = directory.filePath("b.mp4");
     QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), a));
     QVERIFY(QFile::copy(a, b));
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.setRequests({{a, 60, 0, 60}, {b, 60, 0, 60}});
     cache.prioritize(b, 0, 60);
@@ -445,7 +455,7 @@ void PreviewCacheTest::variableCadenceKeepsOriginalFrames() {
     QVERIFY(total > 1000);
     const auto video = streams(source).first().toObject();
     QVERIFY(video.value("avg_frame_rate").toString() != video.value("r_frame_rate").toString());
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.setRequests({{source, total, 300, 420}});
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -469,7 +479,7 @@ void PreviewCacheTest::priorityDoesNotRestartACoveringJob() {
     QTemporaryDir directory;
     const QString source = QFINDTESTDATA("fixtures/proxy-timing-5994.mp4");
     const int total = qRound(Media::mediaDurationSeconds(source) * 60);
-    PreviewCache cache(directory.path());
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.setRequests({{source, total, 60, 120}, {source, total, 100, 160}});
     cache.prioritize(source, 60, 120);
@@ -488,7 +498,7 @@ void PreviewCacheTest::irregularTimestampsWithNominalRateKeepOrigin() {
     QCOMPARE(video.value("r_frame_rate").toString(), QString("30/1"));
     QCOMPARE(video.value("avg_frame_rate").toString(), QString("30/1"));
     const int total = qRound(Media::mediaDurationSeconds(source) * 60);
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.setRequests({{source, total, 300, 420}});
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -514,7 +524,7 @@ void PreviewCacheTest::partialAudioMatchesSource() {
     run("ffmpeg", {"-v", "error", "-y", "-stream_loop", "19", "-i", QFINDTESTDATA("fixtures/rotation.mp4"),
         "-f", "lavfi", "-i", "sine=frequency=443.3:sample_rate=48000:duration=20", "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy", "-c:a", "pcm_s16le", "-t", "20", source});
-    PreviewCache cache(directory.filePath("cache"));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
     QSignalSpy ready(&cache, &PreviewCache::ready);
     cache.setRequests({{source, 1200, 600, 660}});
     QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 10000);
@@ -528,6 +538,291 @@ void PreviewCacheTest::partialAudioMatchesSource() {
     const auto preview = audioAt(copy.path, (600 - copy.startFrame) / 60.0);
     QCOMPARE(original.size(), 192000);
     QCOMPARE(preview, original);
+}
+
+void PreviewCacheTest::runsBoundedConcurrentJobsAndCancelsAll() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nexec /bin/sleep 30\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto fixture = QFINDTESTDATA("fixtures/rotation.mp4");
+    QStringList sources;
+    for (int i = 0; i < 3; ++i) {
+        const auto source = directory.filePath(QString("source%1.mp4").arg(i));
+        QVERIFY(QFile::copy(fixture, source));
+        sources.append(source);
+    }
+    Performance::Budget budget;
+    budget.proxyJobs = 2;
+    budget.backgroundThreads = 2;
+    PreviewCache cache(directory.filePath("cache"), nullptr, budget);
+    QSignalSpy ready(&cache, &PreviewCache::ready), failed(&cache, &PreviewCache::failed);
+    cache.setRequests({{sources[0], 60, 0, 60}, {sources[1], 60, 0, 60}, {sources[2], 60, 0, 60}});
+    const auto running = [&] {
+        int count = 0;
+        for (auto *process : cache.findChildren<QProcess *>()) count += process->state() != QProcess::NotRunning;
+        return count;
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(running(), 2, 1000);
+    for (auto *process : cache.findChildren<QProcess *>()) {
+        if (process->state() == QProcess::NotRunning) continue;
+        const auto arguments = process->arguments();
+        QCOMPARE(arguments.count("-threads"), 2);
+        QCOMPARE(arguments[arguments.indexOf("-threads") + 1], QString("2"));
+        QCOMPARE(arguments[arguments.lastIndexOf("-threads") + 1], QString("2"));
+        QCOMPARE(arguments[arguments.indexOf("-filter_threads") + 1], QString("2"));
+    }
+    cache.setRequests({});
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.isBusy(), 1000);
+    QCOMPARE(running(), 0);
+    QCOMPARE(ready.count(), 0);
+    QCOMPARE(failed.count(), 0);
+    QCOMPARE(QDir(directory.filePath("cache")).entryList({"*.part.mov"}, QDir::Files).size(), 0);
+    qputenv("PATH", previousPath);
+    cache.setRequests({{sources[0], 60, 0, 60}, {sources[1], 60, 0, 60}});
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 2, 5000);
+    QVERIFY(!cache.readyPath(sources[0]).isEmpty());
+    QVERIFY(!cache.readyPath(sources[1]).isEmpty());
+#endif
+}
+
+void PreviewCacheTest::hardwareFailureRetriesSoftwareOnce() {
+#ifdef Q_OS_WIN
+    QSKIP("The failing-encoder fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    const auto realFfmpeg = executable("ffmpeg");
+    const auto log = directory.filePath("attempts");
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in h264_*) echo hardware >> \"" + log.toUtf8() + "\"; echo 'hardware initialization failed' >&2; exit 1;; esac\ndone\necho software >> \"" + log.toUtf8() + "\"\nexec \"" + realFfmpeg.toUtf8() + "\" \"$@\"\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto fixture = QFINDTESTDATA("fixtures/rotation.mp4");
+    const auto second = directory.filePath("second.mp4");
+    QVERIFY(QFile::copy(fixture, second));
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
+    QSignalSpy ready(&cache, &PreviewCache::ready), failed(&cache, &PreviewCache::failed);
+    cache.request(fixture, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 5000);
+    const auto originalProxy = cache.readyPath(fixture);
+    cache.request(second, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 2, 5000);
+    QFile attempts(log);
+    QVERIFY(attempts.open(QIODevice::ReadOnly));
+    const auto bytes = attempts.readAll();
+    QCOMPARE(bytes.count("hardware"), 1);
+    QCOMPARE(bytes.count("software"), 2);
+    QCOMPARE(failed.count(), 0);
+    QCOMPARE(cache.readyPath(fixture), originalProxy);
+    QCOMPARE(streams(originalProxy).first().toObject().value("nb_read_frames").toString(), QString("60"));
+    QCOMPARE(QDir(directory.filePath("cache")).entryList({"*.part.mov"}, QDir::Files).size(), 0);
+#endif
+}
+
+void PreviewCacheTest::configuredDimensionsHaveSeparateCopies() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    Performance::Budget budget;
+    budget.previewWidth = 128;
+    budget.previewHeight = 72;
+    PreviewCache small(directory.path(), nullptr, budget);
+    small.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!small.readyPath(source).isEmpty(), 5000);
+    const auto first = small.readyPath(source);
+    QCOMPARE(streams(first).first().toObject().value("width").toInt(), 128);
+    QCOMPARE(streams(first).first().toObject().value("height").toInt(), 72);
+    budget.previewWidth = 160;
+    budget.previewHeight = 90;
+    PreviewCache large(directory.path(), nullptr, budget);
+    large.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!large.readyPath(source).isEmpty(), 5000);
+    QVERIFY(large.readyPath(source) != first);
+    QCOMPARE(streams(large.readyPath(source)).first().toObject().value("width").toInt(), 160);
+    QCOMPARE(streams(large.readyPath(source)).first().toObject().value("height").toInt(), 90);
+}
+
+void PreviewCacheTest::sourceReplacementRetiresBothWorkers() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nexec /bin/sleep 30\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto a = directory.filePath("a.mp4"), b = directory.filePath("b.mp4");
+    QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), a));
+    QVERIFY(QFile::copy(a, b));
+    Performance::Budget budget;
+    budget.proxyJobs = 2;
+    PreviewCache cache(directory.filePath("cache"), nullptr, budget);
+    QSignalSpy ready(&cache, &PreviewCache::ready), failed(&cache, &PreviewCache::failed);
+    cache.setRequests({{a, 60, 0, 60}, {b, 60, 0, 60}});
+    QVERIFY(QFile::remove(a));
+    QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/proxy-timing-30.mp4"), a));
+    qputenv("PATH", previousPath);
+    cache.setRequests({{a, 60, 0, 60}});
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.isBusy(), 1000);
+    QCOMPARE(failed.count(), 0);
+    QCOMPARE(ready.first().first().toString(), a);
+    QVERIFY(cache.readyPath(b).isEmpty());
+    const auto video = streams(cache.readyPath(a)).first().toObject();
+    QCOMPARE(video.value("width").toInt(), 128);
+    QCOMPARE(video.value("r_frame_rate").toString(), QString("30/1"));
+    QCOMPARE(QDir(directory.filePath("cache")).entryList({"*.part.mov"}, QDir::Files).size(), 0);
+#endif
+}
+
+void PreviewCacheTest::hardwareCrashAndBadSourcePreserveReadyCopy() {
+#ifdef Q_OS_WIN
+    QSKIP("The failing-encoder fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    PreviewCache prepare(directory.filePath("cache"), nullptr, Performance::Budget{});
+    prepare.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!prepare.readyPath(source).isEmpty(), 5000);
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
+    QSignalSpy ready(&cache, &PreviewCache::ready), failed(&cache, &PreviewCache::failed);
+    cache.request(source, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 5000);
+    const auto output = cache.readyPath(source);
+    QFile original(output);
+    QVERIFY(original.open(QIODevice::ReadOnly));
+    const auto bytes = original.readAll();
+    original.close();
+    const auto log = directory.filePath("attempts");
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in h264_*) hardware=yes;; esac; output=\"$arg\"; done\necho attempt >> \"" + log.toUtf8() + "\"\nprintf incomplete > \"$output\"\nif [ \"$hardware\" = yes ]; then kill -KILL $$; fi\nexit 1\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto bad = directory.filePath("bad.mp4");
+    QFile invalid(bad);
+    QVERIFY(invalid.open(QIODevice::WriteOnly));
+    QVERIFY(invalid.write("invalid video") > 0);
+    invalid.close();
+    cache.request(bad, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 1, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.isBusy(), 1000);
+    QFile attempts(log);
+    QVERIFY(attempts.open(QIODevice::ReadOnly));
+    const int tries = attempts.readAll().count("attempt");
+    QCOMPARE(tries, 2);
+    cache.request(bad, 60);
+    QTest::qWait(50);
+    QCOMPARE(failed.count(), 1);
+    QCOMPARE(ready.count(), 1);
+    QCOMPARE(cache.readyPath(source), output);
+    QVERIFY(original.open(QIODevice::ReadOnly));
+    QCOMPARE(original.readAll(), bytes);
+    QVERIFY(cache.readyPath(bad).isEmpty());
+    QCOMPARE(QDir(directory.filePath("cache")).entryList({"*.part.mov"}, QDir::Files).size(), 0);
+#endif
+}
+
+void PreviewCacheTest::pausingFullPoolKeepsQueueBounded() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nexec /bin/sleep 30\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previousPath = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    Performance::Budget budget;
+    budget.proxyJobs = 2;
+    PreviewCache cache(directory.filePath("cache"), nullptr, budget);
+    QSignalSpy failed(&cache, &PreviewCache::failed);
+    for (int frames = 60; frames < 190; ++frames) cache.request(source, frames);
+    cache.setPaused(true);
+    QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    script.write("#!/bin/sh\nexit 1\n");
+    script.close();
+    cache.setPaused(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.isBusy(), 10000);
+    QCOMPARE(failed.count(), 128);
+    QCOMPARE(QDir(directory.filePath("cache")).entryList({"*.part.mov"}, QDir::Files).size(), 0);
+#endif
+}
+
+void PreviewCacheTest::concurrentRangeProbesKeepIndependentTiming() {
+    QTemporaryDir directory;
+    const auto a = directory.filePath("30fps.mp4"), b = directory.filePath("2997fps.mp4");
+    run("ffmpeg", {"-v", "error", "-y", "-stream_loop", "63", "-i", QFINDTESTDATA("fixtures/proxy-timing-30.mp4"), "-c", "copy", a});
+    run("ffmpeg", {"-v", "error", "-y", "-stream_loop", "3", "-i", QFINDTESTDATA("fixtures/proxy-timing-2997.mp4"), "-c", "copy", b});
+    const int aFrames = qRound(Media::mediaDurationSeconds(a) * 60), bFrames = qRound(Media::mediaDurationSeconds(b) * 60);
+    QVERIFY(aFrames > 1440 && bFrames > 1440);
+    Performance::Budget budget;
+    budget.proxyJobs = 2;
+    PreviewCache cache(directory.filePath("cache"), nullptr, budget);
+    QSignalSpy ready(&cache, &PreviewCache::ready), failed(&cache, &PreviewCache::failed);
+    cache.setRequests({{a, aFrames, 1300, 1380}, {b, bFrames, 1300, 1380}});
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 2, 10000);
+    QCOMPARE(failed.count(), 0);
+    Mlt::Profile profile;
+    Media::configureOutputProfile(profile, 128, 72);
+    for (const auto &source : {a, b}) {
+        const auto copy = cache.readyCopy(source, 1300, 1380);
+        QVERIFY(!copy.path.isEmpty());
+        QVERIFY(copy.startFrame > 0 && copy.startFrame <= 1300);
+        Project originalProject, proxyProject;
+        originalProject.clips = {{source, 1300 / 60.0, 1380 / 60.0}};
+        proxyProject.clips = {{copy.path, (1300 - copy.startFrame) / 60.0, (1380 - copy.startFrame) / 60.0}};
+        auto original = Media::buildTimeline(originalProject, profile), proxy = Media::buildTimeline(proxyProject, profile);
+        QVERIFY(original && proxy);
+        for (int frame = 0; frame < 80; ++frame) QCOMPARE(frameId(*proxy, frame), frameId(*original, frame));
+    }
+    QCOMPARE(QDir(directory.filePath("cache")).entryList({"*.part.mov"}, QDir::Files).size(), 0);
+}
+
+void PreviewCacheTest::retiredRequestsCannotDeliverQueuedReady_data() {
+    QTest::addColumn<bool>("retain");
+    QTest::newRow("set-requests") << false;
+    QTest::newRow("retain-sources") << true;
+}
+
+void PreviewCacheTest::retiredRequestsCannotDeliverQueuedReady() {
+    QFETCH(bool, retain);
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    PreviewCache prepare(directory.path(), nullptr, Performance::Budget{});
+    prepare.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!prepare.readyPath(source).isEmpty(), 5000);
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
+    QSignalSpy ready(&cache, &PreviewCache::ready);
+    cache.request(source, 60);
+    if (retain) cache.retainSources({});
+    else cache.setRequests({});
+    QTest::qWait(50);
+    QCOMPARE(ready.count(), 0);
+    cache.request(source, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(ready.count(), 1, 1000);
 }
 
 QTEST_GUILESS_MAIN(PreviewCacheTest)

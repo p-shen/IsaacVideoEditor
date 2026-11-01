@@ -28,7 +28,7 @@ private slots:
 void PreviewProfileTest::stillSizeFollowsProducerProfile() {
     Mlt::Profile initial;
     configure(initial, 1920, 1080);
-    Preview preview(initial);
+    Preview preview(initial,nullptr,Performance::Budget{});
     QSignalSpy frames(&preview, &Preview::frameReady);
     const QList<QPair<QSize, QSize>> cases = {
         {{160, 90}, {160, 90}}, {{640, 480}, {640, 480}},
@@ -52,7 +52,7 @@ void PreviewProfileTest::stillSizeFollowsProducerProfile() {
 void PreviewProfileTest::playbackUsesChangedAspect() {
     Mlt::Profile initial;
     configure(initial, 1920, 1080);
-    Preview preview(initial);
+    Preview preview(initial,nullptr,Performance::Budget{});
     Mlt::Profile changed;
     configure(changed, 640, 480);
     Mlt::Producer source(changed, "color", "blue");

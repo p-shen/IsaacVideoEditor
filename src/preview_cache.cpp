@@ -1,4 +1,5 @@
 #include "preview_cache.h"
+#include "encoding.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -17,6 +18,7 @@
 #include <numeric>
 
 namespace {
+constexpr int MaximumQueuedJobs = 128;
 QString executablePath(const QString &name) {
     const QString path = QStandardPaths::findExecutable(name);
     return path.isEmpty()
@@ -66,45 +68,48 @@ int verifiedCadencePeriod(const QByteArray &json) {
 }
 }
 
-PreviewCache::PreviewCache(const QString &cacheDirectory, QObject *parent)
+PreviewCache::PreviewCache(const QString &cacheDirectory, QObject *parent, const Performance::Budget &budget)
     : QObject(parent), directory_(cacheDirectory.isEmpty()
         ? QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).filePath("previews")
-        : cacheDirectory), process_(new QProcess(this)), probeTimer_(new QTimer(this)) {
-    probeTimer_->setSingleShot(true);
-    connect(probeTimer_, &QTimer::timeout, this, [this] { if (probing_) process_->kill(); });
-    connect(process_, &QProcess::readyReadStandardError, this, [this] {
-        errors_.append(process_->readAllStandardError());
-        if (errors_.size() > 4096) errors_ = errors_.right(4096);
-    });
-    connect(process_, &QProcess::readyReadStandardOutput, this, &PreviewCache::readProgress);
-    connect(process_, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
-        if (!cancelledPartial_.isEmpty()) {
-            QFile::remove(cancelledPartial_);
-            cancelledPartial_.clear();
-        }
-        if (current_.key.isEmpty()) {
-            QTimer::singleShot(0, this, &PreviewCache::startNext);
-            return;
-        }
-        if (probing_) finishProbe(code == 0 && status == QProcess::NormalExit);
-        else complete(code == 0 && status == QProcess::NormalExit, QString::fromUtf8(errors_).trimmed());
-    });
-    connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart) {
-            if (probing_) finishProbe(false);
-            else complete(false, process_->errorString());
-        }
-    });
+        : cacheDirectory), budget_(budget) {
+    for (int index = 0; index < std::clamp(budget_.proxyJobs, 1, 2); ++index) {
+        auto *worker = new Worker;
+        worker->process = new QProcess(this);
+        worker->probeTimer = new QTimer(this);
+        worker->probeTimer->setSingleShot(true);
+        workers_.append(worker);
+        connect(worker->probeTimer, &QTimer::timeout, this, [worker] { if (worker->probing) worker->process->kill(); });
+        connect(worker->process, &QProcess::readyReadStandardError, this, [worker] {
+            worker->errors.append(worker->process->readAllStandardError());
+            if (worker->errors.size() > 4096) worker->errors = worker->errors.right(4096);
+        });
+        connect(worker->process, &QProcess::readyReadStandardOutput, this, [this, worker] { readProgress(worker); });
+        connect(worker->process, &QProcess::finished, this, [this, worker](int code, QProcess::ExitStatus status) {
+            readProgress(worker);
+            worker->errors.append(worker->process->readAllStandardError());
+            if (worker->probing) finishProbe(worker, code == 0 && status == QProcess::NormalExit);
+            else complete(worker, code == 0 && status == QProcess::NormalExit, QString::fromUtf8(worker->errors).trimmed());
+        });
+        connect(worker->process, &QProcess::errorOccurred, this, [this, worker](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) {
+                if (worker->probing) finishProbe(worker, false);
+                else complete(worker, false, worker->process->errorString());
+            }
+        });
+    }
 }
 
 PreviewCache::~PreviewCache() {
-    process_->disconnect(this);
-    if (process_->state() != QProcess::NotRunning) {
-        process_->kill();
-        process_->waitForFinished(1000);
+    for (auto *worker : workers_) {
+        worker->process->disconnect(this);
+        worker->probeTimer->stop();
+        if (worker->process->state() != QProcess::NotRunning) {
+            worker->process->kill();
+            worker->process->waitForFinished(1000);
+        }
+        if (!worker->job.partialPath.isEmpty()) QFile::remove(worker->job.partialPath);
+        delete worker;
     }
-    if (!current_.partialPath.isEmpty()) QFile::remove(current_.partialPath);
-    if (!cancelledPartial_.isEmpty()) QFile::remove(cancelledPartial_);
 }
 
 QString PreviewCache::sourceKey(const QString &source) const {
@@ -117,7 +122,9 @@ QString PreviewCache::fingerprint(const QString &source, int frames) const {
     if (!info.isFile() || frames < 1) return {};
     const QByteArray identity = sourceKey(source).toUtf8() + '\0' + QByteArray::number(info.size()) + '\0'
         + QByteArray::number(info.lastModified().toMSecsSinceEpoch()) + '\0' + QByteArray::number(frames)
-        + '\0' + QByteArrayLiteral("h264-540p-native-pcm-v2");
+        + '\0' + QByteArray::number(std::clamp(budget_.previewWidth, 2, 1920)) + 'x'
+        + QByteArray::number(std::clamp(budget_.previewHeight, 2, 1080))
+        + '\0' + QByteArrayLiteral("h264-native-pcm-v3");
     return QString::fromLatin1(QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex());
 }
 
@@ -175,7 +182,16 @@ PreviewCache::Job PreviewCache::makeJob(const Request &request) {
 }
 
 bool PreviewCache::isBusy() const {
-    return !current_.key.isEmpty() || !queue_.isEmpty() || process_->state() != QProcess::NotRunning;
+    return !queue_.isEmpty() || std::any_of(workers_.cbegin(), workers_.cend(), [](const Worker *worker) {
+        return !worker->job.key.isEmpty() || worker->process->state() != QProcess::NotRunning;
+    });
+}
+
+void PreviewCache::registerJob(Job &job) {
+    const auto found = sources_.constFind(job.key);
+    job.generation = found != sources_.cend() && (pending_.contains(job.key) || usable(*found))
+        ? found->generation : ++nextGeneration_;
+    sources_.insert(job.key, job);
 }
 
 void PreviewCache::request(const QString &source, int sourceFrames) {
@@ -185,23 +201,35 @@ void PreviewCache::request(const QString &source, int sourceFrames) {
         reportFailure(job, "The source video is missing or has no usable duration.");
         return;
     }
-    sources_.insert(job.key, job);
+    registerJob(job);
+    wanted_.insert(job.key);
     if (failed_.contains(job.key)) return;
     if (usableFile(job.outputPath)) { notifyReady(job); return; }
     notified_.remove(job.key);
     if (pending_.contains(job.key) || failed_.contains(job.key)) return;
     pending_.insert(job.key);
+    if (queue_.size() >= MaximumQueuedJobs) {
+        pending_.remove(queue_.last().key);
+        queue_.removeLast();
+    }
     queue_.enqueue(job);
-    if (current_.key.isEmpty()) startNext();
+    startNext();
 }
 
 void PreviewCache::discard(const QString &source) {
+    const QString identity = sourceKey(source);
     for (const auto &job : sources_) {
-        if (sourceKey(job.source) != sourceKey(source)) continue;
+        if (sourceKey(job.source) != identity) continue;
         failed_.insert(job.key);
         notified_.remove(job.key);
         QFile::remove(job.outputPath);
     }
+    for (auto it = queue_.begin(); it != queue_.end();) {
+        if (sourceKey(it->source) == identity) { pending_.remove(it->key); it = queue_.erase(it); }
+        else ++it;
+    }
+    for (auto *worker : workers_)
+        if (!worker->job.key.isEmpty() && sourceKey(worker->job.source) == identity) cancel(worker, false);
 }
 
 void PreviewCache::setRequests(const QVector<Request> &requests) {
@@ -217,13 +245,17 @@ void PreviewCache::setRequests(const QVector<Request> &requests) {
         }
         if (keys.contains(job.key)) continue;
         keys.insert(job.key);
-        sources_.insert(job.key, job);
+        registerJob(job);
         desired.append(job);
+        if (desired.size() >= MaximumQueuedJobs) break;
     }
-    if (!current_.key.isEmpty() && !keys.contains(current_.key)) cancelCurrent(false);
+    wanted_ = keys;
+    for (auto *worker : workers_)
+        if (!worker->job.key.isEmpty() && !keys.contains(worker->job.key)) cancel(worker, false);
     queue_.clear();
     pending_.clear();
-    if (!current_.key.isEmpty()) pending_.insert(current_.key);
+    for (const auto *worker : workers_)
+        if (!worker->cancelled && !worker->job.key.isEmpty()) pending_.insert(worker->job.key);
     for (const auto &job : desired) {
         if (failed_.contains(job.key)) continue;
         if (usable(job)) { notifyReady(job); continue; }
@@ -244,13 +276,18 @@ void PreviewCache::prioritize(const QString &source, int inFrame, int outFrame) 
         }
     }
     if (!readyCopy(source, inFrame, outFrame).path.isEmpty()) return;
-    if (!current_.key.isEmpty() && sourceKey(current_.source) == sourceKey(source) &&
-        current_.start <= inFrame && current_.end >= outFrame) return;
+    for (const auto *worker : workers_)
+        if (!worker->cancelled && !worker->job.key.isEmpty() && sourceKey(worker->job.source) == sourceKey(source) &&
+            worker->job.start <= inFrame && worker->job.end >= outFrame) return;
     for (int index = 0; index < queue_.size(); ++index) {
         const auto &job = queue_[index];
         if (sourceKey(job.source) == sourceKey(source) && job.start <= inFrame && job.end >= outFrame) {
             const Job urgent = queue_.takeAt(index);
-            cancelCurrent(true);
+            const bool full = std::all_of(workers_.cbegin(), workers_.cend(), [](const Worker *worker) { return !worker->job.key.isEmpty(); });
+            if (full) {
+                auto victim = std::find_if(workers_.begin(), workers_.end(), [](const Worker *worker) { return !worker->cancelled; });
+                if (victim != workers_.end()) cancel(*victim, true);
+            }
             queue_.prepend(urgent);
             QTimer::singleShot(0, this, &PreviewCache::startNext);
             return;
@@ -258,33 +295,38 @@ void PreviewCache::prioritize(const QString &source, int inFrame, int outFrame) 
     }
 }
 
-void PreviewCache::cancelCurrent(bool requeue) {
-    if (current_.key.isEmpty()) return;
-    if (requeue) queue_.prepend(current_);
-    else pending_.remove(current_.key);
-    cancelledPartial_ = current_.partialPath;
-    probing_ = false;
-    probeTimer_->stop();
-    current_ = Job{};
-    if (process_->state() != QProcess::NotRunning) process_->kill();
-    else {
-        QFile::remove(cancelledPartial_);
-        cancelledPartial_.clear();
-    }
+void PreviewCache::cancel(Worker *worker, bool requeue) {
+    if (worker->job.key.isEmpty() || worker->cancelled) return;
+    worker->cancelled = true;
+    worker->probeTimer->stop();
+    if (requeue) {
+        if (queue_.size() >= MaximumQueuedJobs) {
+            pending_.remove(queue_.last().key);
+            queue_.removeLast();
+        }
+        Job job = worker->job;
+        job.partialPath.clear();
+        queue_.prepend(job);
+    } else pending_.remove(worker->job.key);
+    if (worker->process->state() != QProcess::NotRunning) worker->process->kill();
+    else complete(worker, false);
 }
 
-void PreviewCache::finishProbe(bool success) {
-    probeTimer_->stop();
-    probing_ = false;
-    probeBuffer_.append(process_->readAllStandardOutput());
-    if (jobKey(current_) != current_.key) {
-        complete(false, "The source video changed while its timing was checked.");
-        return;
-    }
-    cadencePeriods_.insert(fingerprint(current_.source, current_.frames), success ? verifiedCadencePeriod(probeBuffer_) : 0);
-    pending_.remove(current_.key);
-    current_ = Job{};
-    probeBuffer_.clear();
+bool PreviewCache::isFresh(const Worker *worker) const {
+    const auto found = sources_.constFind(worker->job.key);
+    return !worker->cancelled && found != sources_.cend() && found->generation == worker->job.generation &&
+        jobKey(worker->job) == worker->job.key && !failed_.contains(worker->job.key);
+}
+
+void PreviewCache::finishProbe(Worker *worker, bool success) {
+    worker->probeTimer->stop();
+    worker->probing = false;
+    worker->probeBuffer.append(worker->process->readAllStandardOutput());
+    if (!isFresh(worker)) { complete(worker, false); return; }
+    cadencePeriods_.insert(fingerprint(worker->job.source, worker->job.frames), success ? verifiedCadencePeriod(worker->probeBuffer) : 0);
+    pending_.remove(worker->job.key);
+    worker->job = {};
+    worker->probeBuffer.clear();
     setRequests(requests_);
 }
 
@@ -292,8 +334,7 @@ void PreviewCache::setPaused(bool paused) {
     if (paused_ == paused) return;
     paused_ = paused;
     if (paused) {
-        cancelCurrent(true);
-        if (process_->state() != QProcess::NotRunning) process_->waitForFinished(1000);
+        for (auto *worker : workers_) cancel(worker, true);
         if (!queue_.isEmpty()) emit statusChanged("Preview preparation paused during export");
     } else startNext();
 }
@@ -311,18 +352,20 @@ void PreviewCache::retainSources(const QStringList &sources) {
         else pending_.remove(job.key);
     }
     queue_.swap(retained);
-    if (!current_.key.isEmpty() && !keep.contains(sourceKey(current_.source))) {
-        cancelCurrent(false);
-        QTimer::singleShot(0, this, &PreviewCache::startNext);
-        emit statusChanged(QString());
-    }
+    for (const auto &job : sources_)
+        if (!keep.contains(sourceKey(job.source))) wanted_.remove(job.key);
+    for (auto *worker : workers_)
+        if (!worker->job.key.isEmpty() && !keep.contains(sourceKey(worker->job.source))) cancel(worker, false);
+    QTimer::singleShot(0, this, &PreviewCache::startNext);
 }
 
 void PreviewCache::notifyReady(const Job &job) {
     if (notified_.contains(job.key)) return;
     notified_.insert(job.key);
     QTimer::singleShot(0, this, [this, job] {
-        if (usable(job)) emit ready(job.source, job.outputPath);
+        const auto found = sources_.constFind(job.key);
+        if (wanted_.contains(job.key) && found != sources_.cend() && found->generation == job.generation && usable(job))
+            emit ready(job.source, job.outputPath);
         else notified_.remove(job.key);
     });
 }
@@ -335,98 +378,118 @@ void PreviewCache::reportFailure(const Job &job, const QString &error) {
 }
 
 void PreviewCache::startNext() {
-    if (paused_ || !current_.key.isEmpty() || queue_.isEmpty() || process_->state() != QProcess::NotRunning) return;
-    current_ = queue_.dequeue();
-    if (jobKey(current_) != current_.key) {
-        complete(false, "The source video changed while its preview was queued.");
-        return;
+    if (paused_) return;
+    for (auto *worker : workers_) {
+        if (!worker->job.key.isEmpty() || worker->process->state() != QProcess::NotRunning || queue_.isEmpty()) continue;
+        worker->job = queue_.dequeue();
+        worker->cancelled = worker->probing = worker->hardware = false;
+        worker->errors.clear();
+        if (!isFresh(worker)) { complete(worker, false); continue; }
+        if (usableFile(worker->job.outputPath)) { complete(worker, true); continue; }
+        if (worker->job.needsProbe) {
+            const QString probe = executablePath("ffprobe");
+            if (probe.isEmpty()) { finishProbe(worker, false); continue; }
+            worker->probing = true;
+            worker->probeBuffer.clear();
+            emit statusChanged("Checking source timing…");
+            worker->probeTimer->start(10000);
+            worker->process->start(probe, {"-v", "error", "-select_streams", "v:0", "-show_entries",
+                "stream=r_frame_rate,avg_frame_rate,time_base:packet=pts", "-of", "json", worker->job.source});
+        } else startEncoding(worker);
     }
-    if (usableFile(current_.outputPath)) { complete(true); return; }
-    if (current_.needsProbe) {
-        const QString probe = executablePath("ffprobe");
-        if (probe.isEmpty()) { finishProbe(false); return; }
-        probing_ = true;
-        probeBuffer_.clear();
-        errors_.clear();
-        emit statusChanged("Checking source timing…");
-        probeTimer_->start(10000);
-        process_->start(probe, {"-v", "error", "-select_streams", "v:0", "-show_entries",
-            "stream=r_frame_rate,avg_frame_rate,time_base:packet=pts", "-of", "json", current_.source});
-        return;
-    }
-    const QString ffmpeg = executablePath("ffmpeg");
-    if (ffmpeg.isEmpty()) {
-        complete(false, "FFmpeg is unavailable. Install FFmpeg to prepare lighter preview copies.");
-        return;
-    }
-    if (!QDir().mkpath(directory_)) {
-        complete(false, "Could not create the preview cache folder.");
-        return;
-    }
-    QTemporaryFile temporary(QDir(directory_).filePath(current_.key + "-XXXXXX.part.mov"));
-    if (!temporary.open()) { complete(false, "Could not write the preview cache folder."); return; }
-    temporary.setAutoRemove(false);
-    current_.partialPath = temporary.fileName();
-    temporary.close();
-    errors_.clear();
-    progressBuffer_.clear();
-    lastPercent_ = -1;
-    const QString duration = QString::number((current_.end - current_.start) / 60.0, 'f', 9);
-    // Bake camera orientation once; the editor still applies the user's separate rotation.
-    const QString filter = "scale=w='max(2,trunc(min(960,min(iw*sar,540*dar))/2)*2)':"
-        "h='max(2,trunc(ow/dar/2)*2)',setsar=1,"
-        "tpad=stop_mode=clone:stop=-1";
-    QStringList arguments{"-nostdin", "-hide_banner", "-loglevel", "error", "-y"};
-    if (current_.start > 0) arguments << "-ss" << QString::number(current_.start / 60.0, 'f', 9);
-    arguments << QStringList{
-        "-i", current_.source,
-        "-map", "0:v:0", "-map", "0:a:0?", "-vf", filter,
-        "-fps_mode", "passthrough", "-t", duration,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-g", "15", "-bf", "0",
-        "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-af", "apad",
-        "-map_metadata", "-1", "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats", current_.partialPath
-    };
-    emit statusChanged("Preparing lighter preview…");
-    process_->start(ffmpeg, arguments);
 }
 
-void PreviewCache::complete(bool success, const QString &error) {
-    if (current_.key.isEmpty()) return;
-    const Job job = current_;
-    current_ = Job{};
-    pending_.remove(job.key);
-    success = success && jobKey(job) == job.key;
-    if (success && !usableFile(job.outputPath)) {
-        success = usableFile(job.partialPath) && QFile::rename(job.partialPath, job.outputPath);
+void PreviewCache::startEncoding(Worker *worker, bool software) {
+    const QString ffmpeg = executablePath("ffmpeg");
+    if (ffmpeg.isEmpty()) {
+        complete(worker, false, "FFmpeg is unavailable. Install FFmpeg to prepare lighter preview copies.");
+        return;
     }
+    if (!QDir().mkpath(directory_)) { complete(worker, false, "Could not create the preview cache folder."); return; }
+    QTemporaryFile temporary(QDir(directory_).filePath(worker->job.key + "-XXXXXX.part.mov"));
+    if (!temporary.open()) { complete(worker, false, "Could not write the preview cache folder."); return; }
+    temporary.setAutoRemove(false);
+    worker->job.partialPath = temporary.fileName();
+    temporary.close();
+    worker->errors.clear();
+    worker->progressBuffer.clear();
+    worker->lastPercent = -1;
+    QString encoder = software || hardwareFailed_ ? QString("libx264") : Media::hardwareH264Encoder();
+    if (encoder.isEmpty()) encoder = "libx264";
+    worker->hardware = Media::isHardwareH264Encoder(encoder);
+    const auto &job = worker->job;
+    const QString duration = QString::number((job.end - job.start) / 60.0, 'f', 9);
+    const QString threads = QString::number(std::clamp(budget_.backgroundThreads, 1, 8));
+    // Bake camera orientation once; preserve native cadence and the verified range phase.
+    const QString filter = QString("scale=w='max(2,trunc(min(%1,min(iw*sar,%2*dar))/2)*2)':"
+        "h='max(2,trunc(ow/dar/2)*2)',setsar=1,tpad=stop_mode=clone:stop=-1")
+        .arg(std::clamp(budget_.previewWidth, 2, 1920)).arg(std::clamp(budget_.previewHeight, 2, 1080));
+    QStringList arguments{"-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-threads", threads,
+        "-filter_threads", threads};
+    if (job.start > 0) arguments << "-ss" << QString::number(job.start / 60.0, 'f', 9);
+    arguments << "-i" << job.source << "-map" << "0:v:0" << "-map" << "0:a:0?" << "-vf" << filter
+        << "-fps_mode" << "passthrough" << "-t" << duration << "-c:v" << encoder;
+    if (encoder == "libx264") arguments << "-preset" << "veryfast" << "-crf" << "23";
+    else if (encoder == "h264_nvenc") arguments << "-preset" << "p4" << "-rc" << "vbr" << "-cq" << "23" << "-b:v" << "0";
+    else arguments << "-b:v" << "8M" << "-allow_sw" << "0";
+    arguments << "-threads" << threads << "-g" << "15" << "-bf" << "0" << "-pix_fmt" << "yuv420p"
+        << "-c:a" << "pcm_s16le" << "-ar" << "48000" << "-ac" << "2" << "-af" << "apad"
+        << "-map_metadata" << "-1" << "-metadata:s:v:0" << "rotate=0" << "-movflags" << "+faststart"
+        << "-progress" << "pipe:1" << "-nostats" << job.partialPath;
+    emit statusChanged("Preparing lighter preview…");
+    worker->process->start(ffmpeg, arguments);
+}
+
+void PreviewCache::complete(Worker *worker, bool success, const QString &error) {
+    if (worker->job.key.isEmpty()) return;
+    const bool fresh = isFresh(worker);
+    if (!success && fresh && worker->hardware) {
+        // A runtime failure disables this cache instance's hardware choice; retry each failed job once in software.
+        hardwareFailed_ = true;
+        worker->hardware = false;
+        QFile::remove(worker->job.partialPath);
+        worker->job.partialPath.clear();
+        startEncoding(worker, true);
+        return;
+    }
+    const Job job = worker->job;
+    success = success && fresh;
+    if (success && !usableFile(job.outputPath))
+        success = usableFile(job.partialPath) && QFile::rename(job.partialPath, job.outputPath);
     if (!job.partialPath.isEmpty()) QFile::remove(job.partialPath);
+    worker->job = {};
+    worker->probing = worker->hardware = false;
+    worker->probeTimer->stop();
+    const bool replacementPending = std::any_of(queue_.cbegin(), queue_.cend(), [&job](const Job &queued) { return queued.key == job.key; }) ||
+        std::any_of(workers_.cbegin(), workers_.cend(), [&job](const Worker *other) { return !other->cancelled && other->job.key == job.key; });
+    if (!replacementPending) pending_.remove(job.key);
     if (success) {
         notifyReady(job);
         emit statusChanged(queue_.isEmpty() ? "Lighter preview ready" : "Preparing next preview…");
-    } else reportFailure(job, error);
+    } else if (fresh) reportFailure(job, error);
     QTimer::singleShot(0, this, &PreviewCache::startNext);
 }
 
-void PreviewCache::readProgress() {
-    if (probing_) {
-        probeBuffer_.append(process_->readAllStandardOutput());
-        if (probeBuffer_.size() > 16 * 1024 * 1024) process_->kill();
+void PreviewCache::readProgress(Worker *worker) {
+    if (worker->probing) {
+        worker->probeBuffer.append(worker->process->readAllStandardOutput());
+        if (worker->probeBuffer.size() > 16 * 1024 * 1024) worker->process->kill();
         return;
     }
-    progressBuffer_.append(process_->readAllStandardOutput());
+    worker->progressBuffer.append(worker->process->readAllStandardOutput());
+    if (worker->cancelled) { worker->progressBuffer.clear(); return; }
     int end;
-    while ((end = progressBuffer_.indexOf('\n')) >= 0) {
-        const QByteArray line = progressBuffer_.left(end).trimmed();
-        progressBuffer_.remove(0, end + 1);
-        if (!line.startsWith("out_time_us=") || current_.end <= current_.start) continue;
+    while ((end = worker->progressBuffer.indexOf('\n')) >= 0) {
+        const QByteArray line = worker->progressBuffer.left(end).trimmed();
+        worker->progressBuffer.remove(0, end + 1);
+        if (!line.startsWith("out_time_us=") || worker->job.end <= worker->job.start) continue;
         bool valid = false;
         const qint64 microseconds = line.mid(12).toLongLong(&valid);
         if (!valid) continue;
-        const int percent = std::clamp(int(microseconds * 60.0 / ((current_.end - current_.start) * 10000.0)), 0, 99);
-        if (percent == lastPercent_) continue;
-        lastPercent_ = percent;
+        const int percent = std::clamp(int(microseconds * 60.0 / ((worker->job.end - worker->job.start) * 10000.0)), 0, 99);
+        if (percent == worker->lastPercent) continue;
+        worker->lastPercent = percent;
         emit statusChanged(QString("Preparing lighter preview… %1%").arg(percent));
     }
-    if (progressBuffer_.size() > 4096) progressBuffer_ = progressBuffer_.right(4096);
+    if (worker->progressBuffer.size() > 4096) worker->progressBuffer = worker->progressBuffer.right(4096);
 }
