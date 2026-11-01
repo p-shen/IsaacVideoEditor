@@ -781,6 +781,36 @@ private slots:
         QCoreApplication::sendEvent(window,&drop);
         QVERIFY(drop.isAccepted()); QCOMPARE(editor.clips().size(),0); QCOMPARE(editor.assets().size(),1);
     }
+    void sourceRangeFieldsEditSecondsAtFramePrecision() {
+        EditorController editor;QQmlApplicationEngine engine;QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        auto *window=load(engine,editor);QVERIFY(window);QVERIFY(editor.importMedia({fixture()}));
+        auto *in=window->findChild<QQuickItem*>("sourceInField");QVERIFY(in);
+        auto *out=window->findChild<QQuickItem*>("sourceOutField");QVERIFY(out);
+        QCOMPARE(in->property("text").toString(),QString("0.000"));
+        QCOMPARE(out->property("text").toString(),QString("2.000"));
+        editor.seekSource(13);editor.markSourceIn();editor.seekSource(74);editor.markSourceOut();
+        QCOMPARE(in->property("text").toString(),QString("0.217"));
+        QCOMPARE(out->property("text").toString(),QString("1.250"));
+        in->forceActiveFocus();in->setProperty("text","0.5");QVERIFY(in->property("acceptableInput").toBool());
+        QVERIFY(QMetaObject::invokeMethod(in,"editingFinished"));
+        out->forceActiveFocus();out->setProperty("text","1.75");QVERIFY(out->property("acceptableInput").toBool());
+        QVERIFY(QMetaObject::invokeMethod(out,"editingFinished"));
+        QCOMPARE(editor.currentSource()["inFrame"].toInt(),30);QCOMPARE(editor.currentSource()["outFrame"].toInt(),105);
+        QVERIFY(editor.appendSource());QCOMPARE(editor.duration(),75);
+        in->forceActiveFocus();in->setProperty("text","0.22");QVERIFY(QMetaObject::invokeMethod(in,"editingFinished"));
+        QCOMPARE(editor.currentSource()["inFrame"].toInt(),13);QCOMPARE(in->property("text").toString(),QString("0.217"));
+        editor.undo();QCOMPARE(in->property("text").toString(),QString("0.500"));
+        out->forceActiveFocus();out->setProperty("text","1.9");QTest::keyClick(window,Qt::Key_Escape);
+        QCOMPARE(editor.currentSource()["outFrame"].toInt(),105);QCOMPARE(out->property("text").toString(),QString("1.750"));
+        in->forceActiveFocus();in->setProperty("text","-1");QVERIFY(!in->property("acceptableInput").toBool());
+        QVERIFY(QMetaObject::invokeMethod(in,"editingFinished"));QCOMPARE(editor.currentSource()["inFrame"].toInt(),30);
+        out->forceActiveFocus();out->setProperty("text","2.1");QVERIFY(!out->property("acceptableInput").toBool());
+        QVERIFY(QMetaObject::invokeMethod(out,"editingFinished"));QCOMPARE(editor.currentSource()["outFrame"].toInt(),105);
+        editor.clearSourceRange();QCOMPARE(in->property("text").toString(),QString("0.000"));QCOMPARE(out->property("text").toString(),QString("2.000"));
+        editor.seekSource(119);editor.markSourceIn();QCOMPARE(in->property("text").toString(),QString("1.983"));QVERIFY(in->property("acceptableInput").toBool());
+        editor.clearSourceRange();editor.seekSource(0);editor.markSourceOut();QCOMPARE(out->property("text").toString(),QString("0.017"));QVERIFY(out->property("acceptableInput").toBool());
+        QCOMPARE(warnings.count(),0);
+    }
     void sourceRangeButtonsKeyboardAndTimelineDrop() {
         EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
         QVERIFY(editor.importMedia({fixture()}));

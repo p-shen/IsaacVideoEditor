@@ -46,26 +46,30 @@ ColumnLayout {
     }
     Flow {
         Layout.fillWidth: true; spacing: 5
-        Label { text: "In (frame)"; padding: 5 }
+        Label { text: "In"; padding: 5 }
         UI.TextField {
-            objectName: "sourceInField"; width: Math.max(70,font.pixelSize * 4)
-            text: controller.currentSource.inFrame === undefined ? "0" : controller.currentSource.inFrame
-            Accessible.name: "Source inclusive in frame"
-            validator: IntValidator { bottom: 0; top: Math.max(0,(controller.currentSource.durationFrames || 1) - 1) }
-            onEditingFinished: if (acceptableInput) controller.setSourceRange(Number(text),controller.currentSource.outFrame)
-            Keys.onEscapePressed: { text = Qt.binding(function(){ return String(controller.currentSource.inFrame || 0) }); focus = false }
+            objectName: "sourceInField"; width: Math.max(100,font.pixelSize * 7)
+            suffix: "s"
+            text: ((controller.currentSource.inFrame || 0)/60).toFixed(3)
+            function restore() { text = Qt.binding(function(){ return ((controller.currentSource.inFrame || 0)/60).toFixed(3) }) }
+            Accessible.name: "Source in point in seconds"
+            validator: DoubleValidator { bottom: 0; top: Math.max(0,(controller.currentSource.durationFrames || 1) - 1)/60 + .0005; decimals: 3; locale: "C"; notation: DoubleValidator.StandardNotation }
+            onEditingFinished: { if (acceptableInput) controller.setSourceRange(Math.round(Number(text)*60),controller.currentSource.outFrame); restore() }
+            Keys.onEscapePressed: { restore(); focus = false }
         }
-        Label { text: "Out (exclusive)"; padding: 5 }
+        Label { text: "Out"; padding: 5 }
         UI.TextField {
-            objectName: "sourceOutField"; width: Math.max(70,font.pixelSize * 4)
-            text: controller.currentSource.outFrame || 1
-            Accessible.name: "Source exclusive out frame"
-            validator: IntValidator { bottom: 1; top: controller.currentSource.durationFrames || 1 }
-            onEditingFinished: if (acceptableInput) controller.setSourceRange(controller.currentSource.inFrame,Number(text))
-            Keys.onEscapePressed: { text = Qt.binding(function(){ return String(controller.currentSource.outFrame || 1) }); focus = false }
+            objectName: "sourceOutField"; width: Math.max(100,font.pixelSize * 7)
+            suffix: "s"
+            text: ((controller.currentSource.outFrame || 1)/60).toFixed(3)
+            function restore() { text = Qt.binding(function(){ return ((controller.currentSource.outFrame || 1)/60).toFixed(3) }) }
+            Accessible.name: "Source out point in seconds"
+            validator: DoubleValidator { bottom: 1/60 - .0005; top: (controller.currentSource.durationFrames || 1)/60 + .0005; decimals: 3; locale: "C"; notation: DoubleValidator.StandardNotation }
+            onEditingFinished: { if (acceptableInput) controller.setSourceRange(controller.currentSource.inFrame,Math.round(Number(text)*60)); restore() }
+            Keys.onEscapePressed: { restore(); focus = false }
         }
     }
-    Label { text: "Selected: " + (controller.currentSource.rangeFrames || 0) + " frames · " + ((controller.currentSource.rangeFrames || 0)/60).toFixed(3) + " s"; Layout.fillWidth: true; wrapMode: Text.Wrap; Accessible.name: text }
+    Label { text: "Selected: " + ((controller.currentSource.rangeFrames || 0)/60).toFixed(3) + " s"; Layout.fillWidth: true; wrapMode: Text.Wrap; Accessible.name: text }
     Flow {
         Layout.fillWidth: true; spacing: 4
         UI.Button { objectName: "appendSourceButton"; text: "Append"; enabled: controller.currentSource.validRange === true && controller.currentSource.kind === "video"; onClicked: controller.appendSource() }
