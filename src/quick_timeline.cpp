@@ -1,6 +1,7 @@
 #include "quick_timeline.h"
 #include <QQuickWindow>
 #include "mlt_engine.h"
+#include "transition_presets.h"
 
 #include <QCursor>
 #include <QDragEnterEvent>
@@ -634,10 +635,12 @@ void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
         preview_=project_;const int delta=qRound((lastPoint_.x()-pressPoint_.x()+contentOffset_-pressOffset_)*60/pixelsPerSecond_);
         if(gesture_==Gesture::Transition){
             const int requested=std::clamp(project_.transitionFramesBefore(gestureTransition_)+delta,0,600);
-            preview_.setTransition(gestureTransition_,requested?"dissolve":"cut",requested);
+            const auto &clip=project_.clips[gestureTransition_];
+            const QString type=requested?(clip.hardCutBefore||clip.transitionType=="cut"?QString("dissolve"):clip.transitionType):QString("cut");
+            preview_.setTransition(gestureTransition_,type,requested);
             const int effective=preview_.transitionFramesBefore(gestureTransition_);
-            gestureText_=QString("Dissolve · %1 frames overlap · Project %2%3").arg(effective).arg(timecode(preview_.durationFrames())).arg(effective<requested?" · Clamped to playable media":"");
-            emit transitionPreviewRequested(gestureTransition_,requested);
+            gestureText_=QString("%1 · %2 frames overlap · Project %3%4").arg(Transitions::name(type)).arg(effective).arg(timecode(preview_.durationFrames())).arg(effective<requested?" · Clamped to playable media":"");
+            emit transitionPreviewRequested(gestureTransition_,type,requested);
         }else{
             auto a=project_.audioControls(gestureAudioLane_);QVariantMap fields;
             const auto rect=audioRect(gestureAudioLane_);
@@ -913,7 +916,7 @@ void QuickTimeline::dragMoveEvent(QDragMoveEvent *event) {
     if(event->mimeData()->hasFormat("application/x-isaac-transition")){
         const int cut=cutNear(event->position().x());
         if(cut>=0){if(presetCut_<0){preview_=project_;gesture_=Gesture::Transition;dragging_=true;emit audioGestureStarted();}presetCut_=gestureTransition_=cut;
-            preview_=project_;preview_.setTransition(cut,"dissolve",30);emit transitionSelected(cut);emit transitionPreviewRequested(cut,30);
+            preview_=project_;preview_.setTransition(cut,"dissolve",30);emit transitionSelected(cut);emit transitionPreviewRequested(cut,"dissolve",30);
             gestureText_=QString("Dissolve · %1 frames · Project %2").arg(preview_.transitionFramesBefore(cut)).arg(timecode(preview_.durationFrames()));event->acceptProposedAction();emit gestureChanged();updateViewport();}
         else event->ignore();return;
     }

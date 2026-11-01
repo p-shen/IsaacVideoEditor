@@ -116,6 +116,19 @@ private slots:
     void trimCommitsOnceWithBoundsAndExactSourceComparison();
     void frontTrimHandleWinsOverTransition_data();
     void frontTrimHandleWinsOverTransition();
+    void transitionResizeRetainsEffectAndCancels() {
+        Scene s; auto p=sequence(); p.clips[1].transitionType="wipe-left";p.clips[1].transitionFrames=30;
+        s.view->setProject(p,{8,8,8});
+        const auto from=s.view->transitionRect(1).center().toPoint();
+        QSignalSpy moves(s.view,&QuickTimeline::transitionPreviewRequested);
+        QSignalSpy ends(s.view,&QuickTimeline::audioGestureFinished);
+        beginDrag(s,from,from+QPoint(35,0)); QVERIFY(!moves.isEmpty());
+        QCOMPARE(moves.last()[1].toString(),"wipe-left");
+        QVERIFY2(s.view->gestureText().startsWith("Wipe left"),qPrintable(s.view->gestureText()));
+        QTest::keyClick(&s.window,Qt::Key_Escape);QCOMPARE(ends.size(),1);QVERIFY(ends.first().first().toBool());
+        QCOMPARE(s.view->transitionRect(1).width(),30*s.view->pixelsPerSecond()/60);
+        QTest::mouseRelease(&s.window,Qt::LeftButton,Qt::NoModifier,from+QPoint(35,0));
+    }
     void snappingAcquiresReleasesAndHonorsBounds();
     void reorderUsesExistingBoundariesAndPreservesGroupOrder();
     void landingPreviewMatchesCommittedGeometry_data();

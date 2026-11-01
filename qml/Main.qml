@@ -577,7 +577,7 @@ ApplicationWindow {
                         onAudioPreviewRequested: (lane,fields) => editor.updateAudio(lane,fields)
                         onAudioGestureFinished: canceled => editor.endAudioGesture(canceled)
                         onTransitionSelected: index => { editor.selectTransition(index); window.focusInspector(2,false) }
-                        onTransitionPreviewRequested: (index,frames) => editor.setTransition(index,frames > 0 ? "dissolve" : "cut",frames)
+                        onTransitionPreviewRequested: (index,type,frames) => editor.setTransition(index,type,frames)
                         onTransitionPresetRequested: (index,type,frames) => editor.setTransition(index,type,frames)
                         onFilesInserted: (paths,frame) => editor.dropMediaAt(paths,frame)
                         PinchHandler {

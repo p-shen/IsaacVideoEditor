@@ -120,7 +120,7 @@ signals:
     void audioPreviewRequested(int lane,const QVariantMap &fields);
     void audioGestureFinished(bool canceled);
     void transitionSelected(int index);
-    void transitionPreviewRequested(int index,int frames);
+    void transitionPreviewRequested(int index,const QString &type,int frames);
     void transitionPresetRequested(int index,const QString &type,int frames);
     void filesDropped(const QStringList &paths);
     void filesInserted(const QStringList &paths,int frame);

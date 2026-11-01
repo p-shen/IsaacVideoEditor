@@ -17,6 +17,7 @@ add_library(isaac_core
     src/runtime_paths.cpp
     src/export_job.cpp
     src/project.cpp
+    src/transition_presets.cpp
     src/captions.cpp
     src/text_style.cpp
     src/visual_transform.cpp
@@ -189,6 +190,11 @@ add_dependencies(audio_transition_test IsaacVideoEditor)
 target_link_libraries(audio_transition_test PRIVATE isaac_ui Qt6::Test)
 add_test(NAME audio_transition_test COMMAND audio_transition_test)
 set_tests_properties(audio_transition_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
+
+add_executable(transition_test tests/transition_test.cpp)
+target_link_libraries(transition_test PRIVATE isaac_ui Qt6::Test)
+add_test(NAME transition_test COMMAND transition_test)
+set_tests_properties(transition_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
 
 add_executable(composition_test tests/composition_test.cpp)
 target_link_libraries(composition_test PRIVATE isaac_ui Qt6::Test)

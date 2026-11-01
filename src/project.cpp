@@ -1,5 +1,6 @@
 #include "project.h"
 #include "text_style.h"
+#include "transition_presets.h"
 
 #include <QFile>
 #include <QSet>
@@ -131,8 +132,8 @@ int Project::transitionFramesBefore(int index) const {
     return result;
 }
 bool Project::setTransition(int index,const QString &type,int frames) {
-    if(index<=0||index>=clips.size()||(type!="cut"&&type!="dissolve")||frames<0||frames>600)return false;
-    if(transitionFramesBefore(index)==(type=="cut"?0:frames) && ((type=="cut")== (transitionFramesBefore(index)==0)))return false;
+    if(index<=0||index>=clips.size()||!Transitions::find(type)||frames<0||frames>600)return false;
+    if(clips[index].transitionType==type && transitionFramesBefore(index)==(type=="cut"?0:frames) && ((type=="cut")== (transitionFramesBefore(index)==0)))return false;
     const auto before=clips;
     // Freeze inherited values before the first local edit, preserving distant legacy cuts.
     QVector<int> inherited;for(int i=0;i<clips.size();++i)inherited.append(transitionFramesBefore(i));
@@ -256,7 +257,7 @@ QString Project::validate() const {
     for (int i = 0; i < clips.size(); ++i) {
         const auto &clip = clips[i];
         if(!validAudio(clip.audio)||clip.transitionFrames < -1||clip.transitionFrames>600||
-            (clip.transitionType!="cut"&&clip.transitionType!="dissolve"))return "A clip audio or transition setting is invalid.";
+            !Transitions::find(clip.transitionType))return "A clip audio or transition setting is invalid.";
         if (clip.path.isEmpty()) return QString("Clip %1 has no file.").arg(i + 1);
         if (clip.rotationDegrees < 0 || clip.rotationDegrees >= 360 || clip.rotationDegrees % 90 != 0)
             return QString("Clip %1 needs a rotation of 0, 90, 180, or 270 degrees.").arg(i + 1);

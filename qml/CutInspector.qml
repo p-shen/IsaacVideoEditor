@@ -19,7 +19,8 @@ ColumnLayout {
     spacing: 10
     function focusFirst() { cutChooser.forceActiveFocus() }
     function setFrames(frames) {
-        if (controller.selectedTransition > 0) controller.setTransition(controller.selectedTransition, frames > 0 ? "dissolve" : "cut", frames)
+        var type = frames > 0 ? (cut.type && cut.type !== "cut" ? cut.type : "dissolve") : "cut"
+        if (controller.selectedTransition > 0) controller.setTransition(controller.selectedTransition, type, frames)
     }
 
     component TransitionField: UI.TextField {
@@ -71,12 +72,23 @@ ColumnLayout {
         spacing: 8
         Label { text: "Transition"; Layout.fillWidth: true }
         UI.ComboBox {
+            objectName: "transitionEffectChooser"
             Layout.fillWidth: true
-            model: ["Cut", "Dissolve"]
-            currentIndex: cuts.cut.type === "dissolve" ? 1 : 0
+            model: controller.transitionPresets
+            textRole: "name"
+            valueRole: "id"
+            currentIndex: {
+                var presets = controller.transitionPresets
+                for (var i = 0; i < presets.length; ++i) if (presets[i].id === cuts.cut.type) return i
+                return 0
+            }
             enabled: controller.selectedTransition > 0
             Accessible.name: "Transition type"
-            onActivated: if (controller.selectedTransition > 0) cuts.setFrames(currentIndex === 0 ? 0 : Math.max(1, cuts.cut.frames || 30))
+            onActivated: index => {
+                if (controller.selectedTransition <= 0) return
+                var type = controller.transitionPresets[index].id
+                controller.setTransition(controller.selectedTransition, type, type === "cut" ? 0 : Math.max(1, cuts.cut.frames || 30))
+            }
         }
         Label { text: "Duration"; Layout.fillWidth: true }
         TransitionField {

@@ -116,6 +116,66 @@ private slots:
         timing->setProperty("expanded",true); QTRY_VERIFY(fade->isVisible()); fade->forceActiveFocus(); fade->setProperty("text","0.5");
         QVERIFY(QMetaObject::invokeMethod(fade,"editingFinished")); QCOMPARE(editor.project().musicFadeInFrames,30);
     }
+    void transitionEffectsKeepTheirTypeWhenEditingDuration() {
+        EditorController editor; QQmlApplicationEngine engine; auto *window=load(engine,editor); QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture()})); editor.selectTransition(1); editor.setTransition(1,"dissolve",30);
+        QVERIFY(section(window,2)); auto *chooser=named(window,"transitionEffectChooser"); QVERIFY(chooser);
+        QVERIFY(fullyVisible(chooser)); chooser->forceActiveFocus(); QTest::keyClick(window,Qt::Key_Down);
+        QCOMPARE(editor.currentTransition()["type"].toString(),"wipe-left");
+        const auto presets=editor.transitionPresets();
+        for(int i=2;i<presets.size();++i){
+            QVERIFY(QMetaObject::invokeMethod(chooser,"activated",Q_ARG(int,i)));
+            QCOMPARE(editor.currentTransition()["type"].toString(),presets[i].toMap()["id"].toString());
+            QCOMPARE(editor.project().transitionFramesBefore(1),30);
+        }
+        auto *duration=named(window,"transitionDurationField"); QVERIFY(duration);
+        duration->forceActiveFocus(); duration->setProperty("text","0.75");
+        QVERIFY(QMetaObject::invokeMethod(duration,"editingFinished"));
+        QCOMPARE(editor.project().transitionFramesBefore(1),45);
+        QCOMPARE(editor.currentTransition()["type"].toString(),"blinds-vertical");
+        QTest::keyClick(window,Qt::Key_Up); QCOMPARE(editor.project().transitionFramesBefore(1),46);
+        QCOMPARE(editor.currentTransition()["type"].toString(),"blinds-vertical");
+        editor.undo(); QCOMPARE(editor.project().transitionFramesBefore(1),45);
+        editor.undo(); QCOMPARE(editor.project().transitionFramesBefore(1),30);
+        editor.undo(); QCOMPARE(editor.currentTransition()["type"].toString(),"blinds-horizontal");
+        auto *timeline=named(window,"timeline"); QVERIFY(timeline);
+        QVERIFY(QMetaObject::invokeMethod(timeline,"audioGestureStarted"));
+        QVERIFY(QMetaObject::invokeMethod(timeline,"transitionPreviewRequested",Q_ARG(int,1),Q_ARG(QString,QString("blinds-horizontal")),Q_ARG(int,20)));
+        QCOMPARE(editor.currentTransition()["type"].toString(),"blinds-horizontal");
+        QVERIFY(QMetaObject::invokeMethod(timeline,"audioGestureFinished",Q_ARG(bool,false)));
+        QCOMPARE(editor.project().transitionFramesBefore(1),20);
+        QCOMPARE(editor.project().clips[1].transitionType,"blinds-horizontal");
+        const auto captures=qEnvironmentVariable("ISAAC_TRANSITION_UI_SCREENSHOTS");
+        if(!captures.isEmpty()){
+            QDir().mkpath(captures);
+            for(bool dark:{true,false}){
+                setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+                QTest::qWait(100);QVERIFY(window->grabWindow().save(captures+(dark?"/transitions-dark.png":"/transitions-light.png")));
+            }
+            chooser->forceActiveFocus();QTest::keyClick(window,Qt::Key_Space);QTest::qWait(100);
+            QVERIFY(window->grabWindow().save(captures+"/transitions-popup.png"));QTest::keyClick(window,Qt::Key_Escape);
+            window->resize(1000,660);auto font=qApp->font();font.setPointSize(24);window->setProperty("font",font);
+            QVERIFY(section(window,2));chooser=named(window,"transitionEffectChooser");QVERIFY(chooser);
+            chooser->forceActiveFocus();QTRY_VERIFY(fullyVisible(chooser));
+            QTest::keyClick(window,Qt::Key_Space);QTest::qWait(100);
+            QVERIFY(window->grabWindow().save(captures+"/transitions-large-text.png"));QTest::keyClick(window,Qt::Key_Escape);
+        }
+    }
+    void transitionEffectSurvivesZeroPlayableOverlap() {
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture()}));editor.selectTransition(1);QVERIFY(section(window,2));
+        QCOMPARE(editor.currentTransition()["type"].toString(),"cut");
+        editor.setTransition(1,"wipe-left",30);QVERIFY(editor.trimClip(0,0,1./60));
+        QCOMPARE(editor.project().transitionFramesBefore(1),0);
+        QCOMPARE(editor.currentTransition()["type"].toString(),"wipe-left");
+        auto *duration=named(window,"transitionDurationField");QVERIFY(duration);
+        duration->forceActiveFocus();duration->setProperty("text","0.25");
+        QVERIFY(QMetaObject::invokeMethod(duration,"editingFinished"));
+        QCOMPARE(editor.project().clips[1].transitionType,"wipe-left");
+        QCOMPARE(editor.currentTransition()["type"].toString(),"wipe-left");
+        QVERIFY(editor.trimClip(0,0,1));QVERIFY(editor.project().transitionFramesBefore(1)>0);
+        QCOMPARE(editor.currentTransition()["type"].toString(),"wipe-left");
+    }
     void transitionPresetRequiresAnExplicitCut() {
         EditorController editor; QQmlApplicationEngine engine; auto *window=load(engine,editor); QVERIFY(window);
         QVERIFY(editor.importFiles({fixture(),fixture()})); QVERIFY(section(window,2));

@@ -4,6 +4,7 @@
 #include "runtime_paths.h"
 #include "encoding.h"
 #include "performance.h"
+#include "transition_presets.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -356,6 +357,8 @@ std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
             if (error) *error = "Crossfade effect is unavailable.";
             return {};
         }
+        if (!Transitions::configure(dissolve, project.clips[boundary + 1].transitionType,
+                                   {profile.width(), profile.height()}, error)) return {};
         audioFade.set("start", -1.0);
         if (video.mix(boundary, overlap, &dissolve) != 0 ||
             video.mix_add(boundary + 1, &audioFade) != 0) {

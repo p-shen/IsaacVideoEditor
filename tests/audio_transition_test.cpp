@@ -226,11 +226,11 @@ private slots:
         QTest::mousePress(&window,Qt::LeftButton,Qt::NoModifier,center);QTest::mouseMove(&window,center+QPoint(90,0),1);QTest::keyClick(&window,Qt::Key_Escape);
         QCOMPARE(ends.size(),2);QCOMPARE(ends[1][0].toBool(),true);
         QRectF transition;QVERIFY(QMetaObject::invokeMethod(&view,"transitionRect",Qt::DirectConnection,Q_RETURN_ARG(QRectF,transition),Q_ARG(int,1)));
-        QSignalSpy cutMoves(&view,SIGNAL(transitionPreviewRequested(int,int)));
+        QSignalSpy cutMoves(&view,&QuickTimeline::transitionPreviewRequested);
         const auto edge=QPoint(qRound(transition.right()-2),qRound(transition.center().y()));
         QTest::mousePress(&window,Qt::LeftButton,Qt::NoModifier,edge);QTest::mouseMove(&window,edge+QPoint(30,0),1);
         QVERIFY(cutMoves.size()>0);QTest::mouseRelease(&window,Qt::LeftButton,Qt::NoModifier,edge+QPoint(30,0));
-        QVERIFY(cutMoves.last()[1].toInt()>30);
+        QCOMPARE(cutMoves.last()[1].toString(),"dissolve");QVERIFY(cutMoves.last()[2].toInt()>30);
     }
     void localCutsDoNotShortenDistantCuts() {
         QTemporaryDir dir; const auto file=dir.filePath("local.json");

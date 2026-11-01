@@ -1,6 +1,7 @@
 #include "editor_controller.h"
 #include "export_job.h"
 #include "text_style.h"
+#include "transition_presets.h"
 #include "media_cache.h"
 #include "mlt_engine.h"
 #include "preview.h"
@@ -569,12 +570,20 @@ void EditorController::setSolo(int lane){
     soloLane_=soloLane_==lane?-1:lane;soloClip_=primary_;rebuild();emit stateChanged();
 }
 void EditorController::resetClipping(){masterClipped_=false;emit stateChanged();}
+QVariantList EditorController::transitionPresets() const {
+    QVariantList list;
+    for (const auto &preset : Transitions::presets()) list.append(QVariantMap{{"id",preset.id},{"name",preset.name}});
+    return list;
+}
 QVariantList EditorController::transitions() const {
     QVariantList list;const auto &p=visibleProject();
     for(int i=1;i<p.clips.size();++i){
         const int frames=p.transitionFramesBefore(i),requested=p.clips[i].transitionFrames<0?p.crossfadeFrames:p.clips[i].transitionFrames;
+        // A short clip can leave no overlap while retaining its chosen mask preset.
+        const auto &clip=p.clips[i];
+        const bool cut=clip.hardCutBefore||clip.transitionType=="cut"||(frames==0&&clip.transitionType=="dissolve");
         list.append(QVariantMap{{"index",i},{"name",QString("Cut %1 → %2").arg(i).arg(i+1)},
-            {"type",frames>0?"dissolve":"cut"},{"frames",frames},{"requestedFrames",requested},
+            {"type",cut?QString("cut"):clip.transitionType},{"frames",frames},{"requestedFrames",requested},
             {"shortened",!p.clips[i].hardCutBefore&&p.clips[i].transitionType!="cut"&&frames<requested}});
     }
     return list;
@@ -585,7 +594,7 @@ void EditorController::setTransition(int index,const QString &type,int frames){c
     auto next=audioPreview_?project_:visibleProject();
     if(!next.setTransition(index,type,frames)){
         if(audioPreview_)presentAudioEdit(next,"Change transition");
-        if(index>0&&index<next.clips.size()&&type=="dissolve"&&frames>next.transitionFramesBefore(index))report(QString("Transition remains at %1 frames; neighboring media leaves no more playable overlap.").arg(next.transitionFramesBefore(index)));
+        if(index>0&&index<next.clips.size()&&Transitions::find(type)&&type!="cut"&&frames>next.transitionFramesBefore(index))report(QString("Transition remains at %1 frames; neighboring media leaves no more playable overlap.").arg(next.transitionFramesBefore(index)));
         return;
     }
     const int effective=next.transitionFramesBefore(index);transitionIndex_=index;presentAudioEdit(next,"Change transition");

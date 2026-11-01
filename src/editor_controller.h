@@ -78,6 +78,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(double masterPeak READ masterPeak NOTIFY stateChanged)
     Q_PROPERTY(bool masterClipped READ masterClipped NOTIFY stateChanged)
     Q_PROPERTY(QVariantList transitions READ transitions NOTIFY projectChanged)
+    Q_PROPERTY(QVariantList transitionPresets READ transitionPresets CONSTANT)
     Q_PROPERTY(int selectedTransition READ selectedTransition NOTIFY stateChanged)
     Q_PROPERTY(QVariantMap currentTransition READ currentTransition NOTIFY stateChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY stateChanged)
@@ -248,6 +249,7 @@ public:
     double masterPeak() const {return masterPeak_;}
     bool masterClipped() const {return masterClipped_;}
     QVariantList transitions() const;
+    QVariantList transitionPresets() const;
     int selectedTransition() const {return transitionIndex_;}
     QVariantMap currentTransition() const;
     Q_INVOKABLE void selectAudio(int lane);
