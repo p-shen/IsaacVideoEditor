@@ -22,7 +22,9 @@ private slots:
     void initTestCase();
     void readsNativeDimensionsAndAudioDuration();
     void choosesLowestNativeResolution();
-    void keepsTheCanvasLandscape();
+    void keepsTheLowestSourceOrientation();
+    void honorsCameraOrientation_data();
+    void honorsCameraOrientation();
     void roundsOddDimensionsForH264();
     void invalidatesChangedAndMissingSources();
     void rejectsEmptyAndNonVideoProjects();
@@ -130,13 +132,53 @@ void MediaInfoTest::roundsOddDimensionsForH264() {
     QCOMPARE(profile.dar(), 16.0 / 9.0);
 }
 
-void MediaInfoTest::keepsTheCanvasLandscape() {
+void MediaInfoTest::keepsTheLowestSourceOrientation() {
     Project project;
     project.clips = {{file("4k.mp4"), 0, 0.1}, {file("portrait.mp4"), 0, 0.1}};
     const auto size = Media::projectOutputSize(project);
     QVERIFY(size);
-    QCOMPARE(size->width, 1280);
-    QCOMPARE(size->height, 720);
+    QCOMPARE(size->width, 720);
+    QCOMPARE(size->height, 1280);
+}
+
+void MediaInfoTest::honorsCameraOrientation_data() {
+    QTest::addColumn<int>("rotation");
+    QTest::addColumn<QSize>("expected");
+    QTest::newRow("landscape") << 0 << QSize(3840, 2160);
+    QTest::newRow("portrait-clockwise") << 90 << QSize(2160, 3840);
+    QTest::newRow("upside-down") << 180 << QSize(3840, 2160);
+    QTest::newRow("portrait-counterclockwise") << 270 << QSize(2160, 3840);
+    QTest::newRow("negative-quarter-turn") << -90 << QSize(2160, 3840);
+}
+
+void MediaInfoTest::honorsCameraOrientation() {
+    QFETCH(int, rotation);
+    QFETCH(QSize, expected);
+    const auto path = file(QString("rotated-%1.mp4").arg(rotation));
+    QProcess remux;
+    remux.start(ffmpeg_, {"-v", "error", "-display_rotation", QString::number(rotation),
+                         "-i", file("4k.mp4"), "-c", "copy", path});
+    QVERIFY(remux.waitForFinished(30000));
+    QCOMPARE(remux.exitCode(), 0);
+    Project project;
+    project.clips = {{path, 0, 0.1}};
+    auto size = Media::projectOutputSize(project);
+    QVERIFY(size);
+    QCOMPARE(QSize(size->width, size->height), expected);
+    // Editing a clip's rotation should not turn the project's canvas.
+    project.clips[0].rotationDegrees = 90;
+    size = Media::projectOutputSize(project);
+    QVERIFY(size);
+    QCOMPARE(QSize(size->width, size->height), expected);
+    project.clips.append({file("hd.mp4"), 0, 0.1});
+    size = Media::projectOutputSize(project);
+    QVERIFY(size);
+    QCOMPARE(QSize(size->width, size->height), QSize(1920, 1080));
+    project.canvasWidth = 1080;
+    project.canvasHeight = 1920;
+    size = Media::projectOutputSize(project);
+    QVERIFY(size);
+    QCOMPARE(QSize(size->width, size->height), QSize(1080, 1920));
 }
 
 void MediaInfoTest::invalidatesChangedAndMissingSources() {

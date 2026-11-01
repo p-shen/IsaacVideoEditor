@@ -37,7 +37,7 @@ std::optional<MediaInfo> mediaInfo(const QString &path, QString *error = nullptr
 // Completed audio downloads, newest first; the caller chooses the directory.
 QStringList recentAudioFiles(const QString &directory, int limit = 10);
 
-// The smallest source raster determines the landscape export canvas.
+// The smallest source raster, with camera orientation, determines the auto canvas.
 std::optional<VideoSize> projectOutputSize(const Project &project, QString *error = nullptr, bool allowOffline = false);
 
 // Square-pixel, progressive 60 fps output at the requested canvas size.

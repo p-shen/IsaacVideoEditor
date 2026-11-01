@@ -13,6 +13,18 @@ class EditorControllerTest : public QObject {
     Q_OBJECT
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
 private slots:
+    void autoCanvasFollowsCameraOrientation() {
+        EditorController e;
+        QVERIFY(e.importFiles({QFINDTESTDATA("fixtures/rotation-metadata.mp4")}));
+        QCOMPARE(e.format(), QString("90×160 · 60 fps"));
+        QTRY_COMPARE(e.frame().size(), QSize(90, 160));
+        e.setCanvas(160, 90);
+        QCOMPARE(e.format(), QString("160×90 · 60 fps"));
+        QTRY_COMPARE(e.frame().size(), QSize(160, 90));
+        e.setCanvas(0, 0);
+        QCOMPARE(e.format(), QString("90×160 · 60 fps"));
+        QTRY_COMPARE(e.frame().size(), QSize(90, 160));
+    }
     void damagedSourceProxyFallsBackToOriginal() {
         QTemporaryDir dir;const auto source=dir.filePath("source.mp4");QVERIFY(QFile::copy(fixture(),source));
         EditorController e;QVERIFY(e.importMedia({source}));auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);

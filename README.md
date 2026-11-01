@@ -54,7 +54,7 @@ Volume, mute and music looping stay visible for the selected source. Open **Timi
 
 **File → Save** stores a `.isaac.json` project. Keep the original media in place: projects reference files rather than embedding them. If files move, use **File → Recovery and offline media…** to relink them or recover interrupted work.
 
-Choose **File → Export…** for H.264/AAC MP4 at 60 fps. Export reads the original media and uses your canvas settings. **Auto resolution** follows the smallest original video in the edit. You can keep editing while export finishes; it uses the revision captured when you started it.
+Choose **File → Export…** for H.264/AAC MP4 at 60 fps. Export reads the original media and uses your canvas settings. **Auto resolution** follows the smallest original video in the edit, including its camera orientation. You can keep editing while export finishes; it uses the revision captured when you started it.
 
 ## Useful controls
 

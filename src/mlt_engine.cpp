@@ -266,9 +266,10 @@ std::optional<VideoSize> projectOutputSize(const Project &project, QString *erro
         const qint64 area = qint64(info->width) * info->height;
         if (!result || area < smallestArea) {
             smallestArea = area;
-            // Manual/camera rotation changes content orientation, not the landscape canvas.
-            const int width = std::max(info->width, info->height);
-            const int height = std::min(info->width, info->height);
+            // Follow camera orientation; manual clip turns do not turn the canvas.
+            const bool quarterTurn = qAbs(info->cameraRotationDegrees % 180) == 90;
+            const int width = quarterTurn ? info->height : info->width;
+            const int height = quarterTurn ? info->width : info->height;
             result = VideoSize{std::max(2, width - width % 2), std::max(2, height - height % 2)};
         }
     }
