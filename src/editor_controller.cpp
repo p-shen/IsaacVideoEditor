@@ -240,7 +240,8 @@ QVariantList EditorController::textOverlays() const {
     QVariantList result;for(int i=0;i<project_.textOverlays.size();++i)result.append(timedTextInfo(project_,i));return result;
 }
 QVariantMap EditorController::currentText() const {return selectedText_>=0&&selectedText_<project_.textOverlays.size()?textOverlays()[selectedText_].toMap():QVariantMap{};}
-QStringList EditorController::fontFamilies() const {return QFontDatabase::families();}
+QStringList EditorController::fontFamilies() const {static const auto families=QFontDatabase::families();return families;}
+QVariantList EditorController::textPresets() const {return textPresetOptions();}
 void EditorController::selectText(int index) {cancelPendingVisual();
     showProject();
     if(index<0||index>=project_.textOverlays.size())return;

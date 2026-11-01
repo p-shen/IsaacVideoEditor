@@ -1,6 +1,7 @@
 #include "project.h"
 #include "mlt_engine.h"
 #include "text_renderer.h"
+#include "text_style.h"
 #include "preview_item.h"
 #include <QQuickWindow>
 #include <QElapsedTimer>
@@ -104,6 +105,85 @@ int magentaPixels(const QImage &image){int count=0;for(int y=0;y<image.height();
 class TextOverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void presetsAreCompleteAndEditsAreIndependent() {
+        TextOverlay t;t.text="Keep my words";t.startFrame=12;t.durationFrames=90;t.x=.23;t.y=.71;
+        QString error;
+        QVERIFY2(setTextFields(t,{{"preset","editorial-serif"}},&error),qPrintable(error));
+        Project p;p.textOverlays={t};auto info=timedTextInfo(p,0);
+        QCOMPARE(info["style"].toString(),"editorial-serif");QCOMPARE(info["animation"].toString(),"fade");QVERIFY(info["italic"].toBool());
+        QVERIFY(setTextFields(t,{{"animation","bounce"}},&error));
+        QVERIFY(setTextFields(t,{{"color","#123456"},{"fontSize",72}},&error));
+        QVERIFY(setTextFields(t,{{"style","classic-outline"}},&error));
+        p.textOverlays={t};info=timedTextInfo(p,0);QCOMPARE(info["animation"].toString(),"bounce");
+        QCOMPARE(t.text,"Keep my words");QCOMPARE(t.startFrame,12);QCOMPARE(t.durationFrames,90);QCOMPARE(t.x,.23);QCOMPARE(t.y,.71);
+        QVERIFY(setTextFields(t,{{"preset","classic-outline"}},&error));
+        p.textOverlays={t};info=timedTextInfo(p,0);QCOMPARE(info["animation"].toString(),"none");QVERIFY(!info["italic"].toBool());
+        QVERIFY(!setTextFields(t,{{"preset","missing"}},&error));QVERIFY(!setTextFields(t,{{"animation","missing"}},&error));
+    }
+    void everyPresetSurvivesSaveAndRenders() {
+        const QStringList presets{"classic-outline","rounded-label","bold-highlight","karaoke-highlight","word-pop","typewriter","neon-glow","editorial-serif","handwritten-note","comic-sticker"};
+        Project p=footage();QString error;
+        for(const auto &id:presets){TextOverlay t;t.text=QString::fromUtf8("Make moments count مرحبا 👨‍👩‍👧");
+            QVERIFY2(setTextFields(t,{{"preset",id}},&error),qPrintable(error));p.textOverlays.append(t);}
+        QTemporaryDir dir;const auto path=dir.filePath("presets.isaac.json");QVERIFY2(saveProject(p,path,&error),qPrintable(error));
+        const auto loaded=loadProject(path,&error);QVERIFY2(loaded.has_value(),qPrintable(error));QCOMPARE(loaded->textOverlays,p.textOverlays);
+        for(auto t:p.textOverlays){
+            QImage blank(640,360,QImage::Format_RGBA8888);blank.fill(Qt::transparent);auto image=blank;
+            TextRendering::paint(image,{t},30);QVERIFY2(image!=blank,qPrintable(t.style));
+            const auto captures=qEnvironmentVariable("ISAAC_TEXT_PRESET_SCREENSHOTS");
+            if(!captures.isEmpty()){
+                QDir().mkpath(captures);auto sample=t;sample.text="Make every\nmoment count";sample.fontSize=100;
+                QImage preview(960,540,QImage::Format_RGBA8888);preview.fill(QColor("#384e48"));TextRendering::paint(preview,{sample},90);
+                QVERIFY(preview.save(captures+"/"+t.style+".png"));
+            }
+            QVERIFY(setTextFields(t,{{"animation","none"}},&error));auto still=blank;TextRendering::paint(still,{t},1);
+            auto later=blank;TextRendering::paint(later,{t},90);QCOMPARE(still,later);
+            t.durationFrames=1;QVERIFY(setTextFields(t,{{"animation","fade"}},&error));image=blank;TextRendering::paint(image,{t},0);QVERIFY(image!=blank);
+        }
+    }
+    void textAnimationsChangeFramesAndRespectBoundaries() {
+        for(const QString animation:{"fade","slide","pop","bounce","typewriter","karaoke","word-pop","pulse"}){
+            TextOverlay t;t.text=QString::fromUtf8("One two مرحبا 👨‍👩‍👧");t.startFrame=5;t.durationFrames=120;QString error;
+            QVERIFY2(setTextFields(t,{{"preset","classic-outline"},{"animation",animation}},&error),qPrintable(error));
+            QImage blank(640,360,QImage::Format_RGBA8888);blank.fill(Qt::transparent);
+            auto early=blank,late=blank,before=blank,after=blank;
+            TextRendering::paint(early,{t},7);TextRendering::paint(late,{t},65);QVERIFY2(early!=late,qPrintable(animation));
+            TextRendering::paint(before,{t},4);TextRendering::paint(after,{t},125);QCOMPARE(before,blank);QCOMPARE(after,blank);
+        }
+    }
+    void highlightedTextKeepsItsForegroundColor() {
+        TextOverlay t;t.text="Make moments count";QString error;
+        QVERIFY(setTextFields(t,{{"preset","bold-highlight"},{"animation","none"}},&error));
+        QImage image(960,540,QImage::Format_RGBA8888);image.fill(Qt::transparent);TextRendering::paint(image,{t},30);
+        int yellow=0;for(int y=0;y<image.height();++y)for(int x=0;x<image.width();++x){const auto c=image.pixelColor(x,y);yellow+=c.alpha()>200&&c.red()>200&&c.green()>170&&c.blue()<120;}
+        QVERIFY2(yellow>40,"The emphasized word must be filled with yellow, not the shadow color");
+    }
+    void typewriterDoesNotPaintUnrevealedGlyphs() {
+        TextOverlay t;t.text="MMMMMMMM";QString error;QVERIFY(setTextFields(t,{{"preset","typewriter"},{"shadow",false}},&error));
+        QImage early(960,540,QImage::Format_RGBA8888);early.fill(Qt::transparent);auto late=early;
+        TextRendering::paint(early,{t},0);TextRendering::paint(late,{t},200);
+        const auto pixels=[](const QImage &image){int count=0;for(int y=0;y<image.height();++y)for(int x=0;x<image.width();++x)count+=image.pixelColor(x,y).alpha()>100;return count;};
+        QVERIFY(pixels(early)>0);QVERIFY(pixels(early)<pixels(late)/3);
+    }
+    void karaokeKeepsTheActiveWordVisibleOnItsPill() {
+        TextOverlay t;t.text="One two";QString error;QVERIFY(setTextFields(t,{{"preset","karaoke-highlight"}},&error));
+        QImage image(960,540,QImage::Format_RGBA8888);image.fill(Qt::transparent);TextRendering::paint(image,{t},190);
+        int dark=0;for(int y=0;y<image.height();++y)for(int x=0;x<image.width();++x){const auto c=image.pixelColor(x,y);dark+=c.alpha()>200&&c.red()<40&&c.green()<50&&c.blue()<40;}
+        QVERIFY2(dark>20,"The active word must remain readable on its bright pill");
+    }
+    void shortWordPopRetainsEveryWord() {
+        for(int frames:{1,2}){
+            TextOverlay t;t.text="One two three";QString error;QVERIFY(setTextFields(t,{{"preset","word-pop"},{"durationFrames",frames}},&error));
+            QImage actual(960,540,QImage::Format_RGBA8888);actual.fill(Qt::transparent);auto expected=actual;
+            TextRendering::paint(actual,{t},0);QVERIFY(setTextFields(t,{{"animation","none"}},&error));TextRendering::paint(expected,{t},0);
+            QCOMPARE(actual,expected);
+        }
+    }
+    void newPresetMatchesTheMltCompositor() {
+        auto p=footage();TextOverlay t;t.text="Make every moment count";QString error;
+        QVERIFY(setTextFields(t,{{"preset","neon-glow"}},&error));p.textOverlays={t};
+        auto expected=frameAt(footage(),10);TextRendering::paint(expected,{t},10);QCOMPARE(frameAt(p,10),expected);
+    }
     void concurrentTextRenderingMatchesUncachedUnicodeFades() {
         TextOverlay text;text.text=QString::fromUtf8("Adventure مرحبا 字幕\nwith Isaac and Daddy");text.fontSize=50;text.style="box";text.fade=true;text.startFrame=5;text.durationFrames=60;
         std::vector<std::future<bool>> workers;
@@ -191,11 +271,13 @@ private slots:
         QCOMPARE(saved.value("textOverlays").toArray()[0].toObject(),titleJson());
     }
     void malformedTextIsRejected() {
-        for(const auto &key: {"startFrame","durationFrames","fontSize","x","y","bold","fade","color","style"}) {
+        for(const auto &key: {"startFrame","durationFrames","fontSize","x","y","bold","fade","color","style","animation","italic","uppercase"}) {
             QTemporaryDir dir; auto title=titleJson(); title[key]=QJsonObject{}; QString error;
             QVERIFY2(!loadProject(writeProject(dir,title),&error),key);
             QVERIFY(!error.isEmpty());
         }
+        QTemporaryDir dir;auto title=titleJson();title["animation"]="unknown";QString error;
+        QVERIFY(!loadProject(writeProject(dir,title),&error));
     }
     void mltFramesRespectExclusiveTextTiming() {
         auto p=footage();TextOverlay t;t.text="Isaac";t.color="#ff00ff";t.shadow=false;t.startFrame=5;t.durationFrames=20;p.textOverlays={t};
@@ -221,6 +303,13 @@ private slots:
         QCOMPARE(magentaPixels(frameAt(exported,3)),0);
         QVERIFY(magentaPixels(frameAt(exported,15))>30);
         QCOMPARE(magentaPixels(frameAt(exported,27)),0);
+    }
+    void animatedPresetSurvivesMp4Export() {
+        auto p=footage();p.canvasWidth=640;p.canvasHeight=360;TextOverlay t;t.text="Isaac";t.startFrame=5;t.durationFrames=20;QString error;
+        QVERIFY(setTextFields(t,{{"preset","typewriter"},{"color","#ff00ff"},{"fontSize",150},{"shadow",false}},&error));p.textOverlays={t};
+        QTemporaryDir dir;const auto output=dir.filePath("animated-text.mp4");QVERIFY2(Media::exportMp4(p,output,{},&error),qPrintable(error));
+        Project exported;exported.clips={{output,0,.5}};
+        QCOMPARE(magentaPixels(frameAt(exported,3)),0);QVERIFY(magentaPixels(frameAt(exported,15))>30);QCOMPARE(magentaPixels(frameAt(exported,27)),0);
     }
     void captionsBurnIndependentlyAndSurviveMp4Export() {
         auto p=footage();TextOverlay title;title.text="TITLE";title.color="#00ffff";title.y=.2;title.shadow=false;p.textOverlays={title};

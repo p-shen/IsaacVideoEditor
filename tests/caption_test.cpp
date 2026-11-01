@@ -42,7 +42,7 @@ private slots:
         QTemporaryDir dir;Project p;TextOverlay title;title.text="TITLE";p.textOverlays={title};TextOverlay cue;cue.text="CAPTION";cue.timingNeedsReview=true;p.captions={cue};p.burnCaptions=false;
         QString error;const auto path=dir.filePath("caption.isaac.json");QVERIFY2(saveProject(p,path,&error),qPrintable(error));const auto loaded=loadProject(path,&error);QVERIFY2(loaded.has_value(),qPrintable(error));
         QCOMPARE(loaded->textOverlays,p.textOverlays);QCOMPARE(loaded->captions,p.captions);QVERIFY(!loaded->burnCaptions);
-        QFile file(path);QVERIFY(file.open(QIODevice::ReadOnly));auto data=QJsonDocument::fromJson(file.readAll()).object();file.close();QCOMPARE(data["version"].toInt(),7);
+        QFile file(path);QVERIFY(file.open(QIODevice::ReadOnly));auto data=QJsonDocument::fromJson(file.readAll()).object();file.close();QCOMPARE(data["version"].toInt(),8);
         data["version"]=6;data.remove("captions");data.remove("burnCaptions");QVERIFY(file.open(QIODevice::WriteOnly|QIODevice::Truncate));file.write(QJsonDocument(data).toJson());file.close();
         const auto legacy=loadProject(path,&error);QVERIFY(legacy);QVERIFY(legacy->captions.isEmpty());QCOMPARE(legacy->textOverlays,p.textOverlays);
     }

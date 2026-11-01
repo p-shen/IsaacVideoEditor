@@ -71,7 +71,7 @@ void ProjectTest::savesAndLoads() {
     QFile saved(file);
     QVERIFY(saved.open(QIODevice::ReadOnly));
     const auto data = QJsonDocument::fromJson(saved.readAll()).object();
-    QCOMPARE(data.value("version").toInt(), 7);
+    QCOMPARE(data.value("version").toInt(), 8);
     QCOMPARE(data.value("crossfadeSeconds").toDouble(), 0.2);
     QVERIFY(!data.contains("crossfadeFrames"));
     QVERIFY(!data.value("clips").toArray().first().toObject().contains("rotationDegrees"));
@@ -265,7 +265,7 @@ void ProjectTest::rotationSettingsRoundTrip() {
     QVERIFY2(saveProject(*loaded, file.fileName(), &error), qPrintable(error));
     QVERIFY(file.open(QIODevice::ReadOnly));
     const auto saved = QJsonDocument::fromJson(file.readAll()).object();
-    QCOMPARE(saved.value("version").toInt(), 7);
+    QCOMPARE(saved.value("version").toInt(), 8);
     const auto clip = saved.value("clips").toArray().first().toObject();
     QCOMPARE(clip.value("rotationDegrees").toInt(), 90);
     QVERIFY(clip.value("hardCutBefore").toBool());

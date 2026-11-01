@@ -57,6 +57,33 @@ private slots:
         applyAppTheme(*qobject_cast<QApplication*>(qApp)); registerEditorQmlTypes();
     }
     void init() { QTest::failOnWarning(QRegularExpression(".*")); }
+    void textPresetsAndAnimationUseIndependentControls() {
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture()}));editor.addText();QVERIFY(section(window,3));
+        auto *preset=named(window,"textPresetChooser"),*animation=named(window,"textAnimationChooser");
+        QVERIFY(preset);QVERIFY(animation);QVERIFY(fullyVisible(preset));QVERIFY(fullyVisible(animation));
+        QVERIFY(QMetaObject::invokeMethod(preset,"activated",Q_ARG(int,7)));
+        QCOMPARE(editor.currentText()["style"].toString(),"editorial-serif");QCOMPARE(editor.currentText()["animation"].toString(),"fade");
+        auto *fontChooser=named(window,"textFontChooser");QVERIFY(fontChooser);
+        QTRY_COMPARE(fontChooser->property("currentText").toString(),editor.currentText()["fontFamily"].toString());
+        QVERIFY(QMetaObject::invokeMethod(animation,"activated",Q_ARG(int,0)));
+        QCOMPARE(editor.currentText()["animation"].toString(),"none");QCOMPARE(editor.currentText()["style"].toString(),"editorial-serif");
+        editor.undo();QCOMPARE(editor.currentText()["animation"].toString(),"fade");editor.undo();QCOMPARE(editor.currentText()["style"].toString(),"clean");
+        const auto captures=qEnvironmentVariable("ISAAC_TEXT_PRESET_SCREENSHOTS");
+        if(!captures.isEmpty()){
+            QDir().mkpath(captures);editor.updateText(0,{{"preset","comic-sticker"},{"text","Make moments count"}});
+            for(bool dark:{true,false}){
+                setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+                QTest::qWait(150);QVERIFY(window->grabWindow().save(captures+(dark?"/inspector-dark.png":"/inspector-light.png")));
+            }
+            preset->forceActiveFocus();QTest::keyClick(window,Qt::Key_Space);QTest::qWait(150);QVERIFY(window->grabWindow().save(captures+"/preset-popup.png"));QTest::keyClick(window,Qt::Key_Escape);
+            window->resize(1000,660);auto font=qApp->font();font.setPointSize(24);window->setProperty("font",font);QVERIFY(section(window,3));QTest::qWait(150);
+            auto *narrowPreset=named(window,"textPresetChooser"),*narrowAnimation=named(window,"textAnimationChooser");QVERIFY(narrowPreset);QVERIFY(narrowAnimation);
+            narrowAnimation->forceActiveFocus();QTRY_VERIFY(fullyVisible(narrowPreset));QTRY_VERIFY(fullyVisible(narrowAnimation));
+            QVERIFY(window->grabWindow().save(captures+"/inspector-large-text.png"));
+            narrowPreset->forceActiveFocus();QTest::keyClick(window,Qt::Key_Space);QTest::qWait(150);QVERIFY(window->grabWindow().save(captures+"/preset-popup-large-text.png"));QTest::keyClick(window,Qt::Key_Escape);
+        }
+    }
     void sectionsKeepIndependentScrollPositions() {
         EditorController editor; QQmlApplicationEngine engine; auto *window=load(engine,editor); QVERIFY(window);
         QVERIFY(editor.importFiles({fixture()})); editor.setMusicPath(fixture()); window->resize(1320,560);

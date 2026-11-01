@@ -114,7 +114,7 @@ void EditorController::setCaptionTiming(int index,int start,int frames){
 }
 void EditorController::styleCaptions(const QVariantMap &fields,bool all){
     cancelPendingVisual();if(textDragBefore_)endTextDrag(false);
-    for(auto i=fields.begin();i!=fields.end();++i)if(!QStringList{"style","fontFamily","fontSize","color","bold","shadow","fade","x","y"}.contains(i.key())){report("Batch styling only changes caption appearance.");return;}
+    for(auto i=fields.begin();i!=fields.end();++i)if(!QStringList{"preset","style","fontFamily","fontSize","color","bold","shadow","fade","italic","uppercase","animation","x","y"}.contains(i.key())){report("Batch styling only changes caption appearance and animation.");return;}
     auto next=project_;QString error;
     for(int i=0;i<next.captions.size();++i)if(all||captionSelection_.contains(i))if(!setTextFields(next.captions[i],fields,&error)){report(error);return;}
     commit(next,{},-1,all?"Apply caption style to all":"Style selected captions",false,-1,-1,selectedCaption_,captionSelection_);

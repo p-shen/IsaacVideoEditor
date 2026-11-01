@@ -52,8 +52,10 @@ struct TextOverlay {
     QString fontFamily = "Arial";
     QString style = "clean";
     QString color = "#ffffff";
+    QString animation = "none";
     int fontSize = 84;
     bool bold = true, shadow = true, fade = false;
+    bool italic = false, uppercase = false;
     int startFrame = 0, durationFrames = 300;
     double x = .5, y = .45;
     QString hostId;

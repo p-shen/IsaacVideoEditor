@@ -14,6 +14,15 @@ class CaptionControllerTest : public QObject {
         auto path=dir.filePath("captions.srt");QFile f(path);if(!f.open(QIODevice::WriteOnly))return {};f.write(text);return path;
     }
 private slots:
+    void presetsApplyToCaptionSelectionAndUndoTogether() {
+        QTemporaryDir dir;EditorController e;QVERIFY(e.importFiles({footage()}));QVERIFY(e.importSrt(srt(dir)));
+        e.selectCaption(0);e.selectCaption(1,Qt::ControlModifier);e.styleCaptions({{"preset","comic-sticker"}});
+        QCOMPARE(e.project().captions[0].style,"comic-sticker");QCOMPARE(e.project().captions[1].style,"comic-sticker");
+        QCOMPARE(e.currentCaption()["animation"].toString(),"bounce");
+        e.styleCaptions({{"animation","none"}});QCOMPARE(e.currentCaption()["style"].toString(),"comic-sticker");
+        e.undo();QCOMPARE(e.currentCaption()["animation"].toString(),"bounce");e.undo();QCOMPARE(e.project().captions[0].style,"clean");QCOMPARE(e.project().captions[1].style,"clean");
+        QCOMPARE(e.project().captions[0].text,"FIRST");QCOMPARE(e.project().captions[1].startFrame,30);
+    }
     void importIsAtomicAndKeepsTitlesDistinct() {
         QTemporaryDir dir;EditorController e;QVERIFY(e.importFiles({footage()}));e.addText();e.updateText(0,{{"text","TITLE"}});
         QVERIFY(e.importSrt(srt(dir)));QCOMPARE(e.project().textOverlays.size(),1);QCOMPARE(e.project().captions.size(),2);QCOMPARE(e.project().textOverlays[0].text,QString("TITLE"));

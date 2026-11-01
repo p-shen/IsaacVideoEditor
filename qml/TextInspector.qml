@@ -7,6 +7,7 @@ ColumnLayout {
     id: panel
     required property var controller
     property bool appearanceOnly: false
+    readonly property var animationIds: ["none", "fade", "slide", "pop", "bounce", "typewriter", "karaoke", "word-pop", "pulse"]
     readonly property var placementNames: ["Top left", "Top center", "Top right", "Middle left", "Center", "Middle right", "Bottom left", "Bottom center", "Bottom right"]
     readonly property int placementIndex: {
         var t = controller.currentText
@@ -84,47 +85,52 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
-            Label { text: "Style" }
+            Label { text: "Preset" }
             UI.ComboBox {
                 id: styleChooser
+                objectName: panel.appearanceOnly ? "captionPresetChooser" : "textPresetChooser"
                 Layout.fillWidth: true; Layout.minimumWidth: 0
-                model: ["Clean", "Playful", "Background box"]
-                currentIndex: Math.max(0,["clean","playful","box"].indexOf(controller.currentText.style))
-                Accessible.name: "Text style"
+                model: controller.textPresets
+                textRole: "name"
+                currentIndex: controller.textPresets.map(function(preset) { return preset.id }).indexOf(controller.currentText.style)
+                Accessible.name: "Text preset"
+                ToolTip.visible: hovered || activeFocus
+                ToolTip.text: "Apply a complete look and suggested animation. Customize either afterward."
                 delegate: ItemDelegate {
                     id: styleOption
-                    required property string modelData
+                    required property var modelData
                     required property int index
                     width: ListView.view.width
-                    text: modelData
+                    text: modelData.name
                     highlighted: styleChooser.highlightedIndex === index
                     hoverEnabled: styleChooser.hoverEnabled
                     palette.text: UI.Theme.text
                     palette.highlightedText: UI.Theme.text
-                    Accessible.name: modelData + " text style"
+                    Accessible.name: modelData.name + " text preset"
                     contentItem: RowLayout {
                         spacing: 8
                         Rectangle {
-                            implicitWidth: sample.implicitWidth + 16
+                            implicitWidth: Math.max(48,sample.implicitWidth + 16)
                             implicitHeight: sample.implicitHeight + 8
                             color: "#55555c"; radius: 3
                             Accessible.ignored: true
-                            Rectangle { visible: styleOption.index === 2; anchors.fill: parent; anchors.margins: 3; color: "#202126"; radius: 2 }
+                            Rectangle { visible: styleOption.modelData.id === "rounded-label" || styleOption.modelData.id === "box"; anchors.fill: parent; anchors.margins: 3; color: styleOption.modelData.id === "rounded-label" ? "#ffffff" : "#202126"; radius: 4 }
                             Text {
                                 id: sample
                                 anchors.centerIn: parent
-                                text: "Aa"
-                                font.family: styleOption.index === 1 && controller.fontFamilies.indexOf("Arial Rounded MT Bold") >= 0 ? "Arial Rounded MT Bold" : "Arial"
+                                text: styleOption.modelData.uppercase ? "AA" : "Aa"
+                                font.family: styleOption.modelData.fontFamily
                                 font.pixelSize: styleChooser.font.pixelSize
-                                font.bold: styleOption.index === 1
-                                color: styleOption.index === 1 ? "#ffe395" : "#ffffff"
-                                style: styleOption.index === 2 ? Text.Normal : Text.Raised
-                                styleColor: "#000000"
+                                font.bold: styleOption.modelData.bold
+                                font.italic: styleOption.modelData.italic
+                                color: styleOption.modelData.color
+                                style: ["classic-outline","bold-highlight","word-pop","comic-sticker"].indexOf(styleOption.modelData.id) >= 0 ? Text.Outline : styleOption.modelData.shadow ? Text.Raised : Text.Normal
+                                styleColor: styleOption.modelData.id === "comic-sticker" ? "#ffffff" : "#000000"
                                 Accessible.ignored: true
                             }
                         }
                         Label {
-                            text: styleOption.modelData
+                            text: styleOption.modelData.name
                             color: UI.Theme.text
                             font.weight: styleChooser.currentIndex === styleOption.index ? Font.DemiBold : Font.Normal
                             elide: Text.ElideRight; Layout.fillWidth: true
@@ -137,16 +143,35 @@ ColumnLayout {
                         border.color: UI.Theme.accent
                     }
                 }
-                onActivated: index => controller.updateText(controller.selectedText,{style: ["clean","playful","box"][index]})
+                onActivated: index => controller.updateText(controller.selectedText,{preset: controller.textPresets[index].id})
             }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Label { text: "Animation" }
+            UI.ComboBox {
+                objectName: panel.appearanceOnly ? "captionAnimationChooser" : "textAnimationChooser"
+                Layout.fillWidth: true; Layout.minimumWidth: 0
+                model: ["None", "Fade in and out", "Slide in", "Pop in", "Bounce in", "Typewriter", "Karaoke highlight", "Word pop", "Gentle pulse"]
+                currentIndex: controller.currentText.fade && (!controller.currentText.animation || controller.currentText.animation === "none") ? 1 : Math.max(0,panel.animationIds.indexOf(controller.currentText.animation || "none"))
+                Accessible.name: "Text animation"
+                onActivated: index => controller.updateText(controller.selectedText,{animation: panel.animationIds[index],fade: false})
+            }
+        }
+        Label {
+            visible: ["karaoke","word-pop"].indexOf(controller.currentText.animation) >= 0
+            text: "Words advance across the text’s duration."
+            color: UI.Theme.muted; wrapMode: Text.Wrap; Layout.fillWidth: true
         }
         RowLayout {
             Layout.fillWidth: true
             Label { text: "Font" }
             UI.ComboBox {
+                objectName: panel.appearanceOnly ? "captionFontChooser" : "textFontChooser"
                 Layout.fillWidth: true; Layout.minimumWidth: 0
                 model: controller.fontFamilies
-                currentIndex: Math.max(0,controller.fontFamilies.indexOf(controller.currentText.fontFamily || "Arial"))
+                currentIndex: controller.fontFamilies.indexOf(controller.currentText.fontFamily || "Arial")
+                displayText: controller.currentText.fontFamily || "Arial"
                 Accessible.name: "Text font"
                 onActivated: controller.updateText(controller.selectedText,{fontFamily: currentText})
             }
@@ -287,10 +312,11 @@ ColumnLayout {
         UI.InspectorDetails {
             objectName: panel.appearanceOnly ? "captionEffectsDetails" : "textEffectsDetails"
             title: "Effects"
-            summary: [controller.currentText.shadow ? "Shadow" : "", controller.currentText.fade ? "Fade in and out" : ""].filter(function(value) { return value.length > 0 }).join(" · ") || "No effects"
+            summary: [controller.currentText.shadow ? "Shadow" : "", controller.currentText.italic ? "Italic" : "", controller.currentText.uppercase ? "Uppercase" : ""].filter(function(value) { return value.length > 0 }).join(" · ") || "No effects"
             Layout.fillWidth: true
             CheckBox { text: "Shadow"; checked: controller.currentText.shadow || false; onToggled: controller.updateText(controller.selectedText,{shadow: checked}) }
-            CheckBox { text: "Fade in and out"; checked: controller.currentText.fade || false; onToggled: controller.updateText(controller.selectedText,{fade: checked}) }
+            CheckBox { text: "Italic"; checked: controller.currentText.italic || false; onToggled: controller.updateText(controller.selectedText,{italic: checked}) }
+            CheckBox { text: "Uppercase"; checked: controller.currentText.uppercase || false; onToggled: controller.updateText(controller.selectedText,{uppercase: checked}) }
         }
         Loader {
             Layout.fillWidth: true

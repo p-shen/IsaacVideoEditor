@@ -44,6 +44,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(int selectedText READ selectedText NOTIFY selectionChanged)
     Q_PROPERTY(QVariantMap currentText READ currentText NOTIFY selectionChanged)
     Q_PROPERTY(QStringList fontFamilies READ fontFamilies CONSTANT)
+    Q_PROPERTY(QVariantList textPresets READ textPresets CONSTANT)
     Q_PROPERTY(QVariantList selectedIndices READ selectedIndices NOTIFY selectionChanged)
     Q_PROPERTY(QVariantMap currentClip READ currentClip NOTIFY selectionChanged)
     Q_PROPERTY(int selectedClip READ selectedClip NOTIFY selectionChanged)
@@ -181,6 +182,7 @@ public:
     int selectedText() const { return selectedText_; }
     QVariantMap currentText() const;
     QStringList fontFamilies() const;
+    QVariantList textPresets() const;
     Q_INVOKABLE void addText();
     Q_INVOKABLE void selectText(int index);
     Q_INVOKABLE void deleteText();

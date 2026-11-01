@@ -1,4 +1,5 @@
 #include "project.h"
+#include "text_style.h"
 
 #include <QFile>
 #include <QSet>
@@ -88,7 +89,7 @@ bool readAudio(const QJsonValue &v,AudioControls &a) {
 
 bool TextOverlay::operator==(const TextOverlay &o) const {
     return text==o.text && fontFamily==o.fontFamily && style==o.style && color==o.color &&
-        fontSize==o.fontSize && bold==o.bold && shadow==o.shadow && fade==o.fade &&
+        fontSize==o.fontSize && bold==o.bold && shadow==o.shadow && fade==o.fade && animation==o.animation && italic==o.italic && uppercase==o.uppercase &&
         startFrame==o.startFrame && durationFrames==o.durationFrames && x==o.x && y==o.y && hostId==o.hostId && hostSourceFrame==o.hostSourceFrame && timingNeedsReview==o.timingNeedsReview;
 }
 
@@ -145,7 +146,7 @@ bool Project::setTransition(int index,const QString &type,int frames) {
         clips[index].transitionFrames=std::min({frames,left,right});
     }
     bool timingChanged=false;for(int i=1;i<clips.size();++i)timingChanged|=transitionFramesBefore(i)!=inherited[i];
-    if(!timingChanged){clips=before;return false;}
+    if(!timingChanged && clips[index].transitionType==before[index].transitionType && clips[index].hardCutBefore==before[index].hardCutBefore){clips=before;return false;}
     return true;
 }
 
@@ -239,7 +240,7 @@ QString Project::validate() const {
     if(captions.size()>10000)return "A project supports up to 10000 captions.";
     for (const auto *list : {&textOverlays,&captions})for(const auto &t:*list) {
         if (t.text.size()>2000 || t.fontFamily.isEmpty() || t.fontFamily.size()>200 ||
-            (t.style!="clean" && t.style!="playful" && t.style!="box") || !QColor(t.color).isValid() ||
+            !validTextStyle(t.style) || !validTextAnimation(t.animation) || !QColor(t.color).isValid() ||
             t.fontSize<12 || t.fontSize>200 || t.startFrame<0 || t.startFrame>86400*fps ||
             t.durationFrames<1 || t.durationFrames>86400*fps-t.startFrame || t.hostSourceFrame<0 || t.hostSourceFrame>86400*fps || (!t.hostId.isEmpty()&&!ids.contains(t.hostId)) ||
             !std::isfinite(t.x) || !std::isfinite(t.y) || t.x<0 || t.x>1 || t.y<0 || t.y>1)
@@ -282,7 +283,7 @@ bool saveProject(const Project &project, const QString &path, QString *error) {
         item.insert("id",clip.id);item.insert("transform",transformJson(clip.transform));
         clips.append(item);
     }
-    QJsonObject data{{"version", 7}, {"clips", clips},
+    QJsonObject data{{"version", 8}, {"clips", clips},
                            {"crossfadeSeconds", project.crossfadeFrames / double(Project::fps)},
                            {"voicePath", project.voicePath},
                            {"voiceDurationFrames", project.voiceDurationFrames},
@@ -304,6 +305,9 @@ bool saveProject(const Project &project, const QString &path, QString *error) {
             QJsonObject item{{"text",t.text},{"fontFamily",t.fontFamily},{"style",t.style},
                 {"color",t.color},{"fontSize",t.fontSize},{"bold",t.bold},{"shadow",t.shadow},{"fade",t.fade},
                 {"startFrame",t.startFrame},{"durationFrames",t.durationFrames},{"x",t.x},{"y",t.y}};
+            if(t.animation!="none")item.insert("animation",t.animation);
+            if(t.italic)item.insert("italic",true);
+            if(t.uppercase)item.insert("uppercase",true);
             if(!t.hostId.isEmpty()){item.insert("hostId",t.hostId);item.insert("hostSourceFrame",t.hostSourceFrame);}
             if(t.timingNeedsReview)item.insert("timingNeedsReview",true);
             texts.append(item);
@@ -336,7 +340,7 @@ std::optional<Project> loadProject(const QString &path, QString *error) {
     }
     const auto data = document.object();
     const int version = data.value("version").toInt();
-    if ((version < 1 || version > 7) || !data.value("clips").isArray()) {
+    if ((version < 1 || version > 8) || !data.value("clips").isArray()) {
         if (error) *error = "This project format is not supported.";
         return std::nullopt;
     }
@@ -379,6 +383,8 @@ std::optional<Project> loadProject(const QString &path, QString *error) {
             bool valid=value.isObject();
             for (const auto &key:{"text","fontFamily","style","color"}) valid &= item.value(key).isString();
             for (const auto &key:{"bold","shadow","fade"}) valid &= item.value(key).isBool();
+            for (const auto &key:{"italic","uppercase"})if(item.contains(key))valid &= item[key].isBool();
+            if(item.contains("animation"))valid &= item["animation"].isString();
             for (const auto &key:{"fontSize","startFrame","durationFrames","x","y"}) valid &= item.value(key).isDouble();
             for (const auto &key:{"fontSize","startFrame","durationFrames"}) {
                 const double n=item.value(key).toDouble(-1);
@@ -389,6 +395,7 @@ std::optional<Project> loadProject(const QString &path, QString *error) {
             t.text=item["text"].toString(); t.fontFamily=item["fontFamily"].toString();
             t.style=item["style"].toString(); t.color=item["color"].toString();t.fontSize=item["fontSize"].toInt();
             t.bold=item["bold"].toBool();t.shadow=item["shadow"].toBool();t.fade=item["fade"].toBool();
+            t.animation=item.value("animation").toString("none");t.italic=item["italic"].toBool();t.uppercase=item["uppercase"].toBool();
             t.startFrame=item["startFrame"].toInt();t.durationFrames=item["durationFrames"].toInt();
             t.x=item["x"].toDouble();t.y=item["y"].toDouble();
             if(version>=7){

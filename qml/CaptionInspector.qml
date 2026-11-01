@@ -210,6 +210,7 @@ ColumnLayout {
         property var currentText: panel.controller.currentCaption
         property var textOverlays: panel.controller.captions
         property var fontFamilies: panel.controller.fontFamilies
+        property var textPresets: panel.controller.textPresets
         property bool exporting: panel.controller.exporting
         function updateText(index, fields) { if (index === panel.controller.selectedCaption) panel.controller.styleCaptions(fields) }
         function chooseTextColor() { panel.controller.chooseCaptionColor() }
@@ -246,7 +247,7 @@ ColumnLayout {
             Layout.fillWidth: true
             onClicked: {
                 var c = panel.controller.currentCaption
-                panel.controller.styleCaptions({style:c.style,fontFamily:c.fontFamily,fontSize:c.fontSize,color:c.color,bold:c.bold,shadow:c.shadow,fade:c.fade,x:c.x,y:c.y},true)
+                panel.controller.styleCaptions({style:c.style,fontFamily:c.fontFamily,fontSize:c.fontSize,color:c.color,bold:c.bold,shadow:c.shadow,fade:c.fade,italic:c.italic,uppercase:c.uppercase,animation:c.animation,x:c.x,y:c.y},true)
             }
         }
     }
