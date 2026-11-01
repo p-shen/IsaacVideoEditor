@@ -30,6 +30,8 @@ jobs:
     name: macOS Apple silicon
     if: github.event_name == 'release' || inputs.platform == 'all' || inputs.platform == 'macos'
     runs-on: macos-15
+    env:
+      QT_DEBUG_PLUGINS: '1'
     timeout-minutes: 90
     outputs:
       artifact: ${{ steps.upload.outputs.artifact-id }}
@@ -53,6 +55,7 @@ jobs:
             "$RUNNER_TEMP/package check/IsaacVideoEditor.app/Contents/MacOS/IsaacVideoEditor"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
+        if: success() || (failure() && hashFiles('dist/*.zip') != '')
         with:
           name: macos-download
           path: dist/*.zip
