@@ -22,6 +22,9 @@
 #include <QSslSocket>
 #include <QTimer>
 #include <mlt++/Mlt.h>
+#ifdef Q_OS_MACOS
+#include <mach-o/dyld.h>
+#endif
 
 namespace {
 int packageSmokeTest(const QString &fixture) {
@@ -123,6 +126,21 @@ int packageSmokeTest(const QString &fixture) {
 int main(int argc,char *argv[]) {
     const bool exportWorker=argc>1&&QByteArray(argv[1])=="--export-worker";
     if(exportWorker)qputenv("QT_QPA_PLATFORM","offscreen");
+    QString bundledQmlDirectory;
+#ifdef Q_OS_MACOS
+    uint32_t executableLength=0;
+    _NSGetExecutablePath(nullptr,&executableLength);
+    QByteArray executablePath(executableLength,'\0');
+    if(executableLength&&_NSGetExecutablePath(executablePath.data(),&executableLength)==0){
+        const QDir binaryDirectory(QFileInfo(QFile::decodeName(executablePath.constData())).canonicalPath());
+        const auto plugins=QDir::cleanPath(binaryDirectory.absoluteFilePath("../PlugIns"));
+        if(QDir(plugins+"/platforms").exists()){
+            // The platform backend loads inside QApplication's constructor.
+            QCoreApplication::addLibraryPath(plugins);
+            bundledQmlDirectory=QDir::cleanPath(binaryDirectory.absoluteFilePath("../Resources/qml"));
+        }
+    }
+#endif
     QApplication app(argc,argv);
     app.setApplicationName("IsaacVideoEditor");
     app.setApplicationVersion(QStringLiteral(ISAAC_APP_VERSION));
@@ -142,6 +160,7 @@ int main(int argc,char *argv[]) {
         editor.enableRecovery();
         bool qmlWarnings = false;
         QQmlApplicationEngine engine;
+        if(!bundledQmlDirectory.isEmpty())engine.addImportPath(bundledQmlDirectory);
         QObject::connect(&engine, &QQmlApplicationEngine::warnings, &engine,
                          [&qmlWarnings](const QList<QQmlError> &) { qmlWarnings = true; });
         setEditorQmlContext(engine,editor);
