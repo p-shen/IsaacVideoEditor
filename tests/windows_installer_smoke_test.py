@@ -92,12 +92,15 @@ def main(installer, archive):
         helper_dir.mkdir()
         helper = helper_dir / 'IsaacVideoEditorUpdater.exe'
         shutil.copy2(app / helper.name, helper)
+        temp_path = ctypes.create_unicode_buffer(32768)
+        ctypes.windll.kernel32.GetTempPathW(len(temp_path), temp_path)
+        print(f'Updater paths: prepared={prepared}; Windows temp={temp_path.value}; Python temp={tempfile.gettempdir()}', flush=True)
         parent = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
         updater = subprocess.Popen([str(helper), '--install', str(parent.pid), str(prepared), str(app), executable.name],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             wait_for(lambda: (prepared / 'armed').exists() or updater.poll() is not None)
-            require((prepared / 'armed').exists(), 'Updater did not arm: ' +
+            require((prepared / 'armed').exists(), f'Updater did not arm (exit={updater.poll()}): ' +
                     ((prepared / 'error.txt').read_text() if (prepared / 'error.txt').exists() else 'no diagnostic'))
             parent.terminate()
             parent.wait(timeout=10)
