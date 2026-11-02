@@ -1,0 +1,565 @@
+{
+  "schemaVersion": 1,
+  "baselineSourceRevision": "d1149b8",
+  "method": "Two-second synthetic 1080p60 H.264 sources; three paired runs per plain/overlay/text workload and software/automatic mode. Both revisions use the same isolated export-worker protocol; order alternates. Serial timing with no concurrent builds/tests. Independent full video decode verifies every output; one software pair per workload compared frame for frame. Visible editing reports use a silent audio driver and the native Metal backend.",
+  "platform": "macOS-15.7.3-arm64-arm-64bit",
+  "hardware": {
+    "availableMemoryBytes": 1236058112,
+    "logicalCpus": 8,
+    "totalMemoryBytes": 8589934592
+  },
+  "ffmpegVersion": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "binaries": {
+    "baseline": {
+      "path": "/private/tmp/isaac-remaining-baseline-build/IsaacVideoEditor.app/Contents/MacOS/IsaacVideoEditor",
+      "sha256": "66f7c8e1df32ba7bf434af19a3b82fde87e7811a18831f4bfd31c744f5d4b2f7"
+    },
+    "current": {
+      "path": "/private/tmp/isaac-remaining-verified/IsaacVideoEditor.app/Contents/MacOS/IsaacVideoEditor",
+      "sha256": "9b242b8492c5b01f170d2fd3017d808918925960f047cc767a6eaaae980d6d80"
+    }
+  },
+  "exports": 36,
+  "framesPerExport": 120,
+  "medians": [
+    {
+      "case": "1080-h264-overlay",
+      "mode": "software",
+      "baselineSeconds": 2.4473419169999957,
+      "currentSeconds": 2.438669292,
+      "encoder": "libx264",
+      "pipeline": "mlt"
+    },
+    {
+      "case": "1080-h264-overlay",
+      "mode": "auto",
+      "baselineSeconds": 2.7643375829999997,
+      "currentSeconds": 2.796371999999998,
+      "encoder": "h264_videotoolbox",
+      "pipeline": "mlt"
+    },
+    {
+      "case": "1080-h264-plain",
+      "mode": "software",
+      "baselineSeconds": 1.0025961669999999,
+      "currentSeconds": 1.002016125,
+      "encoder": "libx264",
+      "pipeline": "mlt"
+    },
+    {
+      "case": "1080-h264-plain",
+      "mode": "auto",
+      "baselineSeconds": 1.3832432920000013,
+      "currentSeconds": 1.3985691249999999,
+      "encoder": "h264_videotoolbox",
+      "pipeline": "mlt"
+    },
+    {
+      "case": "1080-h264-text",
+      "mode": "software",
+      "baselineSeconds": 3.1416380830000037,
+      "currentSeconds": 3.175502417000004,
+      "encoder": "libx264",
+      "pipeline": "mlt"
+    },
+    {
+      "case": "1080-h264-text",
+      "mode": "auto",
+      "baselineSeconds": 3.502735916000006,
+      "currentSeconds": 3.3376383749999974,
+      "encoder": "h264_videotoolbox",
+      "pipeline": "mlt"
+    }
+  ],
+  "softwareDecodedComparisons": {
+    "1080-h264-overlay": {
+      "decodedFrames": 120,
+      "identical": true
+    },
+    "1080-h264-plain": {
+      "decodedFrames": 120,
+      "identical": true
+    },
+    "1080-h264-text": {
+      "decodedFrames": 120,
+      "identical": true
+    }
+  },
+  "editing": [
+    {
+      "case": "1080-h264-plain",
+      "loadMs": 120,
+      "coldSeekMedianMs": 53.076334,
+      "warmSeekMedianMs": 2.548083,
+      "seeks": [
+        {
+          "frame": 0,
+          "ms": 157.2935,
+          "phase": "cold"
+        },
+        {
+          "frame": 29,
+          "ms": 53.076334,
+          "phase": "cold"
+        },
+        {
+          "frame": 59,
+          "ms": 33.877958,
+          "phase": "cold"
+        },
+        {
+          "frame": 89,
+          "ms": 117.057417,
+          "phase": "cold"
+        },
+        {
+          "frame": 119,
+          "ms": 38.448667,
+          "phase": "cold"
+        },
+        {
+          "frame": 0,
+          "ms": 2.414875,
+          "phase": "warm"
+        },
+        {
+          "frame": 29,
+          "ms": 2.54875,
+          "phase": "warm"
+        },
+        {
+          "frame": 59,
+          "ms": 2.548083,
+          "phase": "warm"
+        },
+        {
+          "frame": 89,
+          "ms": 2.560291,
+          "phase": "warm"
+        },
+        {
+          "frame": 119,
+          "ms": 2.515417,
+          "phase": "warm"
+        }
+      ],
+      "playback": {
+        "audioDriver": "dummy",
+        "deliveredFrames": 46,
+        "elapsedMs": 1500,
+        "errors": [],
+        "receivedFrames": 88,
+        "skippedFrames": 42,
+        "started": true,
+        "textureUploads": 45
+      },
+      "presentation": {
+        "graphicsApi": 6,
+        "textureUploads": 50,
+        "visible": true
+      },
+      "diagnostics": {
+        "availableMemoryBytes": 1236058112,
+        "clipCount": 2,
+        "importJobs": 0,
+        "importMs": 0,
+        "importing": false,
+        "logicalCpus": 8,
+        "media": {
+          "batchedFrames": 0,
+          "preparationMs": 0,
+          "processes": 0,
+          "queuedJobs": 0,
+          "thumbnailBytes": 0,
+          "thumbnailHits": 0,
+          "thumbnailMisses": 0,
+          "thumbnailProcesses": 0,
+          "waveformBytes": 0
+        },
+        "metadataMs": 17,
+        "peakResidentBytes": 559169536,
+        "preparingSource": false,
+        "preparingTimeline": false,
+        "preview": {
+          "cacheHits": 7,
+          "cacheLimitBytes": 76660736,
+          "cacheMisses": 5,
+          "cachedBytes": 74649600,
+          "decodeMs": 265.204,
+          "deliveredFrames": 58,
+          "height": 540,
+          "lastSeekMs": 1.288,
+          "preloadedFrames": 0,
+          "receivedFrames": 88,
+          "seekCount": 12,
+          "skippedFrames": 42,
+          "width": 960
+        },
+        "projectRevision": 1,
+        "proxy": {
+          "activeCopies": 0,
+          "cacheHits": 0,
+          "cacheMisses": 0,
+          "evictedBytes": 0,
+          "preparationMs": 0,
+          "processes": 0,
+          "protectedBytes": 0,
+          "queuedJobs": 0,
+          "storageBytes": 0,
+          "storageLimitBytes": 10737418240,
+          "timingHits": 0,
+          "timingScans": 0
+        },
+        "residentBytes": 533757952,
+        "sourcePreparationJobs": 0,
+        "sourcePreparationMs": 0,
+        "sourcePreview": {
+          "cacheHits": 0,
+          "cacheLimitBytes": 86389760,
+          "cacheMisses": 0,
+          "cachedBytes": 0,
+          "decodeMs": 0,
+          "deliveredFrames": 0,
+          "height": 540,
+          "lastSeekMs": 0,
+          "preloadedFrames": 0,
+          "receivedFrames": 0,
+          "seekCount": 0,
+          "skippedFrames": 0,
+          "width": 960
+        },
+        "supersededPreparationJobs": 0,
+        "timelineBuildMs": 28,
+        "timelinePreparationJobs": 1,
+        "timelinePreparationMs": 85,
+        "totalMemoryBytes": 8589934592
+      },
+      "process": {
+        "peakResidentBytes": 559169536,
+        "residentBytes": 533757952
+      }
+    },
+    {
+      "case": "1080-h264-overlay",
+      "loadMs": 118,
+      "coldSeekMedianMs": 68.882417,
+      "warmSeekMedianMs": 2.577209,
+      "seeks": [
+        {
+          "frame": 0,
+          "ms": 100.267917,
+          "phase": "cold"
+        },
+        {
+          "frame": 29,
+          "ms": 28.024625,
+          "phase": "cold"
+        },
+        {
+          "frame": 59,
+          "ms": 68.882417,
+          "phase": "cold"
+        },
+        {
+          "frame": 89,
+          "ms": 93.583542,
+          "phase": "cold"
+        },
+        {
+          "frame": 119,
+          "ms": 31.257,
+          "phase": "cold"
+        },
+        {
+          "frame": 0,
+          "ms": 2.597959,
+          "phase": "warm"
+        },
+        {
+          "frame": 29,
+          "ms": 2.539042,
+          "phase": "warm"
+        },
+        {
+          "frame": 59,
+          "ms": 2.581125,
+          "phase": "warm"
+        },
+        {
+          "frame": 89,
+          "ms": 2.577209,
+          "phase": "warm"
+        },
+        {
+          "frame": 119,
+          "ms": 2.550791,
+          "phase": "warm"
+        }
+      ],
+      "playback": {
+        "audioDriver": "dummy",
+        "deliveredFrames": 45,
+        "elapsedMs": 1500,
+        "errors": [],
+        "receivedFrames": 75,
+        "skippedFrames": 30,
+        "started": true,
+        "textureUploads": 43
+      },
+      "presentation": {
+        "graphicsApi": 6,
+        "textureUploads": 48,
+        "visible": true
+      },
+      "diagnostics": {
+        "availableMemoryBytes": 1313243136,
+        "clipCount": 2,
+        "importJobs": 0,
+        "importMs": 0,
+        "importing": false,
+        "logicalCpus": 8,
+        "media": {
+          "batchedFrames": 0,
+          "preparationMs": 0,
+          "processes": 0,
+          "queuedJobs": 0,
+          "thumbnailBytes": 0,
+          "thumbnailHits": 0,
+          "thumbnailMisses": 0,
+          "thumbnailProcesses": 0,
+          "waveformBytes": 0
+        },
+        "metadataMs": 55,
+        "peakResidentBytes": 652951552,
+        "preparingSource": false,
+        "preparingTimeline": false,
+        "preview": {
+          "cacheHits": 7,
+          "cacheLimitBytes": 82077696,
+          "cacheMisses": 5,
+          "cachedBytes": 80870400,
+          "decodeMs": 235.958,
+          "deliveredFrames": 57,
+          "height": 540,
+          "lastSeekMs": 1.428,
+          "preloadedFrames": 0,
+          "receivedFrames": 75,
+          "seekCount": 12,
+          "skippedFrames": 30,
+          "width": 960
+        },
+        "projectRevision": 1,
+        "proxy": {
+          "activeCopies": 0,
+          "cacheHits": 0,
+          "cacheMisses": 0,
+          "evictedBytes": 0,
+          "preparationMs": 0,
+          "processes": 0,
+          "protectedBytes": 0,
+          "queuedJobs": 0,
+          "storageBytes": 0,
+          "storageLimitBytes": 10737418240,
+          "timingHits": 0,
+          "timingScans": 0
+        },
+        "residentBytes": 650231808,
+        "sourcePreparationJobs": 0,
+        "sourcePreparationMs": 0,
+        "sourcePreview": {
+          "cacheHits": 0,
+          "cacheLimitBytes": 101968896,
+          "cacheMisses": 0,
+          "cachedBytes": 0,
+          "decodeMs": 0,
+          "deliveredFrames": 0,
+          "height": 540,
+          "lastSeekMs": 0,
+          "preloadedFrames": 0,
+          "receivedFrames": 0,
+          "seekCount": 0,
+          "skippedFrames": 0,
+          "width": 960
+        },
+        "supersededPreparationJobs": 0,
+        "timelineBuildMs": 26,
+        "timelinePreparationJobs": 1,
+        "timelinePreparationMs": 88,
+        "totalMemoryBytes": 8589934592
+      },
+      "process": {
+        "peakResidentBytes": 652951552,
+        "residentBytes": 650231808
+      }
+    },
+    {
+      "case": "1080-h264-text",
+      "loadMs": 248,
+      "coldSeekMedianMs": 71.541667,
+      "warmSeekMedianMs": 2.649167,
+      "seeks": [
+        {
+          "frame": 0,
+          "ms": 118.741959,
+          "phase": "cold"
+        },
+        {
+          "frame": 29,
+          "ms": 51.236125,
+          "phase": "cold"
+        },
+        {
+          "frame": 59,
+          "ms": 71.541667,
+          "phase": "cold"
+        },
+        {
+          "frame": 89,
+          "ms": 91.032959,
+          "phase": "cold"
+        },
+        {
+          "frame": 119,
+          "ms": 23.13,
+          "phase": "cold"
+        },
+        {
+          "frame": 0,
+          "ms": 1.477125,
+          "phase": "warm"
+        },
+        {
+          "frame": 29,
+          "ms": 2.642625,
+          "phase": "warm"
+        },
+        {
+          "frame": 59,
+          "ms": 2.69025,
+          "phase": "warm"
+        },
+        {
+          "frame": 89,
+          "ms": 2.686375,
+          "phase": "warm"
+        },
+        {
+          "frame": 119,
+          "ms": 2.649167,
+          "phase": "warm"
+        }
+      ],
+      "playback": {
+        "audioDriver": "dummy",
+        "deliveredFrames": 41,
+        "elapsedMs": 1500,
+        "errors": [],
+        "receivedFrames": 72,
+        "skippedFrames": 31,
+        "started": true,
+        "textureUploads": 40
+      },
+      "presentation": {
+        "graphicsApi": 6,
+        "textureUploads": 45,
+        "visible": true
+      },
+      "diagnostics": {
+        "availableMemoryBytes": 1113079808,
+        "clipCount": 2,
+        "importJobs": 0,
+        "importMs": 0,
+        "importing": false,
+        "logicalCpus": 8,
+        "media": {
+          "batchedFrames": 0,
+          "preparationMs": 0,
+          "processes": 0,
+          "queuedJobs": 0,
+          "thumbnailBytes": 0,
+          "thumbnailHits": 0,
+          "thumbnailMisses": 0,
+          "thumbnailProcesses": 0,
+          "waveformBytes": 0
+        },
+        "metadataMs": 117,
+        "peakResidentBytes": 639500288,
+        "preparingSource": false,
+        "preparingTimeline": false,
+        "preview": {
+          "cacheHits": 7,
+          "cacheLimitBytes": 70063104,
+          "cacheMisses": 5,
+          "cachedBytes": 68428800,
+          "decodeMs": 322.646,
+          "deliveredFrames": 53,
+          "height": 540,
+          "lastSeekMs": 1.351,
+          "preloadedFrames": 0,
+          "receivedFrames": 72,
+          "seekCount": 12,
+          "skippedFrames": 31,
+          "width": 960
+        },
+        "projectRevision": 1,
+        "proxy": {
+          "activeCopies": 0,
+          "cacheHits": 0,
+          "cacheMisses": 0,
+          "evictedBytes": 0,
+          "preparationMs": 0,
+          "processes": 0,
+          "protectedBytes": 0,
+          "queuedJobs": 0,
+          "storageBytes": 0,
+          "storageLimitBytes": 10737418240,
+          "timingHits": 0,
+          "timingScans": 0
+        },
+        "residentBytes": 635092992,
+        "sourcePreparationJobs": 0,
+        "sourcePreparationMs": 0,
+        "sourcePreview": {
+          "cacheHits": 0,
+          "cacheLimitBytes": 89811968,
+          "cacheMisses": 0,
+          "cachedBytes": 0,
+          "decodeMs": 0,
+          "deliveredFrames": 0,
+          "height": 540,
+          "lastSeekMs": 0,
+          "preloadedFrames": 0,
+          "receivedFrames": 0,
+          "seekCount": 0,
+          "skippedFrames": 0,
+          "width": 960
+        },
+        "supersededPreparationJobs": 0,
+        "timelineBuildMs": 27,
+        "timelinePreparationJobs": 1,
+        "timelinePreparationMs": 153,
+        "totalMemoryBytes": 8589934592
+      },
+      "process": {
+        "peakResidentBytes": 639500288,
+        "residentBytes": 635092992
+      }
+    }
+  ],
+  "verification": {
+    "fullCTestTargets": 34,
+    "fullCTestSeconds": 212.31,
+    "finalCliTargets": 2,
+    "finalCliSeconds": 10.57,
+    "actualNvidiaHardwareTests": "2 cases skipped; workstation acceptance pending",
+    "installedAppSmoke": "Passed: QML, SVG, FFmpeg, media decode, playback and MP4 export",
+    "installedAppSha256": "9b242b8492c5b01f170d2fd3017d808918925960f047cc767a6eaaae980d6d80"
+  },
+  "limits": [
+    "An eight-core 8 GiB Mac is not the target workstation. Available RAM was low and selected conservative preview/cache/render budgets.",
+    "Short two-second exports include startup, validation and hardware probes. Small median differences do not establish a speedup or regression.",
+    "Cold seek is the first sweep after loading; the initial visible seek can include window setup. Warm seek repeats the same five positions.",
+    "Playback frame counters describe delivery/skips on this Mac; they do not establish 60 fps on the workstation.",
+    "No NVIDIA throughput, CUDA device quality, long-run memory or iPhone-device acceptance was performed."
+  ]
+}

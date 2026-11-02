@@ -33,6 +33,8 @@ struct VideoSize {
 
 // Native source dimensions, independent of the timeline's rendering profile.
 std::optional<MediaInfo> mediaInfo(const QString &path, QString *error = nullptr);
+// Background preparation may retry an unchanged failed source while GUI lookups stay cached.
+std::optional<MediaInfo> retryMediaInfo(const QString &path, QString *error = nullptr);
 
 // Completed audio downloads, newest first; the caller chooses the directory.
 QStringList recentAudioFiles(const QString &directory, int limit = 10);

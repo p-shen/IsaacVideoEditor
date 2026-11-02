@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QTemporaryDir>
+#include <QRandomGenerator>
 #include <QtTest>
 #include <limits>
 
@@ -12,6 +13,8 @@ class ProjectTest : public QObject {
     Q_OBJECT
 private slots:
     void durationAndCrossfade();
+    void derivedTimelineTracksMutableAndCopiedProjects();
+    void derivedTimelineMatchesTransitionRules();
     void shortMiddleClipClampsCrossfade();
     void rejectsBadTrim();
     void savesAndLoads();
@@ -31,6 +34,36 @@ private slots:
     void rejectsMalformedRotationSettings();
     void rejectsInvalidRotationInMemory();
 };
+
+void ProjectTest::derivedTimelineTracksMutableAndCopiedProjects() {
+    Project p;p.clips={{"a.mp4",0,2},{"b.mp4",0,3},{"a.mp4",0,2}};p.crossfadeFrames=30;
+    p.voicePath="a.mp4";p.visualOverlays.append({"b.mp4"});
+    auto data=p.timelineData();QCOMPARE(data.starts,QVector<int>({0,90,240}));QCOMPARE(data.duration,360);
+    QCOMPARE(data.sourceUses.value("a.mp4"),3);QCOMPARE(data.sourceUses.value("b.mp4"),2);
+    Clip &held=p.clips[0];data=p.timelineData();held.outSeconds=3;
+    data=p.timelineData();QCOMPARE(data.starts[1],150);QCOMPARE(data.duration,420);
+    Project copy=p;copy.clips[1].transitionFrames=10;
+    QCOMPARE(copy.timelineData().starts[1],170);QCOMPARE(p.timelineData().starts[1],150);
+    p.crossfadeFrames=0;QCOMPARE(p.timelineData().starts[1],180);
+}
+
+void ProjectTest::derivedTimelineMatchesTransitionRules() {
+    QRandomGenerator random(42);
+    for(int sample=0;sample<200;++sample){
+        Project p;p.crossfadeFrames=random.bounded(61);
+        for(int i=0,count=random.bounded(1,25);i<count;++i){
+            Clip clip{"source.mp4",0,random.bounded(1,241)/60.0};clip.hardCutBefore=random.bounded(5)==0;
+            clip.transitionFrames=random.bounded(3)==0?-1:random.bounded(61);if(random.bounded(5)==0)clip.transitionType="cut";
+            p.clips.append(clip);
+        }
+        const auto data=p.timelineData();int total=0;
+        for(int i=0;i<p.clips.size();++i){
+            const int transition=p.transitionFramesBefore(i);QCOMPARE(data.transitions[i],transition);
+            total-=transition;QCOMPARE(data.starts[i],total);total+=p.clipFrames(p.clips[i]);
+        }
+        QCOMPARE(data.duration,total);
+    }
+}
 
 void ProjectTest::durationAndCrossfade() {
     QCOMPARE(Project::fps, 60);

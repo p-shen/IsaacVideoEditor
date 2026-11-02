@@ -6,10 +6,12 @@
 #include <QHash>
 #include <QImage>
 #include <QObject>
+#include <QElapsedTimer>
 #include <QQueue>
 #include <QSet>
 #include <QStringList>
 #include <QVector>
+#include <QVariantMap>
 
 class QProcess;
 
@@ -27,6 +29,7 @@ public:
     void beginViewport();
     void endViewport();
     Q_INVOKABLE void retry(const QString &path);
+    QVariantMap diagnostics() const;
 
 signals:
     void changed();
@@ -45,10 +48,13 @@ private:
         Kind kind = Thumbnail;
         bool priority = false;
         bool cancelled = false;
+        bool batchable = false;
     };
     struct Worker {
         QProcess *process = nullptr;
+        QElapsedTimer elapsed;
         Job job;
+        QVector<Job> batch;
         QByteArray imageBytes;
         QVector<float> peaks;
         int binSamples = 0, pcmLowByte = -1;
@@ -76,6 +82,9 @@ private:
     QVector<Worker *> workers_;
     Performance::Budget budget_;
     quint64 nextGeneration_ = 0;
+    qint64 preparationMs_ = 0;
+    quint64 processCount_ = 0;
+    quint64 thumbnailHits_ = 0, thumbnailMisses_ = 0, thumbnailProcesses_ = 0, batchedFrames_ = 0;
     bool interactive_ = false;
     bool viewport_ = false;
     bool scheduled_ = false;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QHash>
 #include <QVector>
 #include <optional>
 #include <QUuid>
@@ -102,6 +103,13 @@ struct Project {
     void setAudioControls(int lane, const AudioControls &controls, int clipIndex = -1);
     bool setTransition(int index, const QString &type, int frames);
 
+    struct TimelineData {
+        QVector<int> starts, frames, transitions;
+        QHash<QString,int> sourceUses;
+        int duration=0;
+    };
+    // Cache this value at snapshot/command boundaries; public fields remain freely mutable.
+    TimelineData timelineData() const;
     int clipFrames(const Clip &clip) const;
     int effectiveCrossfadeFrames() const;
     int transitionFramesBefore(int index) const;

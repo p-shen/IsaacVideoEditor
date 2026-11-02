@@ -133,6 +133,10 @@ QString renderError(Mlt::Producer &producer) {
     if(!state)return {};
     QMutexLocker lock(&(*state)->mutex);return (*state)->message;
 }
+void discardSpeculativeError(Mlt::Producer &producer,const QString &expected) {
+    auto *state=static_cast<std::shared_ptr<RenderError>*>(producer.get_data(errorKey));if(!state)return;
+    QMutexLocker lock(&(*state)->mutex);if((*state)->message==expected)(*state)->message.clear();
+}
 bool attachTransform(Mlt::Producer &source,Mlt::Tractor &timeline,const Clip &clip,const QSizeF &size) {
     for(int i=0;i<source.filter_count();++i){
         std::unique_ptr<Mlt::Filter> existing(source.filter(i));

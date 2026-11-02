@@ -3,11 +3,13 @@
 #include "visual_renderer.h"
 #include "runtime_paths.h"
 #include "encoding.h"
+#include "gpu_pipeline.h"
 #include "performance.h"
 #include "transition_presets.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
@@ -20,6 +22,7 @@
 #include <QSize>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QtMath>
 #include <algorithm>
 #include <filesystem>
@@ -66,7 +69,8 @@ namespace {
 struct CachedMediaInfo {
     qint64 bytes = 0;
     qint64 modified = 0;
-    MediaInfo info;
+    std::optional<MediaInfo> info;
+    QString error;
 };
 
 std::mutex mediaInfoMutex;
@@ -211,27 +215,35 @@ QStringList recentAudioFiles(const QString &directory, int limit) {
     return recent;
 }
 
-std::optional<MediaInfo> mediaInfo(const QString &path, QString *error) {
+static std::optional<MediaInfo> inspectMediaInfo(const QString &path, QString *error,bool retryFailure) {
     if (error) error->clear();
     const QFileInfo file(path);
     if (!file.isFile()) {
         if (error) *error = QString("File not found: %1").arg(path);
         return std::nullopt;
     }
-    const QString key = file.canonicalFilePath();
+    const auto canonical=file.canonicalFilePath();const QString key=canonical.isEmpty()?file.absoluteFilePath():canonical;
     const qint64 bytes = file.size();
     const qint64 modified = file.lastModified().toMSecsSinceEpoch();
     {
         const std::lock_guard<std::mutex> lock(mediaInfoMutex);
         const auto found = mediaInfoCache.constFind(key);
-        if (found != mediaInfoCache.cend() && found->bytes == bytes && found->modified == modified)
+        if (found != mediaInfoCache.cend() && found->bytes == bytes && found->modified == modified && (found->info || !retryFailure)) {
+            if(error)*error=found->error;
             return found->info;
+        }
     }
+    const auto remember=[&](std::optional<MediaInfo> info,const QString &failure=QString{}){
+        const QFileInfo after(path);
+        if(after.isFile()&&after.size()==bytes&&after.lastModified().toMSecsSinceEpoch()==modified){
+            const std::lock_guard<std::mutex> lock(mediaInfoMutex);mediaInfoCache.insert(key,{bytes,modified,info,failure});}
+        if(error)*error=failure;return info;
+    };
     initializeMlt();
     Mlt::Profile profile;
     configureOutputProfile(profile);
-    auto source = openMedia(profile, path, error);
-    if (!source) return std::nullopt;
+    QString failure;auto source = openMedia(profile, path, &failure);
+    if (!source) return remember(std::nullopt,failure);
     MediaInfo info;
     info.durationSeconds = source->get_length() / double(Project::fps);
     info.hasAudio = source->get_int("audio_index") >= 0;
@@ -242,17 +254,13 @@ std::optional<MediaInfo> mediaInfo(const QString &path, QString *error) {
         info.height = source->get_int((prefix + "height").constData());
         info.cameraRotationDegrees = source->get_int((prefix + "rotate").constData());
         if (info.width <= 0 || info.height <= 0) {
-            if (error) *error = QString("Cannot read video dimensions: %1").arg(path);
-            return std::nullopt;
+            return remember(std::nullopt,QString("Cannot read video dimensions: %1").arg(path));
         }
     }
-    const QFileInfo after(path);
-    if (after.isFile() && after.size() == bytes && after.lastModified().toMSecsSinceEpoch() == modified) {
-        const std::lock_guard<std::mutex> lock(mediaInfoMutex);
-        mediaInfoCache.insert(key, {bytes, modified, info});
-    }
-    return info;
+    return remember(info);
 }
+std::optional<MediaInfo> mediaInfo(const QString &path,QString *error){return inspectMediaInfo(path,error,false);}
+std::optional<MediaInfo> retryMediaInfo(const QString &path,QString *error){return inspectMediaInfo(path,error,true);}
 
 std::optional<VideoSize> projectOutputSize(const Project &project, QString *error, bool allowOffline) {
     if (error) error->clear();
@@ -496,6 +504,10 @@ bool exportMp4(const Project &project, const QString &path,
                std::function<void(int)> progress, QString *error, std::function<bool()> canceled,
                 std::function<void(const QString &)> diagnostic, bool softwareOnly, bool optimizeForIphone) {
     if (error) error->clear();
+    QElapsedTimer exportTimer;exportTimer.start();QString pipeline,selectedEncoder;
+    const auto stage=[&](const QString &name,const QString &backend,qint64 ms,bool includesAudio=false){
+        if(diagnostic)diagnostic("Export stage: "+QString::fromUtf8(QJsonDocument(QJsonObject{{"stage",name},{"backend",backend},{"ms",ms},{"includesAudio",includesAudio}}).toJson(QJsonDocument::Compact)));
+    };
     const auto wasCanceled=[&]{if(canceled&&canceled()){if(error)*error="Export canceled.";return true;}return false;};
     if(wasCanceled())return false;
     if (path.isEmpty()) {
@@ -548,8 +560,9 @@ bool exportMp4(const Project &project, const QString &path,
     const auto render = [&](const QString &encoder) {
         if(wasCanceled())return false;
         if(diagnostic)diagnostic("Encoder: "+encoder);
-        auto timeline=buildTimeline(project,profile,error);
+        QElapsedTimer stageTimer;stageTimer.start();auto timeline=buildTimeline(project,profile,error);
         if(!timeline || wasCanceled())return false;
+        stage("timeline","mlt",stageTimer.restart());
         Mlt::Consumer consumer(profile,"avformat",encodedPath.constData());
         if(!consumer.is_valid()){if(error)*error="MP4 exporter is unavailable.";return false;}
         configureMp4Consumer(consumer,encoder,*size,optimizeForIphone);
@@ -570,11 +583,13 @@ bool exportMp4(const Project &project, const QString &path,
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         consumer.stop();if(wasCanceled())return false;
+        stage("video","mlt",stageTimer.restart(),true);
         const auto compositionError=VisualRendering::renderError(*timeline);
         if(!compositionError.isEmpty()){if(error)*error=compositionError;return false;}
         if(consumer.get_int("error") || !completeMp4(profile,temporaryPath,total,*size,isHardwareH264Encoder(encoder),optimizeForIphone)) {
             if(error)*error="MP4 export failed. Check the source files and free disk space.";return false;
         }
+        stage("validation","mlt",stageTimer.elapsed());pipeline="mlt";selectedEncoder=encoder;
         if(diagnostic) {
             const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
             diagnostic(QString("Encoded %1 frames in %2 s (%3 fps)").arg(total).arg(seconds,0,'f',2).arg(total/std::max(.001,seconds),0,'f',1));
@@ -611,7 +626,28 @@ bool exportMp4(const Project &project, const QString &path,
     const auto hardware=hardwareH264Encoder();
     // Driver faults must stay inside the worker so the editor can retry with software.
     const bool isolatedWorker=QCoreApplication::arguments().value(1)==QLatin1String("--export-worker");
-    if(!softwareOnly && isolatedWorker && !hardware.isEmpty()) {
+    if(!softwareOnly && isolatedWorker && hardware==QLatin1String("h264_nvenc")) {
+        QTemporaryDir gpuFiles(target.absoluteDir().filePath(".isaac-gpu-export-XXXXXX"));
+        QString gpuError;
+        const auto video=gpuFiles.filePath("video.mp4"),audio=gpuFiles.filePath("audio.m4a");
+        const auto result=gpuFiles.isValid()?GpuPipeline::renderVideo(project,{size->width,size->height},video,canceled,
+            [&](int value){if(progress)progress(value*9/10);},diagnostic,optimizeForIphone,&gpuError):GpuPipeline::Result::Failed;
+        if(result==GpuPipeline::Result::Completed && !wasCanceled()) {
+            // MLT keeps the exact clip, voice and music gain/fade/mix semantics.
+            rendered=GpuPipeline::renderAudio(project,{size->width,size->height},audio,canceled,
+                [&](int value){if(progress)progress(86+value/10);},&gpuError,diagnostic);
+            QElapsedTimer stageTimer;stageTimer.start();
+            if(rendered){rendered=GpuPipeline::muxAudio(video,audio,temporaryPath,total,canceled,&gpuError);stage("mux","ffmpeg-cuda",stageTimer.restart());}
+            if(rendered){rendered=completeMp4(profile,temporaryPath,total,*size,true,optimizeForIphone);stage("validation","ffmpeg-cuda",stageTimer.elapsed());}
+            if(rendered){pipeline="ffmpeg-cuda";selectedEncoder="h264_nvenc";}
+            if(rendered&&diagnostic)diagnostic(QString("Output: %1x%2 at %3 fps; mode=%4").arg(size->width).arg(size->height).arg(Project::fps).arg(optimizeForIphone?"iPhone":"native"));
+        }
+        if(wasCanceled())return false;
+        if(!rendered&&result!=GpuPipeline::Result::Unavailable&&diagnostic)diagnostic("GPU export failed: "+gpuError+" Retrying with the MLT renderer.");
+    } else if(!softwareOnly && isolatedWorker && diagnostic) {
+        diagnostic("GPU processing fallback: NVIDIA CUDA processing is unavailable on this platform; using MLT processing.");
+    }
+    if(!rendered && !softwareOnly && isolatedWorker && !hardware.isEmpty()) {
         if(probeHardware(hardware)) {
             if(diagnostic)diagnostic("Hardware probe succeeded: "+hardware);
             rendered=render(hardware);
@@ -633,6 +669,10 @@ bool exportMp4(const Project &project, const QString &path,
         return false;
     }
     if (progress) progress(100);
+    if(diagnostic){const auto memory=Performance::processMemory();diagnostic("Export metrics: "+QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"pipeline",pipeline},{"encoder",selectedEncoder},{"mode",optimizeForIphone?"iPhone":"native"},{"width",size->width},{"height",size->height},
+        {"frames",total},{"totalMs",exportTimer.elapsed()},{"residentBytes",qint64(memory.residentBytes)},{"peakResidentBytes",qint64(memory.peakResidentBytes)},
+        {"memoryScope","export worker; FFmpeg child processes excluded"}}).toJson(QJsonDocument::Compact)));}
     return true;
 }
 

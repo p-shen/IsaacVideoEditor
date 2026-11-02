@@ -15,7 +15,7 @@ ColumnLayout {
     onSourceKeyChanged: cancelEdits()
     function focusFirst() { sourceChooser.forceActiveFocus() }
     function chooseFile(lane) { if (lane === 1) controller.chooseVoice(); else if (lane === 2) controller.chooseMusic() }
-    function setFile(lane, path) { if (lane === 1) controller.setVoicePath(path); else if (lane === 2) controller.setMusicPath(path) }
+    function setFile(lane, path) { if (lane === 1) controller.setVoicePathAsync(path); else if (lane === 2) controller.setMusicPathAsync(path) }
 
     component AudioField: UI.TextField {
         id: field

@@ -132,6 +132,7 @@ ApplicationWindow {
             MenuItem { action: importAction }
             MenuItem { text: "Import and append…"; onTriggered: editor.importAndAppendDialog() }
             MenuItem { objectName: "exportMenuItem"; action: exportAction }
+            MenuItem { objectName: "performanceMenuItem"; text: "Performance…"; onTriggered: performanceDialog.open() }
             MenuSeparator {}
             MenuItem { text: "Quit"; onTriggered: window.close() } }
         Menu {
@@ -580,7 +581,7 @@ ApplicationWindow {
                         onTransitionSelected: index => { editor.selectTransition(index); window.focusInspector(2,false) }
                         onTransitionPreviewRequested: (index,type,frames) => editor.setTransition(index,type,frames)
                         onTransitionPresetRequested: (index,type,frames) => editor.setTransition(index,type,frames)
-                        onFilesInserted: (paths,frame) => editor.dropMediaAt(paths,frame)
+                        onFilesInserted: (paths,frame) => editor.dropMediaAtAsync(paths,frame)
                         PinchHandler {
                             target: null
                             property real priorScale: 1
@@ -638,6 +639,7 @@ ApplicationWindow {
         }
         onAccepted: editor.selectRange(rangeFirst.value - 1,rangeLast.value - 1)
     }
+    UI.PerformanceDialog { id: performanceDialog; controller: editor }
     Dialog {
         id: exportOptionsDialog
         objectName: "exportOptionsDialog"

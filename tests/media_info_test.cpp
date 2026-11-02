@@ -27,6 +27,7 @@ private slots:
     void honorsCameraOrientation();
     void roundsOddDimensionsForH264();
     void invalidatesChangedAndMissingSources();
+    void failedProbeIsRememberedForTheSameSourceIdentity();
     void rejectsEmptyAndNonVideoProjects();
     void exportUsesLowestResolution();
     void exportKeepsH264WithinPhoneCompatibleBounds_data();
@@ -201,6 +202,18 @@ void MediaInfoTest::invalidatesChangedAndMissingSources() {
     QVERIFY(!error.isEmpty());
 }
 
+void MediaInfoTest::failedProbeIsRememberedForTheSameSourceIdentity() {
+    QFile valid(file("hd.mp4"));QVERIFY(valid.open(QIODevice::ReadOnly));const auto bytes=valid.readAll();
+    const auto path=file("retry-metadata.mp4");const auto modified=QDateTime::fromMSecsSinceEpoch(1700000000000LL);
+    QFile source(path);QVERIFY(source.open(QIODevice::WriteOnly));QCOMPARE(source.write(QByteArray(bytes.size(),'\0')),bytes.size());
+    QVERIFY(source.flush());QVERIFY(source.setFileTime(modified,QFileDevice::FileModificationTime));source.close();QString firstError;
+    QVERIFY(!Media::mediaInfo(path,&firstError));QVERIFY(!firstError.isEmpty());
+    QVERIFY(source.open(QIODevice::WriteOnly));QCOMPARE(source.write(bytes),bytes.size());
+    QVERIFY(source.flush());QVERIFY(source.setFileTime(modified,QFileDevice::FileModificationTime));source.close();QString repeatedError;
+    QVERIFY(!Media::mediaInfo(path,&repeatedError));QCOMPARE(repeatedError,firstError);
+    const auto repaired=Media::retryMediaInfo(path,&repeatedError);QVERIFY(repaired);QVERIFY(repeatedError.isEmpty());QCOMPARE(repaired->width,1920);
+}
+
 void MediaInfoTest::rejectsEmptyAndNonVideoProjects() {
     QString error;
     QVERIFY(!Media::projectOutputSize({}, &error));
@@ -337,6 +350,12 @@ void MediaInfoTest::directExportKeepsHardwareOutsideTheEditorProcess() {
     QFile encoded(output);QVERIFY(encoded.open(QIODevice::ReadOnly));QVERIFY(encoded.readAll().contains("x264 - core"));
     QVERIFY(diagnostics.filter(QRegularExpression("^Hardware probe: ")).isEmpty());
     QCOMPARE(diagnostics.filter(QRegularExpression("^Encoder: ")),QStringList{"Encoder: libx264"});
+    const auto metricsLines=diagnostics.filter(QRegularExpression("^Export metrics: "));QCOMPARE(metricsLines.size(),1);
+    const auto metrics=QJsonDocument::fromJson(metricsLines.first().mid(16).toUtf8()).object();
+    QCOMPARE(metrics["pipeline"].toString(),QString("mlt"));QCOMPARE(metrics["encoder"].toString(),QString("libx264"));
+    QCOMPARE(metrics["frames"].toInt(),6);QCOMPARE(metrics["mode"].toString(),QString("native"));QVERIFY(metrics["totalMs"].toDouble()>=0);
+    QVERIFY(metrics.contains("residentBytes"));QVERIFY(metrics.contains("peakResidentBytes"));
+    QCOMPARE(diagnostics.filter(QRegularExpression("^Export stage: ")).size(),3);
 }
 
 void MediaInfoTest::successfulExportReplacesDestination() {

@@ -1,5 +1,6 @@
 #include "editor_controller.h"
 #include "mlt_engine.h"
+#include "source_timing.h"
 #include "preview.h"
 #include "preview_cache.h"
 #include "visual_renderer.h"
@@ -7,11 +8,12 @@
 #include <QFileInfo>
 #include <QImageReader>
 #include <QUrl>
+#include <QRunnable>
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
 namespace {
-TransformCurve *curve(VisualTransform &t,const QString &name){if(name=="x"||name=="position")return &t.x;if(name=="y")return &t.y;if(name=="scale")return &t.scale;if(name=="rotation")return &t.rotation;if(name=="opacity")return &t.opacity;return nullptr;}
+template<typename Transform> auto curve(Transform &t,const QString &name)->decltype(&t.x){if(name=="x"||name=="position")return &t.x;if(name=="y")return &t.y;if(name=="scale")return &t.scale;if(name=="rotation")return &t.rotation;if(name=="opacity")return &t.opacity;return nullptr;}
 }
 QVariantList EditorController::visualOverlays() const {
     QVariantList list;for(int i=0;i<project_.visualOverlays.size();++i){const auto &o=project_.visualOverlays[i];
@@ -31,9 +33,11 @@ int EditorController::transformSourceFrame() const {
     return 0;
 }
 QVariantMap EditorController::currentTransform() const {
-    Project copy=project_;auto *t=selectedTransform(copy);if(!t)return {};
+    const VisualTransform *t=selectedOverlay_>=0&&selectedOverlay_<project_.visualOverlays.size()?&project_.visualOverlays[selectedOverlay_].transform:
+        primary_>=0&&primary_<project_.clips.size()?&project_.clips[primary_].transform:nullptr;
+    if(!t)return {};
     const int f=transformSourceFrame();QVariantMap result{{"sourceFrame",f},{"framing",t->framing},{"cropLeft",t->cropLeft},{"cropTop",t->cropTop},{"cropRight",t->cropRight},{"cropBottom",t->cropBottom}};
-    for(const auto &name:{"x","y","scale","rotation","opacity"}){auto *c=curve(*t,name);result[name]=c->valueAt(f);result[QString(name)+"Animated"]=!c->keys.isEmpty();QVariantList frames;bool here=false,ease=false;for(const auto &k:c->keys){frames.append(k.frame);if(k.frame==f){here=true;ease=k.ease;}}result[QString(name)+"Keys"]=frames;result[QString(name)+"Key"]=here;result[QString(name)+"Ease"]=ease;}
+    for(const auto &name:{"x","y","scale","rotation","opacity"}){const auto *c=curve(*t,name);result[name]=c->valueAt(f);result[QString(name)+"Animated"]=!c->keys.isEmpty();QVariantList frames;bool here=false,ease=false;for(const auto &k:c->keys){frames.append(k.frame);if(k.frame==f){here=true;ease=k.ease;}}result[QString(name)+"Keys"]=frames;result[QString(name)+"Key"]=here;result[QString(name)+"Ease"]=ease;}
     if(selectedOverlay_<0&&primary_>=0)result["rotation"]=result["rotation"].toDouble()+project_.clips[primary_].rotationDegrees;
     int start=0,length=0;
     if(selectedOverlay_>=0){start=project_.overlayStartFrame(selectedOverlay_);length=project_.overlayFrames(selectedOverlay_);}
@@ -57,8 +61,8 @@ void EditorController::applyComposition(const Project &p,const QString &label){
                 canUpdate=copy.path==overlayProxyPaths_.value(i);
             }
         }
-        project_=p;
-        if(timeline_&&canUpdate){
+        project_=p;timelineData_=project_.timelineData();
+        if(timeline_&&!preparing_&&canUpdate){
             auto *timeline=timeline_.get();
             preview_->requestSeek(position_,true,[timeline,p]{VisualRendering::update(*timeline,p);});
         }else rebuild();
@@ -66,7 +70,7 @@ void EditorController::applyComposition(const Project &p,const QString &label){
     }
     else commit(p,selection_,primary_,label);
 }
-void EditorController::beginVisualGesture(int overlay){showProject();if(audioPreview_)endAudioGesture(false);if(visualBefore_)return;if(textDragBefore_)endTextDrag(false);const auto before=state();if(overlay>=0)selectVisualOverlay(overlay);preview_->pause();endSkim();visualNoticeBefore_=notice_;visualBefore_=before;}
+void EditorController::beginVisualGesture(int overlay){showProject();if(audioPreview_)endAudioGesture(false);if(visualBefore_)return;if(textDragBefore_)endTextDrag(false);const auto before=state();if(overlay>=0)selectVisualOverlay(overlay);preview_->pause(false);endSkim();visualNoticeBefore_=notice_;visualBefore_=before;}
 void EditorController::endVisualGesture(bool cancel){
     if(!visualBefore_)return;const State after=state(),before=*visualBefore_;visualBefore_.reset();
     if(cancel){notice_=visualNoticeBefore_;apply(before,position_,true);return;}
@@ -78,7 +82,7 @@ void EditorController::endVisualGesture(bool cancel){
 namespace {
 bool prepareVisualOverlay(const Project &p,const QString &path,int frame,int lane,int sourceInFrame,int sourceOutFrame,VisualOverlay &o,QString &error){
     if(p.durationFrames()<1||lane<0||lane>2||!QFileInfo(path).isFile())return false;
-    const bool still=QImageReader(path).canRead();auto info=still?std::optional<Media::MediaInfo>{}:Media::mediaInfo(path,&error);
+    const bool still=QImageReader(path).canRead();auto info=still?std::optional<Media::MediaInfo>{}:Media::retryMediaInfo(path,&error);
     if(!still&&(!info||info->width<1)){error=error.isEmpty()?QString("Choose a video or image overlay."):error;return false;}
     frame=std::clamp(frame<0?0:frame,0,p.durationFrames()-1);o.path=path;o.lane=lane;o.startFrame=frame;
     const int sourceLength=still?86400*60:qRound(info->durationSeconds*60);
@@ -111,7 +115,38 @@ bool EditorController::dropVisualMedia(const QVariantList &urls,int frame,int la
     }
     showProject();return commit(next,{},-1,"Drop connected overlays",false,-1,next.visualOverlays.size()-1);
 }
-void EditorController::chooseVisualOverlay(){const auto path=QFileDialog::getOpenFileName(nullptr,"Add connected video or image",{},"Visual media (*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.png *.jpg *.jpeg *.webp *.bmp);;All files (*)");if(!path.isEmpty())addVisualOverlay(path);}
+void EditorController::startVisualImport(const QStringList &paths,int frame,int lane){
+    if(paths.isEmpty())return;
+    cancelPendingVisual();if(audioPreview_)endAudioGesture(false);if(textDragBefore_)endTextDrag(false);
+    cancelImport();const quint64 generation=importRevision_.load(),revision=projectRevision_;const Project snapshot=project_;
+    ++importJobs_;importClock_.start();importing_=true;emit stateChanged();
+    importPool_.start(QRunnable::create([this,paths,frame,lane,snapshot,generation,revision]{
+        auto next=std::make_shared<Project>(snapshot);QString error;QHash<QString,QString> identities;
+        for(const auto &input:paths){
+            if(generation!=importRevision_.load())return;
+            const auto path=QFileInfo(input).absoluteFilePath();identities[path]=SourceTiming::fingerprint(path);int first=0,last=-1;
+            for(const auto &asset:snapshot.assets)if(asset.path==path){first=asset.inFrame;last=asset.outFrame;break;}
+            VisualOverlay overlay;
+            if(!prepareVisualOverlay(snapshot,path,frame,lane,first,last,overlay,error)){
+                if(error.isEmpty())error="The overlay or marked source range is unavailable.";break;
+            }
+            next->visualOverlays.append(overlay);
+        }
+        QMetaObject::invokeMethod(this,[this,next,error,identities,generation,revision]{
+            if(generation!=importRevision_.load())return;
+            importing_=false;importMs_=importClock_.elapsed();emit stateChanged();if(revision!=projectRevision_)return;
+            if(!error.isEmpty()){report(error);return;}
+            for(auto it=identities.cbegin();it!=identities.cend();++it)if(SourceTiming::fingerprint(it.key())!=it.value()){report("Media changed while it was being checked. Add the overlays again.");return;}
+            showProject();commit(*next,{},-1,"Add connected overlays",false,-1,next->visualOverlays.size()-1);
+        },Qt::QueuedConnection);
+    }));
+}
+void EditorController::dropVisualMediaAsync(const QVariantList &urls,int frame,int lane){
+    QStringList paths;
+    for(const auto &value:urls){const auto url=value.toUrl();if(!url.isLocalFile()){report("Drop local video or image files into an overlay lane.");return;}paths.append(url.toLocalFile());}
+    startVisualImport(paths,frame,lane);
+}
+void EditorController::chooseVisualOverlay(){const auto path=QFileDialog::getOpenFileName(nullptr,"Add connected video or image",{},"Visual media (*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.png *.jpg *.jpeg *.webp *.bmp);;All files (*)");if(!path.isEmpty())startVisualImport({path},position_,0);}
 void EditorController::selectVisualOverlay(int index){showProject();if(index<0||index>=project_.visualOverlays.size())return;if(visualBefore_)endVisualGesture(true);if(textDragBefore_)endTextDrag(false);selectedOverlay_=index;selectedText_=-1;selectedCaption_=-1;captionSelection_.clear();selection_.clear();primary_=-1;emit selectionChanged();emit stateChanged();const int start=project_.overlayStartFrame(index);if(position_<start||position_>=start+project_.overlayFrames(index))seek(start);}
 void EditorController::removeVisualOverlay(){cancelPendingVisual();if(selectedOverlay_<0||selectedOverlay_>=project_.visualOverlays.size())return;auto next=project_;next.visualOverlays.removeAt(selectedOverlay_);commit(next,{},-1,"Remove overlay",false,-1,-1);}
 void EditorController::detachVisualOverlay(){cancelPendingVisual();auto next=project_;if(next.detachOverlay(selectedOverlay_))commit(next,selection_,primary_,"Detach overlay to project time");}

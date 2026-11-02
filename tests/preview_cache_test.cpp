@@ -60,9 +60,24 @@ int frameId(Mlt::Tractor &timeline, int position) {
 class PreviewCacheTest : public QObject {
     Q_OBJECT
 private slots:
+    void storageQuotaPreservesActiveAndUnrelatedFiles();
+    void quotaEvictsLeastRecentlyUsedOwnedCopies();
+    void copiedCacheOnlyPrunesOwnedArtifacts();
+    void concurrentInstancesShareOneEncoding();
+    void quotaProtectsInflightCopies();
+    void copyLeaseProtectsDetachedDecoder();
+    void invalidCopyWaitsForDecoderLease_data();
+    void invalidCopyWaitsForDecoderLease();
+    void missingInvalidCopyRegenerates();
+    void sharedCacheProtectsOtherInstances();
+    void sharedCacheProtectsOtherProcesses();
+    void cacheLeaseChild();
+    void persistentTimingChecksAreReused();
+    void cacheDirectoryAndQualityChangesRetireOldWork();
     void generatesExactFramesAndReusesCache();
     void preservesCameraOrientation();
     void retainsAudioAndPadsFinalFrame();
+    void unwritableCacheFailsOnce();
     void missingSourceFailsOnce();
     void sourceChangeInvalidatesReadyCopy();
     void deletedCacheRegeneratesAndNotifies();
@@ -90,6 +105,339 @@ private slots:
     void retiredRequestsCannotDeliverQueuedReady_data();
     void retiredRequestsCannotDeliverQueuedReady();
 };
+
+void PreviewCacheTest::storageQuotaPreservesActiveAndUnrelatedFiles() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    QFile unrelated(directory.filePath("family-video.mov"));
+    QVERIFY(unrelated.open(QIODevice::WriteOnly));
+    QCOMPARE(unrelated.write("original footage"), qint64(16));
+    unrelated.close();
+    QString output;
+    {
+        PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
+        QVERIFY(cache.setProperty("storageLimit", qint64(1)));
+        cache.request(source, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+        output = cache.readyPath(source);
+        QVERIFY(QFile::exists(output)); // The active working set may exceed the quota.
+        cache.retainSources({});
+        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(output), 1000);
+    }
+    QVERIFY(QFile::exists(unrelated.fileName()));
+}
+
+void PreviewCacheTest::quotaEvictsLeastRecentlyUsedOwnedCopies() {
+    QTemporaryDir directory;
+    const auto fixture = QFINDTESTDATA("fixtures/rotation.mp4");
+    const auto secondSource = directory.filePath("second.mp4");
+    QVERIFY(QFile::copy(fixture, secondSource));
+    QString older, newer;
+    {
+        PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
+        cache.request(fixture, 60);
+        cache.request(secondSource, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(fixture).isEmpty() && !cache.readyPath(secondSource).isEmpty(), 5000);
+        older = cache.readyPath(fixture); newer = cache.readyPath(secondSource);
+    }
+    QFile oldRecord(older + ".isaac-cache.json");
+    QVERIFY(oldRecord.open(QIODevice::ReadOnly));
+    QVERIFY(oldRecord.setFileTime(QDateTime::currentDateTimeUtc().addDays(-1), QFileDevice::FileModificationTime));
+    oldRecord.close();
+    PreviewCache cache(directory.filePath("cache"), nullptr, Performance::Budget{});
+    cache.setStorageLimit(QFileInfo(newer).size() + QFileInfo(newer + ".isaac-cache.json").size());
+    QVERIFY(!QFile::exists(older));
+    QVERIFY(QFile::exists(newer));
+}
+
+void PreviewCacheTest::copiedCacheOnlyPrunesOwnedArtifacts() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    const auto originalDirectory = directory.filePath("original");
+    QString artifact;
+    {
+        PreviewCache cache(originalDirectory, nullptr, Performance::Budget{});
+        cache.request(source, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+        artifact = QFileInfo(cache.readyPath(source)).fileName();
+    }
+    const auto copied = directory.filePath("copied");
+    QVERIFY(QDir().mkpath(copied));
+    for (const auto &file : QDir(originalDirectory).entryList(QDir::Files))
+        QVERIFY(QFile::copy(QDir(originalDirectory).filePath(file), QDir(copied).filePath(file)));
+    const auto unrelated = QDir(copied).filePath(QString(64, 'a') + ".mov");
+    QFile file(unrelated);
+    QVERIFY(file.open(QIODevice::WriteOnly)); QVERIFY(file.write("user media") > 0); file.close();
+    const auto forged = unrelated + ".isaac-cache.json";
+    file.setFileName(forged);
+    QVERIFY(file.open(QIODevice::WriteOnly)); QVERIFY(file.write("{\"owner\":\"someone else\"}") > 0); file.close();
+    PreviewCache cache(copied, nullptr, Performance::Budget{});
+    cache.setStorageLimit(0);
+    QVERIFY(!QFile::exists(QDir(copied).filePath(artifact)));
+    QVERIFY(QFile::exists(unrelated));
+    QVERIFY(QFile::exists(forged));
+    QVERIFY(QFile::exists(QDir(originalDirectory).filePath(artifact)));
+}
+
+void PreviewCacheTest::concurrentInstancesShareOneEncoding() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    PreviewCache first(directory.path(), nullptr, Performance::Budget{}), second(directory.path(), nullptr, Performance::Budget{});
+    QSignalSpy firstReady(&first, &PreviewCache::ready), secondReady(&second, &PreviewCache::ready);
+    QSignalSpy firstStarted(first.findChild<QProcess *>(), &QProcess::started), secondStarted(second.findChild<QProcess *>(), &QProcess::started);
+    first.request(source, 60); second.request(source, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(firstReady.count(), 1, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(secondReady.count(), 1, 5000);
+    QVERIFY(firstStarted.count() >= 1 && firstStarted.count() <= 2); // A failed hardware attempt may retry in software.
+    QCOMPARE(secondStarted.count(), 0);
+    QCOMPARE(first.readyPath(source), second.readyPath(source));
+}
+
+void PreviewCacheTest::quotaProtectsInflightCopies() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf partial > \"$output\"\nexec /bin/sleep 30\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previous = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previous); });
+    qputenv("PATH", directory.path().toUtf8());
+    const auto cacheDirectory = directory.filePath("cache");
+    PreviewCache first(cacheDirectory, nullptr, Performance::Budget{});
+    first.request(QFINDTESTDATA("fixtures/rotation.mp4"), 60);
+    QString partial;
+    const auto hasPartial = [&] {
+        const auto files = QDir(cacheDirectory).entryList({"*.part.mov"}, QDir::Files);
+        if (files.isEmpty()) return false;
+        partial = QDir(cacheDirectory).filePath(files.first());
+        return QFileInfo(partial).size() > 0;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(hasPartial(), 1000);
+    PreviewCache prune(cacheDirectory, nullptr, Performance::Budget{});
+    prune.setStorageLimit(0);
+    QVERIFY(QFile::exists(partial));
+    first.retainSources({});
+    QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(partial), 1000);
+#endif
+}
+
+void PreviewCacheTest::copyLeaseProtectsDetachedDecoder() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    PreviewCache::Copy copy;
+    {
+        PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
+        cache.request(source, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+        copy = cache.readyCopy(source, 0, 60);
+        QVERIFY(copy.lease);
+        cache.discard(source);
+        QVERIFY(QFile::exists(copy.path));
+    }
+    PreviewCache prune(directory.path(), nullptr, Performance::Budget{});
+    prune.setStorageLimit(0);
+    QVERIFY(QFile::exists(copy.path));
+    copy.lease.reset();
+    prune.pruneStorage();
+    QVERIFY(!QFile::exists(copy.path));
+}
+
+void PreviewCacheTest::invalidCopyWaitsForDecoderLease_data() {
+    QTest::addColumn<QString>("refresh");
+    QTest::newRow("directory-round-trip") << QString("directory");
+    QTest::newRow("quality-round-trip") << QString("quality");
+    QTest::newRow("other-instance-refresh") << QString("other-instance");
+}
+
+void PreviewCacheTest::invalidCopyWaitsForDecoderLease() {
+    QFETCH(QString, refresh);
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    const auto cacheDirectory = directory.filePath("cache");
+    PreviewCache first(cacheDirectory, nullptr, Performance::Budget{});
+    first.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!first.readyPath(source).isEmpty(), 5000);
+    std::unique_ptr<PreviewCache> second;
+    PreviewCache *consumer = &first;
+    if (refresh == "other-instance") {
+        second = std::make_unique<PreviewCache>(cacheDirectory, nullptr, Performance::Budget{});
+        second->request(source, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!second->readyPath(source).isEmpty(), 1000);
+        consumer = second.get();
+    }
+    auto copy = consumer->readyCopy(source, 0, 60);
+    QVERIFY(copy.lease);
+    first.discard(source);
+    QVERIFY(QFile::exists(copy.path));
+    consumer->setPaused(true);
+    if (refresh == "directory") {
+        QVERIFY(consumer->setCacheDirectory(directory.filePath("other")));
+        QVERIFY(consumer->setCacheDirectory(cacheDirectory));
+    } else if (refresh == "quality") {
+        const auto quality = consumer->qualityLimit();
+        consumer->setQualityLimit({128, 72});
+        consumer->setQualityLimit(quality);
+    } else consumer->setRequests({{source, 60, 0, 60}});
+    QSignalSpy started(consumer->findChild<QProcess *>(), &QProcess::started);
+    consumer->setPaused(false);
+    QTest::qWait(250); // Exercise multiple shared-cache retry attempts while the decoder still holds its pin.
+    QCOMPARE(started.count(), 0);
+    QVERIFY(consumer->readyCopy(source, 0, 60).path.isEmpty());
+    QVERIFY(QFile::exists(copy.path));
+    QFile record(copy.path + ".isaac-cache.json");
+    QVERIFY(record.open(QIODevice::ReadOnly));
+    QVERIFY(QJsonDocument::fromJson(record.readAll()).object().value("invalid").toBool());
+    record.close();
+    copy.lease.reset();
+    QTRY_VERIFY_WITH_TIMEOUT(!consumer->readyCopy(source, 0, 60).path.isEmpty(), 5000);
+    QCOMPARE(consumer->readyCopy(source, 0, 60).path, copy.path);
+    QVERIFY(started.count() > 0);
+}
+
+void PreviewCacheTest::missingInvalidCopyRegenerates() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    QString output;
+    {
+        PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
+        cache.request(source, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+        auto copy = cache.readyCopy(source, 0, 60);
+        output = copy.path;
+        cache.discard(source);
+        QVERIFY(QFile::exists(output + ".isaac-cache.json"));
+        QVERIFY(QFile::remove(output)); // Simulate losing the media after recording its invalidation.
+        copy.lease.reset();
+    }
+    PreviewCache cache(directory.path(), nullptr, Performance::Budget{});
+    QSignalSpy failed(&cache, &PreviewCache::failed);
+    cache.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+    QCOMPARE(cache.readyPath(source), output);
+    QCOMPARE(failed.count(), 0);
+    QVERIFY(!cache.isBusy());
+}
+
+void PreviewCacheTest::sharedCacheProtectsOtherInstances() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    PreviewCache first(directory.path(), nullptr, Performance::Budget{});
+    first.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!first.readyPath(source).isEmpty(), 5000);
+    const auto output = first.readyPath(source);
+    PreviewCache second(directory.path(), nullptr, Performance::Budget{});
+    QVERIFY(second.setProperty("storageLimit", qint64(1)));
+    QVERIFY(QFile::exists(output));
+    first.retainSources({});
+    QVERIFY(second.setProperty("storageLimit", qint64(1)));
+    QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(output), 1000);
+}
+
+void PreviewCacheTest::cacheLeaseChild() {
+    const auto source = qEnvironmentVariable("ISAAC_TEST_LEASE_SOURCE");
+    if (source.isEmpty()) QSKIP("Only used by the cross-process lease regression.");
+    PreviewCache cache(qEnvironmentVariable("ISAAC_TEST_LEASE_DIRECTORY"), nullptr, Performance::Budget{});
+    cache.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+    fprintf(stdout, "LEASE_READY\n");
+    fflush(stdout);
+    QTest::qWait(30000);
+}
+
+void PreviewCacheTest::sharedCacheProtectsOtherProcesses() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    QString output;
+    {
+        PreviewCache prepare(directory.path(), nullptr, Performance::Budget{});
+        prepare.request(source, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(!prepare.readyPath(source).isEmpty(), 5000);
+        output = prepare.readyPath(source);
+    }
+    QProcess process;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("ISAAC_TEST_LEASE_SOURCE", source);
+    environment.insert("ISAAC_TEST_LEASE_DIRECTORY", directory.path());
+    process.setProcessEnvironment(environment);
+    process.start(QCoreApplication::applicationFilePath(), {"cacheLeaseChild"});
+    QByteArray messages;
+    const auto childReady = [&] { messages += process.readAllStandardOutput(); return messages.contains("LEASE_READY"); };
+    QTRY_VERIFY_WITH_TIMEOUT(childReady(), 6000);
+    const auto cleanup = qScopeGuard([&] { process.kill(); process.waitForFinished(1000); });
+    PreviewCache prune(directory.path(), nullptr, Performance::Budget{});
+    QVERIFY(prune.setProperty("storageLimit", qint64(1)));
+    QVERIFY(QFile::exists(output));
+    process.kill();
+    QVERIFY(process.waitForFinished(1000));
+    QVERIFY(prune.setProperty("storageLimit", qint64(1)));
+    QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(output), 1000);
+}
+
+void PreviewCacheTest::persistentTimingChecksAreReused() {
+#ifdef Q_OS_WIN
+    QSKIP("The counting-process fixture uses a POSIX shell.");
+#else
+    QTemporaryDir directory;
+    const auto source = directory.filePath("long.mp4");
+    run("ffmpeg", {"-v", "error", "-y", "-stream_loop", "63", "-i", QFINDTESTDATA("fixtures/proxy-timing-30.mp4"), "-c", "copy", source});
+    const int frames = qRound(Media::mediaDurationSeconds(source) * 60);
+    QVERIFY(frames > 1200);
+    const auto probe = executable("ffprobe");
+    const auto log = directory.filePath("probes");
+    QFile script(directory.filePath("ffprobe"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\necho probe >> \"" + log.toUtf8() + "\"\nexec \"" + probe.toUtf8() + "\" \"$@\"\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previous = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previous); });
+    qputenv("PATH", directory.path().toUtf8());
+    for (int range : {300, 900}) {
+        Performance::Budget budget;
+        budget.previewWidth = range == 300 ? 160 : 128;
+        PreviewCache cache(directory.filePath("cache"), nullptr, budget);
+        cache.setRequests({{source, frames, range, range + 60}});
+        QTRY_VERIFY_WITH_TIMEOUT(!cache.readyCopy(source, range, range + 60).path.isEmpty(), 10000);
+        QVERIFY(cache.readyCopy(source, range, range + 60).startFrame > 0);
+    }
+    QFile attempts(log);
+    QVERIFY(attempts.open(QIODevice::ReadOnly));
+    QCOMPARE(attempts.readAll().count("probe"), 1);
+#endif
+}
+
+void PreviewCacheTest::cacheDirectoryAndQualityChangesRetireOldWork() {
+    QTemporaryDir directory;
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    PreviewCache cache(directory.filePath("first"), nullptr, Performance::Budget{});
+    cache.request(source, 60);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+    const auto output = cache.readyPath(source);
+    cache.setProperty("storageLimit", qint64(1));
+    QVERIFY(QFile::exists(output));
+    cache.setQualityLimit({128, 72});
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+    const auto smaller = cache.readyPath(source);
+    QVERIFY(smaller != output);
+    QCOMPARE(streams(smaller).first().toObject().value("width").toInt(), 128);
+    QString error;
+    const auto second = directory.filePath("second");
+    QVERIFY2(cache.setCacheDirectory(second, &error), qPrintable(error));
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.readyPath(source).isEmpty(), 5000);
+    QVERIFY(cache.readyPath(source).startsWith(second + '/'));
+    QCOMPARE(streams(cache.readyPath(source)).first().toObject().value("width").toInt(), 128);
+    const auto invalid = directory.filePath("file");
+    QFile file(invalid);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    QVERIFY(!cache.setCacheDirectory(invalid, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(cache.cacheDirectory(), second);
+}
 
 void PreviewCacheTest::generatesExactFramesAndReusesCache() {
     QTemporaryDir directory;
@@ -166,6 +514,24 @@ void PreviewCacheTest::retainsAudioAndPadsFinalFrame() {
     QCOMPARE(audio.value("sample_rate").toString(), "48000");
     QCOMPARE(audio.value("channels").toInt(), 2);
     QVERIFY(qAbs(audio.value("duration").toString().toDouble() - 121.0 / 60) < 0.0001);
+}
+
+void PreviewCacheTest::unwritableCacheFailsOnce() {
+    QTemporaryDir directory;
+    const auto path = directory.filePath("not-a-folder");
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+    PreviewCache cache(path, nullptr, Performance::Budget{});
+    QSignalSpy failed(&cache, &PreviewCache::failed);
+    const auto source = QFINDTESTDATA("fixtures/rotation.mp4");
+    cache.request(source, 60);
+    QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 1, 1000);
+    QVERIFY(!cache.isBusy());
+    QVERIFY(failed.first().at(1).toString().contains("folder"));
+    cache.request(source, 60);
+    QTest::qWait(150);
+    QCOMPARE(failed.count(), 1);
+    QVERIFY(!cache.isBusy());
 }
 
 void PreviewCacheTest::missingSourceFailsOnce() {
@@ -323,6 +689,9 @@ void PreviewCacheTest::discardedCorruptCopyNeverReused() {
     QSignalSpy reused(&fresh, &PreviewCache::ready);
     fresh.request(source, 60);
     fresh.discard(source);
+    QVERIFY(QFile::exists(output)); // Another instance still retains its working copy.
+    cache.retainSources({});
+    fresh.discard(source);
     QVERIFY(!QFile::exists(output));
     QVERIFY(fresh.readyPath(source).isEmpty());
     // A failed deletion or an external replacement must not revive a discarded key.
@@ -335,7 +704,7 @@ void PreviewCacheTest::discardedCorruptCopyNeverReused() {
     QVERIFY(fresh.readyPath(source).isEmpty());
     QCOMPARE(reused.count(), 0);
     fresh.discard(source);
-    QVERIFY(!QFile::exists(output));
+    QVERIFY(QFile::exists(output)); // An external replacement without our ownership record is never deleted.
     fresh.discard(source + ".unknown");
     QVERIFY(original.open(QIODevice::ReadOnly));
     QCOMPARE(original.readAll(), originalBytes);

@@ -8,6 +8,8 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
+#include <QSize>
 
 #include <mlt++/Mlt.h>
 
@@ -19,6 +21,8 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <deque>
+#include <chrono>
 
 // Plays an MLT timeline with sound and sends video frames to the Qt interface.
 // The caller owns the producer and must keep it alive until setProducer(nullptr)
@@ -31,9 +35,9 @@ public:
     explicit Preview(Mlt::Profile &profile, QObject *parent = nullptr, const Performance::Budget &budget = Performance::budget());
     ~Preview() override;
 
-    bool setProducer(Mlt::Producer *producer);
+    bool setProducer(Mlt::Producer *producer, bool renderInitialStill = true);
     void play();
-    void pause();
+    void pause(bool renderPausedStill = true);
     void seek(int frame);
     // Still decoding runs on a worker. Hover seeks leave position() unchanged.
     // Edits run before decoding; synchronous transport changes finish any pending edit.
@@ -41,6 +45,8 @@ public:
     void cancelPendingSeek();
     // Call before changing filters outside requestSeek's edit callback.
     void invalidateFrames();
+    void setQualityLimit(const QSize &size);
+    QVariantMap diagnostics() const;
 
     bool isPlaying() const { return playing_; }
     bool isSeeking() const { return seeking_; }
@@ -69,6 +75,8 @@ private:
     void cacheFrame(int frame, const QImage &image, std::uint64_t revision);
     void refreshCacheBudget();
     std::uint64_t refreshSourceIdentity(std::uint64_t revision);
+    struct SeekRequest;
+    void queuePrefetch(const SeekRequest &request);
 
     struct SeekRequest {
         int frame;
@@ -76,15 +84,19 @@ private:
         bool committed;
         std::uint64_t generation;
         std::uint64_t frameRevision;
+        bool prefetch=false;
+        int direction=1;
+        std::chrono::steady_clock::time_point queuedAt=std::chrono::steady_clock::now();
     };
 
     Performance::Budget budget_;
-    std::mutex frameCacheMutex_;
+    mutable std::mutex frameCacheMutex_;
     QCache<int,QImage> frameCache_;
     std::uint64_t frameRevision_ = 0;
     QElapsedTimer memoryCheck_;
     QStringList sourcePaths_;
     QByteArray sourceIdentity_;
+    Mlt::Profile outputProfile_;
     std::unique_ptr<Mlt::Consumer> consumer_;
     std::unique_ptr<Mlt::Event> frameEvent_;
     std::unique_ptr<Mlt::Event> stoppedEvent_;
@@ -102,6 +114,11 @@ private:
     std::mutex seekMutex_;
     std::condition_variable seekWake_;
     std::optional<SeekRequest> pendingSeek_;
+    std::deque<SeekRequest> prefetch_;
+    int lastRequestedFrame_=-1, seekDirection_=1;
+    std::atomic<quint64> cacheHits_{0},cacheMisses_{0},preloadedFrames_{0};
+    std::atomic<quint64> deliveredFrames_{0},skippedFrames_{0},receivedFrames_{0},seekCount_{0},decodeMicros_{0};
+    std::atomic<qint64> lastSeekMicros_{0};
     std::function<void()> pendingEdit_; // Guarded by seekMutex_; retained across superseded seeks.
     bool seekBusy_ = false; // Guarded by seekMutex_.
     bool stopSeekWorker_ = false;

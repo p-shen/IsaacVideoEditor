@@ -29,7 +29,7 @@ UI.Pane {
                     required property var modelData
                     Layout.fillWidth: true
                     Label { text: "Recover " + modelData.name + " · " + new Date(modelData.time).toLocaleString(); wrapMode: Text.Wrap; Layout.fillWidth: true }
-                    UI.Button { text: "Recover"; onClicked: root.controller.recoverSnapshot(modelData.path) }
+                    UI.Button { text: "Recover"; onClicked: root.controller.recoverSnapshotAsync(modelData.path) }
                     UI.Button { text: "Discard"; onClicked: root.controller.discardRecovery(modelData.path) }
                 }
             }
@@ -53,7 +53,7 @@ UI.Pane {
                     RowLayout {
                         Layout.fillWidth: true
                         UI.ComboBox { id: candidate; model: modelData.candidates; Layout.fillWidth: true; Accessible.name: "Replacement path" }
-                        UI.Button { text: "Relink"; onClicked: root.controller.relinkMedia(modelData.missing,candidate.currentText) }
+                        UI.Button { text: "Relink"; onClicked: root.controller.relinkMediaAsync(modelData.missing,candidate.currentText) }
                     }
                 }
             }

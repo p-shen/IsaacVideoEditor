@@ -151,20 +151,38 @@ bool Project::setTransition(int index,const QString &type,int frames) {
     return true;
 }
 
+Project::TimelineData Project::timelineData() const {
+    TimelineData data;const int count=clips.size();
+    data.starts.resize(count);data.frames.resize(count);data.transitions.fill(0,count);
+    bool local=false;
+    for(int i=0;i<count;++i){data.frames[i]=clipFrames(clips[i]);local|=clips[i].transitionFrames>=0;++data.sourceUses[clips[i].path];}
+    if(local){
+        QVector<int> bounded(count);
+        for(int i=1;i<count;++i)if(!clips[i].hardCutBefore&&clips[i].transitionType!="cut")
+            bounded[i]=std::max(0,std::min({clips[i].transitionFrames>=0?clips[i].transitionFrames:crossfadeFrames,data.frames[i-1]-1,data.frames[i]-1}));
+        for(int i=1;i<count;++i){
+            const int desired=bounded[i];int result=desired;
+            for(int neighbor:{i-1,i+1}){
+                const int available=data.frames[neighbor<i?i-1:i]-1;
+                const int combined=desired+(neighbor<count?bounded[neighbor]:0);
+                if(combined>available&&combined>0)result=std::min(result,int(qint64(desired)*available/combined));
+            }
+            data.transitions[i]=result;
+        }
+    }else{
+        const int overlap=effectiveCrossfadeFrames();
+        for(int i=1;i<count;++i)if(!clips[i].hardCutBefore&&clips[i].transitionType!="cut")data.transitions[i]=overlap;
+    }
+    for(int i=0;i<count;++i){data.duration-=data.transitions[i];data.starts[i]=data.duration;data.duration+=data.frames[i];}
+    for(const auto &overlay:visualOverlays)++data.sourceUses[overlay.path];
+    if(!voicePath.isEmpty())++data.sourceUses[voicePath];
+    if(!musicPath.isEmpty())++data.sourceUses[musicPath];
+    return data;
+}
 int Project::clipStartFrame(int index) const {
-    if (index < 0 || index >= clips.size()) return -1;
-    int start = 0;
-    for (int i = 0; i < index; ++i)
-        start += clipFrames(clips[i]) - transitionFramesBefore(i+1);
-    return start;
+    return index<0||index>=clips.size()?-1:timelineData().starts[index];
 }
-
-int Project::durationFrames() const {
-    int total = 0;
-    for (const auto &clip : clips) total += clipFrames(clip);
-    for (int i = 1; i < clips.size(); ++i) total -= transitionFramesBefore(i);
-    return total;
-}
+int Project::durationFrames() const { return timelineData().duration; }
 
 bool Project::splitClip(int index, int offsetFrames) {
     if (index < 0 || index >= clips.size() || !validate().isEmpty()) return false;

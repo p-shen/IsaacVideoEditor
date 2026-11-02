@@ -1,5 +1,6 @@
 #include "export_job.h"
 #include "mlt_engine.h"
+#include "encoding.h"
 #include <QGuiApplication>
 #include <QFontDatabase>
 #include <QTimer>
@@ -90,7 +91,9 @@ private slots:
         const auto previous=qgetenv("PATH"),previousMarker=qgetenv("ISAAC_TEST_FFMPEG_MARKER");qputenv("PATH",QFile::encodeName(tools)+':'+previous);qputenv("ISAAC_TEST_FFMPEG_MARKER",QFile::encodeName(dir.filePath("external-probe")));const auto restore=qScopeGuard([&]{qputenv("PATH",previous);qputenv("ISAAC_TEST_FFMPEG_MARKER",previousMarker);});
         ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;const auto output=dir.filePath("runtime.mp4");QVERIFY(job.start(sample(),output,&error));
         QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));
-        QVERIFY2(!QFileInfo::exists(dir.filePath("external-probe")),"Hardware availability must be established by the actual MLT consumer, not a separate FFmpeg executable");
+        if(Media::hardwareH264Encoder()!=QLatin1String("h264_nvenc"))
+            QVERIFY2(!QFileInfo::exists(dir.filePath("external-probe")),"The MLT encoder must use its own runtime probe");
+        else QVERIFY(contents(job.logPath()).contains("GPU processing fallback:"));
         QVERIFY(contents(job.logPath()).contains("Hardware probe: h264_"));
 #endif
     }

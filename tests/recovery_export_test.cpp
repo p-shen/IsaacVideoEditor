@@ -18,6 +18,23 @@ class RecoveryExportTest : public QObject {
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
     Project sample() const { Project p; p.clips.append({fixture(),0,2}); return p; }
 private slots:
+    void previewTextureSurvivesResizeWithoutUploadingAgain() {
+        EditorController editor;QVERIFY(editor.importFiles({fixture()}));QTRY_VERIFY_WITH_TIMEOUT(!editor.frame().isNull(),10000);
+        QQuickWindow window;window.resize(600,400);auto *viewer=new VideoPreview(window.contentItem());viewer->setSize({600,400});viewer->setController(&editor);
+        window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));QTRY_VERIFY_WITH_TIMEOUT(viewer->textureUploads()>0,3000);
+        const auto before=viewer->textureUploads();const auto center=window.grabWindow().pixelColor(300,200);QVERIFY(center.red()>200);
+        viewer->setSize({500,350});window.update();QTest::qWait(80);QCOMPARE(viewer->textureUploads(),before);
+        editor.selectClip(0);QTest::qWait(80);QCOMPARE(viewer->textureUploads(),before);
+    }
+    void performanceSettingsAreAccessibleAndKeepExportNative() {
+        EditorController editor;QQmlApplicationEngine engine;setEditorQmlContext(engine,editor);QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QDir::current().filePath("qml/Main.qml")));QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects().first());QVERIFY(window);QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *dialog=window->findChild<QObject*>("performanceDialog");QVERIFY(dialog);QVERIFY(QMetaObject::invokeMethod(dialog,"open"));
+        QTRY_VERIFY(dialog->property("visible").toBool());QVERIFY(window->findChild<QObject*>("previewQualityChoice"));
+        QVERIFY(window->findChild<QObject*>("previewStorageFolder"));QVERIFY(window->findChild<QObject*>("previewStorageBudget"));
+        QTest::keyClick(window,Qt::Key_Escape);QTRY_VERIFY(!dialog->property("visible").toBool());QCOMPARE(warnings.count(),0);
+    }
     void iphoneExportChoiceIsOptInAndShowsResolution() {
         EditorController editor;QVERIFY(editor.importFiles({fixture()}));editor.setCanvas(2880,3840);
         QQmlApplicationEngine engine;setEditorQmlContext(engine,editor);QSignalSpy warnings(&engine,&QQmlEngine::warnings);
@@ -123,7 +140,7 @@ private slots:
         QTemporaryDir dir;auto p=sample();p.clips[0].path=dir.filePath("gone.mp4");
         p.textOverlays.append(TextOverlay{});QString error;auto file=dir.filePath("offline.isaac.json");QVERIFY(saveProject(p,file,&error));
         EditorController editor;QVERIFY(editor.loadFrom(file));QCOMPARE(editor.duration(),120);QCOMPARE(editor.missingMedia().size(),1);
-        QVERIFY(!editor.frame().isNull());
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.frame().isNull(),5000);
         QVERIFY(editor.relinkMedia(p.clips[0].path,fixture()));QVERIFY(editor.missingMedia().isEmpty());QCOMPARE(editor.project().textOverlays.size(),1);
         editor.undo();QCOMPARE(editor.project().clips[0].path,p.clips[0].path);QCOMPARE(editor.duration(),120);
         editor.redo();QCOMPARE(editor.project().clips[0].path,fixture());
@@ -177,6 +194,7 @@ private slots:
     }
     void viewerTextCanStillMoveDuringExport() {
         QTemporaryDir dir;EditorController editor;QStringList clips;for(int i=0;i<20;++i)clips.append(fixture());QVERIFY(editor.importFiles(clips));editor.addText();
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.loading()&&!editor.frame().isNull(),10000);
         QQuickWindow window;window.resize(800,450);auto *viewer=new VideoPreview(window.contentItem());viewer->setSize({800,450});viewer->setController(&editor);window.show();QVERIFY(QTest::qWaitForWindowExposed(&window));
         const auto center=viewer->textRect(0).center().toPoint();QVERIFY(editor.exportTo(dir.filePath("frozen.mp4")));QVERIFY(editor.exporting());
         QTest::mousePress(&window,Qt::LeftButton,Qt::NoModifier,center);QTest::mouseMove(&window,center+QPoint(60,0));QTest::mouseRelease(&window,Qt::LeftButton,Qt::NoModifier,center+QPoint(60,0));

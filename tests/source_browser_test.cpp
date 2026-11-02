@@ -91,7 +91,7 @@ private slots:
         QTemporaryDir dir;QFile file(dir.filePath("legacy.json"));QVERIFY(file.open(QIODevice::WriteOnly));
         file.write(QJsonDocument(QJsonObject{{"version",4},{"clips",QJsonArray{QJsonObject{{"path",fixture()},{"in",.5},{"out",1.0}}}}}).toJson());file.close();
         EditorController e;QVERIFY(e.loadFrom(file.fileName()));e.selectSource(0);
-        QCOMPARE(e.currentSource()["durationFrames"].toInt(),120);QCOMPARE(e.currentSource()["outFrame"].toInt(),120);QCOMPARE(e.duration(),30);QVERIFY(!e.dirty());
+        QTRY_COMPARE(e.currentSource()["durationFrames"].toInt(),120);QCOMPARE(e.currentSource()["outFrame"].toInt(),120);QCOMPARE(e.duration(),30);QVERIFY(!e.dirty());
     }
     void legacyAssetsAndFiltersRemoval() {
         QTemporaryDir dir; QFile file(dir.filePath("old.json")); QVERIFY(file.open(QIODevice::WriteOnly));

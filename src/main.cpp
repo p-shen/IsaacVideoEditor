@@ -5,6 +5,7 @@
 #include "theme.h"
 #include "runtime_paths.h"
 #include "preview.h"
+#include "performance_report.h"
 #include <QApplication>
 #include <QMessageBox>
 #include <QDebug>
@@ -126,6 +127,10 @@ int packageSmokeTest(const QString &fixture) {
 int main(int argc,char *argv[]) {
     const bool exportWorker=argc>1&&QByteArray(argv[1])=="--export-worker";
     if(exportWorker)qputenv("QT_QPA_PLATFORM","offscreen");
+    const bool performanceReport=argc>1&&QByteArray(argv[1])=="--performance-report";
+    const bool benchmarkExport=argc>1&&QByteArray(argv[1])=="--benchmark-export";
+    bool visibleBenchmark=false;for(int i=1;i<argc;++i)visibleBenchmark|=QByteArray(argv[i])=="--visible";
+    if((performanceReport||benchmarkExport)&&!visibleBenchmark){qputenv("QT_QPA_PLATFORM","offscreen");qputenv("QT_QUICK_BACKEND","software");}
     QString bundledQmlDirectory;
 #ifdef Q_OS_MACOS
     uint32_t executableLength=0;
@@ -153,6 +158,8 @@ int main(int argc,char *argv[]) {
     applyAppTheme(app);
     app.setWindowIcon(QIcon(":/isaac-logo.png"));
     Media::initializeMlt();
+    if(benchmarkExport){const auto args=app.arguments();const int result=runBenchmarkExport(args.value(2),args.value(3),args.contains("--software"),args.contains("--iphone"));Mlt::Factory::close();return result;}
+    if(performanceReport){const auto args=app.arguments();const int result=runPerformanceReport(args.value(2),args.value(3));Mlt::Factory::close();return result;}
     registerEditorQmlTypes();
     int result=1;
     {

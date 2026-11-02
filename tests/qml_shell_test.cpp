@@ -377,7 +377,7 @@ private slots:
         timer.stop(); deadline.stop();
         QVERIFY(sawDialog);
         QVERIFY2(filters.join(';').contains("*.json"),qPrintable("Preview opened the wrong file picker: "+filters.join(';')));
-        QCOMPARE(editor.project().clips.size(),1);
+        QTRY_COMPARE_WITH_TIMEOUT(editor.project().clips.size(),1,5000);
         QCOMPARE(editor.project().clips[0].inSeconds,0.25);
         QCOMPARE(editor.project().clips[0].outSeconds,0.75);
         QVERIFY(window->title().contains("saved-edit.json"));
@@ -732,6 +732,7 @@ private slots:
         auto *window=load(engine,editor); QVERIFY(window);
         const auto path=QDir::current().filePath("tests/fixtures/proxy-timing-30.mp4");
         QVERIFY(editor.importFiles({path,path}));
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.frame().isNull()&&!editor.loading(),5000);
         editor.seek(clip * 24);
         auto *timeline=window->findChild<QuickTimeline*>("timeline"); QVERIFY(timeline);
         QTRY_VERIFY(timeline->width()>500);
@@ -767,6 +768,7 @@ private slots:
     void trimComparisonLoadsBeforeRelease() {
         EditorController editor; QQmlApplicationEngine engine;
         auto *window=load(engine,editor); QVERIFY(window); QVERIFY(editor.importFiles({fixture(),fixture()}));
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.frame().isNull()&&!editor.loading(),5000);
         auto *timeline=window->findChild<QuickTimeline*>("timeline"); QVERIFY(timeline);
         QTRY_VERIFY(timeline->width()>500);
         auto *out=window->findChild<QQuickItem*>("trimOutgoingFrame"); QVERIFY(out);
@@ -801,7 +803,9 @@ private slots:
     void rulerEscapeRestoresPosition() {
         EditorController editor; QQmlApplicationEngine engine;
         auto *window=load(engine,editor); QVERIFY(window);
-        QVERIFY(editor.importFiles({fixture()})); editor.seek(30);
+        QVERIFY(editor.importFiles({fixture()}));
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.frame().isNull()&&!editor.loading(),5000);
+        editor.seek(30);
         auto *slider=window->findChild<QuickTimeline*>("timeline"); QVERIFY(slider);
         auto start=slider->mapToScene(QPointF(slider->width()*0.75,10)).toPoint();
         QTest::mousePress(window,Qt::LeftButton,Qt::NoModifier,start);
@@ -842,7 +846,7 @@ private slots:
         QCoreApplication::sendEvent(window,&enter);
         QDropEvent drop(QPointF(100,150),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);
         QCoreApplication::sendEvent(window,&drop);
-        QVERIFY(drop.isAccepted()); QCOMPARE(editor.clips().size(),0); QCOMPARE(editor.assets().size(),1);
+        QVERIFY(drop.isAccepted());QTRY_COMPARE_WITH_TIMEOUT(editor.assets().size(),1,5000);QCOMPARE(editor.clips().size(),0);
     }
     void sourceRangeFieldsEditSecondsAtFramePrecision() {
         EditorController editor;QQmlApplicationEngine engine;QSignalSpy warnings(&engine,&QQmlEngine::warnings);
@@ -890,7 +894,7 @@ private slots:
         QDragMoveEvent move(point,Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QCoreApplication::sendEvent(window,&move);
         QVERIFY(timeline->gestureText().contains("Result"));QCOMPARE(editor.duration(),18);
         QDropEvent drop(point,Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QCoreApplication::sendEvent(window,&drop);
-        QVERIFY(drop.isAccepted());QCOMPARE(editor.duration(),36);editor.undo();QCOMPARE(editor.duration(),18);
+        QVERIFY(drop.isAccepted());QTRY_COMPARE_WITH_TIMEOUT(editor.duration(),36,5000);editor.undo();QCOMPARE(editor.duration(),18);
         auto *search=window->findChild<QQuickItem*>("mediaSearch");QVERIFY(search);search->forceActiveFocus();
         QTest::keyClick(window,Qt::Key_I);QCOMPARE(editor.currentSource()["inFrame"].toInt(),12);
     }

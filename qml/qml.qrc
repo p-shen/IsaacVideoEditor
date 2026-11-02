@@ -2,6 +2,7 @@
   <qresource prefix="/qml">
     <file>qmldir</file>
     <file>Main.qml</file>
+    <file>PerformanceDialog.qml</file>
     <file>MediaBrowser.qml</file>
     <file>SourceControls.qml</file>
     <file>Inspector.qml</file>

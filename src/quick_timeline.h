@@ -144,12 +144,13 @@ protected:
 
 private:
     void paintContents(QPainter *);
-    void invalidateContents() { contentsDirty_=true; update(); }
+    void invalidateContents() { contentsDirty_=true; previewTimingDirty_=true; update(); }
     QImage contents_;
     bool contentsDirty_=true;
     enum class Gesture { None, Scrub, Body, TrimStart, TrimEnd, TextBody, TextStart, TextEnd, AudioMove, AudioGain, AudioFadeIn, AudioFadeOut, Transition };
     struct FilmTile { QRectF rect; QImage image; bool missing = false; };
     const Project &displayProject() const;
+    const Project::TimelineData &timingFor(const Project &) const;
     int rulerHeight() const;
     int videoHeight() const;
     int audioHeight() const;
@@ -196,6 +197,9 @@ private:
     QString hoveredAudioPath_;
     Project project_;
     Project preview_;
+    Project::TimelineData projectTiming_;
+    mutable Project::TimelineData previewTiming_,temporaryTiming_;
+    mutable bool previewTimingDirty_=true;
     QVector<double> sourceDurations_;
     double voiceDurationSeconds_ = 0, musicDurationSeconds_ = 0;
     QVariantList selection_;
@@ -208,7 +212,6 @@ private:
     bool dropActive_ = false;
     bool dropValid_ = false;
     int dropFrame_ = 0;
-    QHash<QString,int> dropDurations_;
     QFont font_;
     double pixelsPerSecond_ = 64;
     double waveformScale_ = 1;

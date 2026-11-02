@@ -14,6 +14,7 @@ pkg_check_modules(MLT REQUIRED IMPORTED_TARGET mlt++-7)
 add_library(isaac_core
     src/performance.cpp
     src/encoding.cpp
+    src/gpu_pipeline.cpp
     src/runtime_paths.cpp
     src/export_job.cpp
     src/project.cpp
@@ -29,8 +30,12 @@ add_library(isaac_core
 )
 target_include_directories(isaac_core PUBLIC src)
 target_link_libraries(isaac_core PUBLIC Qt6::Core Qt6::Gui PkgConfig::MLT)
+if(WIN32)
+    target_link_libraries(isaac_core PRIVATE psapi)
+endif()
 
 add_library(isaac_ui
+    src/performance_report.cpp
     src/recovery_store.cpp
     src/editor_jobs.cpp
     src/editor_controller.cpp
@@ -88,11 +93,23 @@ find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
 add_executable(performance_test tests/performance_test.cpp)
 target_link_libraries(performance_test PRIVATE isaac_core Qt6::Test)
 add_test(NAME performance_test COMMAND performance_test)
+add_executable(performance_report_test tests/performance_report_test.cpp)
+target_link_libraries(performance_report_test PRIVATE isaac_core Qt6::Test)
+add_dependencies(performance_report_test IsaacVideoEditor)
+add_test(NAME performance_report_test COMMAND performance_report_test)
+set_tests_properties(performance_report_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SDL_AUDIODRIVER=dummy")
 add_executable(encoding_test tests/encoding_test.cpp)
 target_link_libraries(encoding_test PRIVATE isaac_core Qt6::Test)
 add_test(NAME encoding_test COMMAND encoding_test)
+add_executable(gpu_pipeline_test tests/gpu_pipeline_test.cpp)
+target_link_libraries(gpu_pipeline_test PRIVATE isaac_core Qt6::Test)
+add_test(NAME gpu_pipeline_test COMMAND gpu_pipeline_test)
+set_tests_properties(gpu_pipeline_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SDL_AUDIODRIVER=dummy")
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME benchmark_performance_test COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/benchmark_performance_test.py" "$<TARGET_FILE:IsaacVideoEditor>")
+    set_tests_properties(benchmark_performance_test PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
     add_test(NAME update_installer_test COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/update_installer_test.py" "$<TARGET_FILE:IsaacVideoEditorUpdater>")
 endif()
@@ -170,7 +187,7 @@ target_link_libraries(inspector_ux_test PRIVATE isaac_ui Qt6::Test)
 add_test(NAME inspector_ux_test COMMAND inspector_ux_test)
 set_tests_properties(inspector_ux_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
 target_sources(recovery_export_test PRIVATE assets/assets.qrc)
-foreach(export_test recovery_export_test editor_controller_test caption_controller_test)
+foreach(export_test recovery_export_test editor_controller_test caption_controller_test qml_shell_test)
     add_dependencies(${export_test} IsaacVideoEditor)
 endforeach()
 add_executable(export_job_test tests/export_job_test.cpp assets/assets.qrc)
