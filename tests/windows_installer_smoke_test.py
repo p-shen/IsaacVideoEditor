@@ -97,7 +97,8 @@ def main(installer, archive):
         print(f'Updater paths: prepared={prepared}; Windows temp={temp_path.value}; Python temp={tempfile.gettempdir()}', flush=True)
         parent = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
         updater = subprocess.Popen([str(helper), '--install', str(parent.pid), str(prepared), str(app), executable.name],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env={**os.environ, 'TMP': temp_path.value, 'TEMP': temp_path.value})
         try:
             wait_for(lambda: (prepared / 'armed').exists() or updater.poll() is not None)
             require((prepared / 'armed').exists(), f'Updater did not arm (exit={updater.poll()}): ' +
@@ -117,19 +118,30 @@ def main(installer, archive):
                     f'Update changed installer metadata: {name}')
         require(project.read_text() == 'preserve this project', 'Update changed a user project')
         require((app / added_file).is_file(), 'Update did not install the new dependency')
+        outside = root / 'outside'
+        outside.mkdir()
+        external_media = outside / 'keep.mov'
+        external_media.write_text('preserve outside media')
+        junction = app / 'unsafe-junction'
+        run('cmd.exe', '/c', 'mklink', '/J', junction, outside)
+        with (app / 'isaac-package-files.txt').open('a', encoding='utf-8') as manifest:
+            manifest.write('../outside/keep.mov\n/absolute.mov\nC:/outside.mov\nunsafe-junction/keep.mov\n')
         uninstaller = next(app.glob('unins*.exe'))
         run(uninstaller, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
         wait_for(lambda: not executable.exists())
         require(not (app / added_file).exists(), 'Uninstall left a dependency introduced by an update')
         require(not (app / added_file).parent.exists(), 'Uninstall left an empty updated dependency directory')
         require(project.read_text() == 'preserve this project', 'Uninstall removed a user project')
+        require(external_media.read_text() == 'preserve outside media', 'Uninstall followed an unsafe manifest path')
         require(not any(shortcut.exists() for shortcut in shortcuts), 'Uninstall left application shortcuts')
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_name):
                 raise RuntimeError('Uninstall left its Windows Settings registration')
         except FileNotFoundError:
             pass
+        wait_for(lambda: {file.name for file in app.iterdir()} == {project.name, junction.name})
         project.unlink()
+        junction.rmdir()
         app.rmdir()
         print('Installer, shortcuts, reinstall, application smoke, in-app update and uninstall checks passed.')
 

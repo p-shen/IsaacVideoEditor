@@ -221,6 +221,11 @@ void validatePreparedDirectory(const fs::path &prepared) {
     require(fs::is_directory(prepared), "Prepared update is not a directory.");
     const auto temp = fs::canonical(fs::temp_directory_path());
     bool temporary = within(prepared, temp) && prepared != temp;
+#ifdef _WIN32
+    // GetTempPath can use an 8.3 username while Qt supplies its long spelling.
+    for (auto parent = prepared.parent_path(); !temporary && parent != parent.parent_path(); parent = parent.parent_path())
+        temporary = fs::equivalent(parent, temp);
+#endif
 #ifdef __APPLE__
     temporary = temporary || (within(prepared, "/private/tmp") && prepared != "/private/tmp");
 #endif
