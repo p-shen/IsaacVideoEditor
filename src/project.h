@@ -102,6 +102,7 @@ struct Project {
     AudioControls audioControls(int lane, int clipIndex = -1) const;
     void setAudioControls(int lane, const AudioControls &controls, int clipIndex = -1);
     bool setTransition(int index, const QString &type, int frames);
+    bool setTransitionRange(int firstClip, int lastClip, const QString &type, int frames);
 
     struct TimelineData {
         QVector<int> starts, frames, transitions;

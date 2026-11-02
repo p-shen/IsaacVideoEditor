@@ -1095,9 +1095,18 @@ void QuickTimeline::paintContents(QPainter *painter) {
         p.setPen(muted);
         p.drawText(QRectF(origin() + 10, ruler + 42, std::max(1.0, width() - origin() - 20), 22), Qt::AlignVCenter, "Media previews unavailable");
     }
+    const int rangeFirst=transitionRange_.value("first",-1).toInt(),rangeLast=transitionRange_.value("last",-1).toInt();
+    const bool showRange=rangeFirst>=0&&rangeLast>rangeFirst&&rangeLast<project.clips.size();
+    if(showRange){
+        const auto first=rectForClip(project,rangeFirst),last=rectForClip(project,rangeLast);
+        const QRectF span=QRectF(first.left(),first.top(),last.right()-first.left(),first.height()).intersected(QRectF(labels,ruler,width()-labels,video));
+        p.setBrush(Qt::NoBrush);p.setPen(QPen(accent,2,Qt::DashLine));p.drawRoundedRect(span.adjusted(2,2,-2,-2),4,4);
+        p.fillRect(QRectF(span.left()+2,span.bottom()-6,std::max(0.0,span.width()-4),4),accent);
+    }
     for(int i=1;i<project.clips.size();++i){
         const auto r=transitionRect(i);if(r.right()<labels||r.left()>width())continue;
-        p.setBrush(blend(base,accent,selectedTransition_==i?.5:.24));p.setPen(QPen(accent,selectedTransition_==i?2:1));p.drawRoundedRect(r,3,3);
+        const bool targeted=selectedTransition_==i||(showRange&&i>rangeFirst&&i<=rangeLast);
+        p.setBrush(blend(base,accent,targeted?.5:.24));p.setPen(QPen(accent,targeted?2:1));p.drawRoundedRect(r,3,3);
         p.setPen(text);p.drawText(r.adjusted(2,0,-2,0),Qt::AlignCenter,timingFor(project).transitions.value(i)>0?QString("%1f").arg(timingFor(project).transitions.value(i)):"|");
     }
     const auto audioBlock = [&](int lane, const QString &path, int start, int frames) {

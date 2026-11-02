@@ -76,6 +76,10 @@ ApplicationWindow {
         })
     }
     Connections {
+        target: window.compact ? compactInspector.item : wideInspector.item
+        function onSectionChanged() { if (target) window.inspectorSection = target.section }
+    }
+    Connections {
         target: editor
         function onStateChanged() {
             if (editor.exportState !== "" && window.lastExportState !== editor.exportState) {
@@ -103,6 +107,7 @@ ApplicationWindow {
     Action { id: exportAction; text: "Export…"; shortcut: "Ctrl+E"; enabled: !editor.exporting && editor.duration > 0; onTriggered: exportOptionsDialog.open() }
     Action { id: undoAction; text: editor.undoText ? "Undo " + editor.undoText : "Undo"; shortcut: StandardKey.Undo; enabled: editor.canUndo && !window.textEditing; onTriggered: editor.undo() }
     Action { id: redoAction; text: editor.redoText ? "Redo " + editor.redoText : "Redo"; shortcut: StandardKey.Redo; enabled: editor.canRedo && !window.textEditing; onTriggered: editor.redo() }
+    Action { id: transitionRangeAction; text: "Transitions…"; enabled: editor.transitionRange.count > 0; onTriggered: { editor.selectTransition(0); window.focusInspector(2) } }
     Action { id: splitAction; text: "Split"; shortcut: "Ctrl+B"; enabled: editor.canSplit && !window.textEditing; onTriggered: editor.split() }
     Shortcut { sequence: "Space"; enabled: !window.textEditing && !window.buttonFocused; onActivated: editor.togglePlayback() }
     Shortcut { sequence: "Delete"; enabled: !window.textEditing; onActivated: editor.removeSelection() }
@@ -156,6 +161,7 @@ ApplicationWindow {
         }
         Menu {
             title: "Clip"
+            MenuItem { action: transitionRangeAction }
             MenuItem { text: "Rotate left 90°"; enabled: editor.selectedClip >= 0; onTriggered: editor.rotate(-90) }
             MenuItem { text: "Rotate right 90°"; enabled: editor.selectedClip >= 0; onTriggered: editor.rotate(90) }
             MenuItem { text: "Turn 180°"; enabled: editor.selectedClip >= 0; onTriggered: editor.rotate(180) }
@@ -506,6 +512,7 @@ ApplicationWindow {
                             UI.Button { objectName: "undoButton"; text: "Undo"; iconName: "undo"; iconOnly: true; flat: true; enabled: undoAction.enabled; onClicked: editor.undo(); helpText: undoAction.text + " (⌘/Ctrl+Z)" }
                             UI.Button { objectName: "redoButton"; text: "Redo"; iconName: "redo"; iconOnly: true; flat: true; enabled: redoAction.enabled; onClicked: editor.redo(); helpText: redoAction.text }
                         }
+                        UI.Button { objectName: "transitionRangeButton"; action: transitionRangeAction; flat: true; helpText: "Configure transitions between the first and last selected clips" }
                         Row {
                             spacing: 4
                             UI.Button { action: splitAction; iconName: "split"; flat: true; helpText: "Split at the playhead (⌘/Ctrl+B), away from crossfades" }
@@ -575,6 +582,7 @@ ApplicationWindow {
                         onTrimRequested: (index,start,end) => editor.trimClip(index,start,end)
                         onAudioSelected: lane => { editor.selectAudio(lane); window.focusInspector(1,false) }
                         selectedTransition: editor.selectedTransition
+                        transitionRange: editor.selectedTransition === 0 && window.inspectorSection === 2 && (!window.compact || window.browserSection === 2) ? editor.transitionRange : ({})
                         onAudioGestureStarted: editor.beginAudioGesture()
                         onAudioPreviewRequested: (lane,fields) => editor.updateAudio(lane,fields)
                         onAudioGestureFinished: canceled => editor.endAudioGesture(canceled)

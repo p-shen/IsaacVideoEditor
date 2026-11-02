@@ -83,6 +83,13 @@ EditorController::EditorController(QObject *parent,const Performance::Budget &bu
     connect(this,&EditorController::selectionChanged,this,&EditorController::splitAvailabilityChanged);
     connect(this,&EditorController::positionChanged,this,&EditorController::splitAvailabilityChanged);
     connect(this,&EditorController::sourceChanged,this,&EditorController::sourcePositionChanged);
+    const auto invalidateRange=[this]{
+        ++transitionRangeRevision_;
+        if(transitionIndex_==0&&selection_.size()<2)transitionIndex_=-1;
+        emit transitionRangeChanged();
+    };
+    connect(this,&EditorController::projectChanged,this,invalidateRange);
+    connect(this,&EditorController::selectionChanged,this,invalidateRange);
     connect(this,&EditorController::projectChanged,this,&EditorController::compositionChanged);
     connect(this,&EditorController::selectionChanged,this,&EditorController::compositionChanged);
     connect(this,&EditorController::compositionChanged,this,&EditorController::transformChanged);
@@ -617,8 +624,33 @@ QVariantList EditorController::transitions() const {
     }
     return list;
 }
+QVariantMap EditorController::transitionRange() const {
+    const auto selected=validIndices(selection_,project_.clips.size());if(selected.size()<2)return {};
+    const int first=selected.first().toInt(),last=selected.last().toInt();
+    const auto cuts=transitions();
+    QString type=cuts[first].toMap()["type"].toString();int frames=cuts[first].toMap()["frames"].toInt();
+    for(int i=first+1;i<last;++i){
+        const auto cut=cuts[i].toMap();
+        if(cut["type"].toString()!=type)type.clear();if(cut["frames"].toInt()!=frames)frames=-1;
+    }
+    return {{"first",first},{"last",last},{"count",last-first},
+        {"firstName",QFileInfo(project_.clips[first].path).fileName()},{"lastName",QFileInfo(project_.clips[last].path).fileName()},
+        {"type",type},{"frames",frames},{"key",QString::number(transitionRangeRevision_)}};
+}
+bool EditorController::setTransitionRange(const QString &key,const QString &type,int frames) {
+    cancelPendingVisual();
+    const auto range=transitionRange();
+    if(transitionIndex_!=0||range.isEmpty()||range["key"].toString()!=key)return false;
+    const int first=range["first"].toInt(),last=range["last"].toInt();
+    Project next=project_;if(!next.setTransitionRange(first,last,type,frames))return false;
+    int shortened=0;for(int i=first+1;i<=last;++i)shortened+=type!="cut"&&next.transitionFramesBefore(i)<frames;
+    if(!commit(next,selection_,primary_,"Transitions in range"))return false;
+    QString message=QString("Applied %1 to %2 %3.").arg(Transitions::name(type)).arg(last-first).arg(last-first==1?"cut":"cuts");
+    if(shortened)message+=QString(" %1 shortened to fit nearby clips.").arg(shortened);
+    report(message);noticeCanUndo_=true;emit stateChanged();return true;
+}
 QVariantMap EditorController::currentTransition() const {const auto list=transitions();return transitionIndex_>0&&transitionIndex_<=list.size()?list[transitionIndex_-1].toMap():QVariantMap{};}
-void EditorController::selectTransition(int index){cancelPendingVisual();showProject();if(index<1||index>=project_.clips.size())return;transitionIndex_=index;emit stateChanged();}
+void EditorController::selectTransition(int index){cancelPendingVisual();showProject();if(index<0||index>=project_.clips.size()||(index==0&&transitionRange().isEmpty()))return;transitionIndex_=index;++transitionRangeRevision_;emit transitionRangeChanged();emit stateChanged();}
 void EditorController::setTransition(int index,const QString &type,int frames){cancelPendingVisual();
     auto next=audioPreview_?project_:visibleProject();
     if(!next.setTransition(index,type,frames)){

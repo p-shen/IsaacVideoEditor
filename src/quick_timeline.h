@@ -23,6 +23,7 @@ class QuickTimeline : public QQuickPaintedItem {
     Q_PROPERTY(QVariantList selectedCaptions READ selectedCaptions WRITE setSelectedCaptions NOTIFY captionSelectionChanged)
     Q_PROPERTY(int selectedText READ selectedText WRITE setSelectedText NOTIFY textSelectionChanged)
     Q_PROPERTY(int selectedTransition READ selectedTransition WRITE setSelectedTransition NOTIFY transitionSelectionChanged)
+    Q_PROPERTY(QVariantMap transitionRange READ transitionRange WRITE setTransitionRange NOTIFY transitionRangeChanged)
     Q_PROPERTY(bool snapping READ snapping WRITE setSnapping NOTIFY snappingChanged)
     Q_PROPERTY(bool skimming READ skimming WRITE setSkimming NOTIFY skimmingChanged)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
@@ -50,6 +51,8 @@ public:
     void setSelectedCaptions(const QVariantList &indices){if(indices==captionSelection_)return;captionSelection_=indices;emit captionSelectionChanged();invalidateContents();}
     int selectedText() const { return selectedText_; }
     void setSelectedText(int index);
+    QVariantMap transitionRange() const {return transitionRange_;}
+    void setTransitionRange(const QVariantMap &range) {if(range==transitionRange_)return;transitionRange_=range;emit transitionRangeChanged();invalidateContents();}
     int selectedTransition() const {return selectedTransition_;}
     void setSelectedTransition(int index) {if(index==selectedTransition_)return;selectedTransition_=index;emit transitionSelectionChanged();invalidateContents();}
     bool snapping() const { return snapping_; }
@@ -92,6 +95,7 @@ signals:
     void selectionChanged();
     void textSelectionChanged();
     void transitionSelectionChanged();
+    void transitionRangeChanged();
     void captionSelectionChanged();
     void captionSelected(int index,int modifiers);
     void captionTimingRequested(int index,int start,int frames);
@@ -147,6 +151,7 @@ private:
     void invalidateContents() { contentsDirty_=true; previewTimingDirty_=true; update(); }
     QImage contents_;
     bool contentsDirty_=true;
+    QVariantMap transitionRange_;
     enum class Gesture { None, Scrub, Body, TrimStart, TrimEnd, TextBody, TextStart, TextEnd, AudioMove, AudioGain, AudioFadeIn, AudioFadeOut, Transition };
     struct FilmTile { QRectF rect; QImage image; bool missing = false; };
     const Project &displayProject() const;
