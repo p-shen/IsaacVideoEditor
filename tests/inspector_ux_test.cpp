@@ -57,6 +57,90 @@ private slots:
         applyAppTheme(*qobject_cast<QApplication*>(qApp)); registerEditorQmlTypes();
     }
     void init() { QTest::failOnWarning(QRegularExpression(".*")); }
+    void transitionRangeStagesBeforeApplying() {
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture(),fixture(),fixture(),fixture(),fixture()}));
+        QTemporaryDir dir;QVERIFY(editor.saveTo(dir.filePath("staged.isaac.json")));
+        editor.selectClip(1);editor.selectClip(4,Qt::ControlModifier);
+        auto *button=named(window,"transitionRangeButton");QVERIFY2(button,"Selected clips need a discoverable Transitions action");
+        QVERIFY(button->isEnabled());QTRY_VERIFY(fullyVisible(button));QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,button->mapToScene(QPointF(button->width()/2,button->height()/2)).toPoint());QTRY_COMPARE(editor.selectedTransition(),0);
+        auto *effect=named(window,"transitionRangeEffect"),*duration=named(window,"transitionRangeDuration"),*apply=named(window,"transitionRangeApply");
+        QVERIFY(effect);QVERIFY(duration);QVERIFY(apply);QTRY_VERIFY(effect->isVisible());
+        effect->setProperty("currentIndex",1);QVERIFY(QMetaObject::invokeMethod(effect,"activated",Q_ARG(int,1)));
+        duration->forceActiveFocus();duration->setProperty("text","0.3");QVERIFY(QMetaObject::invokeMethod(duration,"editingFinished"));
+        auto *timeline=named(window,"timeline");QVERIFY(timeline);
+        QTRY_COMPARE(timeline->property("transitionRange").toMap()["first"].toInt(),1);
+        QCOMPARE(timeline->property("transitionRange").toMap()["last"].toInt(),4);
+        QVERIFY(section(window,1));QTRY_VERIFY(timeline->property("transitionRange").toMap().isEmpty());QVERIFY(section(window,2));
+        QVERIFY(!editor.dirty());for(int i:{1,2,3,4,5})QCOMPARE(editor.project().transitionFramesBefore(i),0);
+        QTRY_VERIFY(apply->isEnabled());QVERIFY(QMetaObject::invokeMethod(apply,"clicked"));
+        for(int i:{2,3,4})QCOMPARE(editor.project().transitionFramesBefore(i),18);
+        QCOMPARE(editor.project().transitionFramesBefore(1),0);QCOMPARE(editor.project().transitionFramesBefore(5),0);
+        QCOMPARE(editor.selectedIndices().size(),2);editor.undo();QVERIFY(!editor.dirty());
+        for(int i:{2,3,4})QCOMPARE(editor.project().transitionFramesBefore(i),0);
+    }
+    void transitionRangeKeyboardAndLargeText() {
+        EditorController editor;QQmlApplicationEngine engine;QSignalSpy warnings(&engine,&QQmlEngine::warnings);auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture(),fixture(),fixture()}));editor.selectRange(0,3);editor.selectTransition(0);QVERIFY(section(window,2));
+        auto *effect=named(window,"transitionRangeEffect"),*duration=named(window,"transitionRangeDuration"),*apply=named(window,"transitionRangeApply");QVERIFY(effect);QVERIFY(duration);QVERIFY(apply);
+        effect->forceActiveFocus();QTest::keyClick(window,Qt::Key_Down);QTRY_VERIFY(duration->isEnabled());
+        duration->forceActiveFocus();QTest::keyClick(window,Qt::Key_A,Qt::ControlModifier);for(char key:QByteArray("0.25"))QTest::keyClick(window,key);QTest::keyClick(window,Qt::Key_Tab);
+        QTRY_VERIFY(apply->isEnabled());apply->forceActiveFocus();QTest::keyClick(window,Qt::Key_Space);
+        for(int i:{1,2,3})QCOMPARE(editor.project().transitionFramesBefore(i),15);
+        const auto captures=qEnvironmentVariable("ISAAC_TRANSITION_RANGE_SCREENSHOTS");
+        if(!captures.isEmpty()){
+            QDir().mkpath(captures);
+            for(bool dark:{false,true}){setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);QTest::qWait(100);QVERIFY(window->grabWindow().save(captures+(dark?"/range-dark.png":"/range-light.png")));}
+        }
+        window->resize(760,560);auto font=qApp->font();font.setPointSize(24);window->setProperty("font",font);
+        QTest::qWait(80);QVERIFY(section(window,2));duration=named(window,"transitionRangeDuration");apply=named(window,"transitionRangeApply");
+        QVERIFY(duration);QVERIFY(apply);duration->forceActiveFocus();QTRY_VERIFY(fullyVisible(duration));
+        apply->forceActiveFocus();QTRY_VERIFY(fullyVisible(apply));
+        if(!captures.isEmpty()){QTest::qWait(100);QVERIFY(window->grabWindow().save(captures+"/range-large.png"));}
+        QTest::keyClick(window,Qt::Key_Escape);QCOMPARE(editor.project().transitionFramesBefore(1),15);QCOMPARE(warnings.count(),0);
+    }
+    void transitionRangeAppliesFocusedFrames_data() {
+        QTest::addColumn<bool>("retainFocus");QTest::newRow("normal-click")<<false;QTest::newRow("text-retains-focus")<<true;
+    }
+    void transitionRangeAppliesFocusedFrames() {
+        QFETCH(bool,retainFocus);
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture(),fixture()}));editor.selectRange(0,2);editor.selectTransition(0);QVERIFY(section(window,2));
+        auto *effect=named(window,"transitionRangeEffect"),*frames=named(window,"transitionRangeFrames"),*apply=named(window,"transitionRangeApply");QVERIFY(effect);QVERIFY(frames);QVERIFY(apply);
+        effect->setProperty("currentIndex",1);QVERIFY(QMetaObject::invokeMethod(effect,"activated",Q_ARG(int,1)));
+        auto *details=frames->parentItem()->parentItem();QVERIFY(details->property("expanded").isValid());details->setProperty("expanded",true);
+        frames->forceActiveFocus();QTRY_VERIFY(fullyVisible(frames));frames->setProperty("text","");QVERIFY(!apply->isEnabled());frames->setProperty("text","42");
+        QTest::qWait(80);auto *scroller=flickable(apply);QVERIFY(scroller);scroller->setProperty("contentY",std::max(0.0,scroller->property("contentHeight").toReal()-scroller->height()));
+        if(retainFocus)apply->setProperty("focusPolicy",Qt::NoFocus);
+        QTRY_VERIFY(fullyVisible(apply));QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,apply->mapToScene(QPointF(apply->width()/2,apply->height()/2)).toPoint());
+        QCOMPARE(editor.project().transitionFramesBefore(1),42);QCOMPARE(editor.project().transitionFramesBefore(2),42);
+    }
+    void transitionRangeEscapeFromTargetChooser() {
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture(),fixture()}));editor.setTransition(1,"dissolve",42);editor.setTransition(2,"dissolve",42);
+        editor.selectRange(0,2);editor.selectTransition(0);QVERIFY(section(window,2));
+        auto *duration=named(window,"transitionRangeDuration"),*target=named(window,"transitionTargetChooser");QVERIFY(duration);QVERIFY(target);
+        duration->forceActiveFocus();duration->setProperty("text","0.4");QVERIFY(QMetaObject::invokeMethod(duration,"editingFinished"));
+        target->forceActiveFocus();QTest::keyClick(window,Qt::Key_Escape);
+        QCOMPARE(duration->property("text").toString(),QString("0.700"));
+    }
+    void transitionRangeMixedSettingsAndCancellation() {
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        QVERIFY(editor.importFiles({fixture(),fixture(),fixture(),fixture()}));editor.setTransition(1,"dissolve",12);editor.setTransition(2,"wipe-left",24);
+        editor.selectRange(0,3);editor.selectTransition(0);QVERIFY(section(window,2));
+        auto *effect=named(window,"transitionRangeEffect"),*duration=named(window,"transitionRangeDuration"),*apply=named(window,"transitionRangeApply");
+        QVERIFY(effect);QVERIFY(duration);QVERIFY(apply);QTRY_VERIFY(duration->isVisible());
+        QCOMPARE(effect->property("currentIndex").toInt(),-1);QVERIFY(duration->property("text").toString().isEmpty());QVERIFY(!apply->isEnabled());
+        effect->setProperty("currentIndex",1);QVERIFY(QMetaObject::invokeMethod(effect,"activated",Q_ARG(int,1)));
+        duration->forceActiveFocus();duration->setProperty("text","0.5");QTest::keyClick(window,Qt::Key_Escape);
+        QCOMPARE(effect->property("currentIndex").toInt(),-1);QVERIFY(!apply->isEnabled());QCOMPARE(editor.project().transitionFramesBefore(1),12);
+        duration->forceActiveFocus();duration->setProperty("text","0.9");editor.selectRange(1,3);
+        QVERIFY(QMetaObject::invokeMethod(duration,"editingFinished"));QCOMPARE(editor.project().transitionFramesBefore(1),12);QCOMPARE(editor.project().transitionFramesBefore(2),24);
+        effect->setProperty("currentIndex",0);QVERIFY(QMetaObject::invokeMethod(effect,"activated",Q_ARG(int,0)));
+        QTRY_VERIFY(apply->isEnabled());QVERIFY(QMetaObject::invokeMethod(apply,"clicked"));
+        QCOMPARE(editor.project().transitionFramesBefore(1),12);QCOMPARE(editor.project().transitionFramesBefore(2),0);QCOMPARE(editor.project().transitionFramesBefore(3),0);
+        editor.selectTransition(1);QTRY_VERIFY(!apply->isVisible());QVERIFY(named(window,"transitionDurationField")->isVisible());
+    }
     void textPresetsAndAnimationUseIndependentControls() {
         EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
         QVERIFY(editor.importFiles({fixture()}));editor.addText();QVERIFY(section(window,3));

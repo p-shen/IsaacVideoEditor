@@ -56,6 +56,14 @@ Select a cut marker or choose a cut in **Transitions**. Choose **Cut**, **Dissol
 
 Neighboring cuts retain their settings. Available media bounds local overlap and reserves a playable frame in short clips; the inspector shows the requested and actual duration when a fade is shortened. **All existing cuts** stages a crossfade duration without changing the edit. **Apply to all existing cuts** replaces transitions at every current boundary, including appended clips, split points, and cuts previously set to **Cut**. Short clips shorten only nearby crossfades; distant fades keep the requested duration. The result notice reports the duration, number of cuts, and how many fades were shortened, with **Undo** to restore the previous transitions. Set the duration to zero and apply it to remove crossfades. Cuts added or split afterward keep their own settings; apply again to include them. Older projects retain their timing until you explicitly apply the new behavior.
 
+## Apply transitions inside a clip range
+
+Select two or more clips with Shift-click or Command/Ctrl-click, then choose **Transitions…** beside the timeline or from the **Clip** menu. The earliest and latest selected clips define the range: selecting clips 2 and 5 includes cuts 2→3, 3→4, and 4→5, even if clips 3 and 4 were not individually selected. The dashed timeline span and highlighted cut markers show the affected area without changing which clips move or delete together.
+
+In **Transitions**, **Selected range · N cuts** shows the endpoint filenames and cut count. Configure the type and duration, then click **Apply to N cuts**. Configuration does not change playback or mark the project unsaved. **Mixed** settings need explicit choices; **Cut** removes the enclosed transitions without requiring a duration. Seconds, frame values, and steppers use the existing 60 fps timebase. Escape resets the configuration; changing selection, target, or project discards unapplied values.
+
+Apply is one Undo/Redo operation. Transitions outside the range retain their effects and playable overlap durations; short clips can shorten the requested overlaps inside it. The result notice reports shortened transitions and offers Undo. At a constrained outside boundary, preserving playback timing can require storing that transition’s current playable length; distant requested durations remain intact. Individual cut markers still open the immediate single-cut controls, and **All existing cuts** remains a separate operation.
+
 ## Files and verification
 
 New saves use project version 7, extending version 6 with separate captions and text attachments while retaining reusable assets, audio controls, per-cut settings, stable clip identities, visual layers, canvas and animation. Versions 1–6 remain loadable with their original timing, rotation and text. Original media is never modified.

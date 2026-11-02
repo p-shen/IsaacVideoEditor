@@ -19,6 +19,102 @@ class AudioTransitionTest : public QObject {
     Q_OBJECT
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
 private slots:
+    void selectedRangeAppliesInsideEndpointsAsOneUndo_data() {
+        QTest::addColumn<bool>("reverse");
+        QTest::newRow("forward")<<false;QTest::newRow("reverse")<<true;
+    }
+    void selectedRangeAppliesInsideEndpointsAsOneUndo() {
+        QFETCH(bool,reverse);
+        EditorController e;QVERIFY(e.importFiles({fixture(),fixture(),fixture(),fixture(),fixture(),fixture()}));
+        e.setTransition(1,"circle-open",12);e.setTransition(5,"wipe-right",24);
+        QTemporaryDir dir;QVERIFY(e.saveTo(dir.filePath("range.isaac.json")));
+        e.selectClip(reverse?4:1);e.selectClip(reverse?1:4,Qt::ControlModifier);e.selectTransition(0);
+        const auto range=e.property("transitionRange").toMap();
+        QVERIFY2(!range.isEmpty(),"The selected endpoints must expose an editable transition range");
+        QCOMPARE(range["type"].toString(),QString("cut"));QCOMPARE(range["first"].toInt(),1);QCOMPARE(range["last"].toInt(),4);QCOMPARE(range["count"].toInt(),3);
+        QCOMPARE(e.selectedIndices().size(),2);QVERIFY(!e.dirty());
+        bool applied=false;const auto key=range["key"].toString();
+        QVERIFY(QMetaObject::invokeMethod(&e,"setTransitionRange",Q_RETURN_ARG(bool,applied),Q_ARG(QString,key),Q_ARG(QString,QString("wipe-left")),Q_ARG(int,18)));
+        QVERIFY(applied);QCOMPARE(e.project().clips[1].transitionType,QString("circle-open"));QCOMPARE(e.project().transitionFramesBefore(1),12);
+        QCOMPARE(e.project().clips[5].transitionType,QString("wipe-right"));QCOMPARE(e.project().transitionFramesBefore(5),24);
+        for(int i:{2,3,4}){QCOMPARE(e.project().clips[i].transitionType,QString("wipe-left"));QCOMPARE(e.project().transitionFramesBefore(i),18);}
+        QVERIFY(e.property("noticeCanUndo").toBool());e.undo();QVERIFY(!e.dirty());
+        for(int i:{2,3,4})QCOMPARE(e.project().transitionFramesBefore(i),0);
+        e.redo();for(int i:{2,3,4})QCOMPARE(e.project().transitionFramesBefore(i),18);
+        QVERIFY(e.saveTo(dir.filePath("range.isaac.json")));const auto restored=loadProject(dir.filePath("range.isaac.json"));QVERIFY(restored);
+        for(int i:{2,3,4})QCOMPARE(restored->clips[i].transitionType,QString("wipe-left"));
+    }
+    void rangeFittingReservesOutsideOverlaps() {
+        Project p;p.clips={{fixture(),0,1},{fixture(),0,.5},{fixture(),0,1},{fixture(),0,1},{fixture(),0,.5},{fixture(),0,1}};
+        QVERIFY(p.setTransition(1,"circle-open",20));QVERIFY(p.setTransition(5,"wipe-right",16));
+        QVERIFY(p.setTransitionRange(1,4,"wipe-left",30));
+        const QVector<int> expected={0,20,9,30,13,16};for(int i=1;i<6;++i)QCOMPARE(p.transitionFramesBefore(i),expected[i]);
+        QCOMPARE(p.clips[1].transitionType,QString("circle-open"));QCOMPARE(p.clips[5].transitionType,QString("wipe-right"));
+        QVERIFY(!p.setTransitionRange(1,4,"wipe-left",30));
+        QVERIFY(p.setTransitionRange(1,4,"cut",0));QCOMPARE(p.transitionFramesBefore(1),20);QCOMPARE(p.transitionFramesBefore(5),16);
+        for(int i:{2,3,4})QCOMPARE(p.transitionFramesBefore(i),0);
+    }
+    void rangeDoesNotRewriteDistantRequests() {
+        Project p;for(int i=0;i<8;++i){p.clips.append({fixture(),0,i==1?.5:1});p.clips.last().transitionFrames=30;}
+        QVERIFY(p.setTransitionRange(1,3,"cut",0));
+        QCOMPARE(p.transitionFramesBefore(1),14);QCOMPARE(p.transitionFramesBefore(7),29);
+        QCOMPARE(p.clips[7].transitionFrames,30);
+        p.clips[6].outSeconds=2;p.clips[7].outSeconds=2;QCOMPARE(p.transitionFramesBefore(7),30);
+    }
+    void rangeFitsShortInteriorCutsTogether() {
+        Project p;p.clips={{fixture(),0,1},{fixture(),0,1},{fixture(),0,.5},{fixture(),0,1},{fixture(),0,1},{fixture(),0,1}};
+        QVERIFY(p.setTransitionRange(1,4,"dissolve",30));
+        QCOMPARE(p.transitionFramesBefore(2),14);QCOMPARE(p.transitionFramesBefore(3),14);QCOMPARE(p.transitionFramesBefore(4),30);
+        QVERIFY(p.validate().isEmpty());
+        QVERIFY(!p.setTransitionRange(-1,4,"dissolve",30));QVERIFY(!p.setTransitionRange(4,1,"dissolve",30));
+        QVERIFY(!p.setTransitionRange(1,6,"dissolve",30));QVERIFY(!p.setTransitionRange(1,4,"invalid",30));QVERIFY(!p.setTransitionRange(1,4,"dissolve",601));
+    }
+    void rangePreservesConstrainedAndLegacyOutsideTiming_data() {
+        QTest::addColumn<bool>("legacy");QTest::newRow("legacy")<<true;QTest::newRow("local-global")<<false;
+    }
+    void rangePreservesConstrainedAndLegacyOutsideTiming() {
+        QFETCH(bool,legacy);Project p;p.clips={{fixture(),0,1},{fixture(),0,.5},{fixture(),0,1},{fixture(),0,1},{fixture(),0,1},{fixture(),0,1}};p.crossfadeFrames=30;
+        if(!legacy)for(auto &clip:p.clips)clip.transitionFrames=30;
+        const int outsideFirst=14,outsideLast=legacy?14:29;
+        QCOMPARE(p.transitionFramesBefore(1),outsideFirst);QCOMPARE(p.transitionFramesBefore(5),outsideLast);
+        QVERIFY(p.setTransitionRange(1,4,"cut",0));QCOMPARE(p.transitionFramesBefore(1),outsideFirst);QCOMPARE(p.transitionFramesBefore(5),outsideLast);
+        QCOMPARE(p.clips[1].transitionType,QString("dissolve"));QVERIFY(p.validate().isEmpty());
+    }
+    void rangeRejectsStaleProjectAndSingleCutTargets() {
+        EditorController e;QVERIFY(e.importFiles({fixture(),fixture(),fixture()}));e.selectRange(0,2);e.selectTransition(0);
+        auto key=e.transitionRange()["key"].toString();e.rotate(90);QVERIFY(!e.setTransitionRange(key,"dissolve",30));
+        key=e.transitionRange()["key"].toString();e.selectTransition(1);QVERIFY(!e.setTransitionRange(key,"dissolve",30));
+        e.selectTransition(0);QVERIFY(!e.setTransitionRange(key,"dissolve",30));
+        QSignalSpy changes(&e,&EditorController::projectChanged);
+        QVERIFY(!e.setTransitionRange(e.transitionRange()["key"].toString(),"cut",0));QCOMPARE(changes.count(),0);
+        e.selectClip(0);QVERIFY(e.transitionRange().isEmpty());QCOMPARE(e.selectedTransition(),-1);
+    }
+    void selectedRangeRejectsStaleSelection() {
+        EditorController e;QVERIFY(e.importFiles({fixture(),fixture(),fixture(),fixture()}));
+        e.selectRange(0,2);e.selectTransition(0);const auto key=e.property("transitionRange").toMap()["key"].toString();QVERIFY(!key.isEmpty());
+        e.selectRange(1,3);bool applied=true;
+        QVERIFY(QMetaObject::invokeMethod(&e,"setTransitionRange",Q_RETURN_ARG(bool,applied),Q_ARG(QString,key),Q_ARG(QString,QString("dissolve")),Q_ARG(int,30)));
+        QVERIFY(!applied);for(int i:{1,2,3})QCOMPARE(e.project().transitionFramesBefore(i),0);
+    }
+    void selectedRangeExportsOnlyItsEnclosedCuts() {
+        QTemporaryDir dir;QString ffmpeg=QStandardPaths::findExecutable("ffmpeg");if(ffmpeg.isEmpty())ffmpeg="/opt/homebrew/bin/ffmpeg";
+        for(const QString color:{QString("red"),QString("blue")}){
+            QProcess create;create.start(ffmpeg,{"-v","error","-f","lavfi","-i","color=c="+color+":s=160x90:r=60:d=1","-f","lavfi","-i","sine=frequency=440:duration=1","-c:v","libx264","-c:a","aac","-shortest","-y",dir.filePath(color+".mp4")});
+            QVERIFY(create.waitForFinished(10000));QCOMPARE(create.exitCode(),0);
+        }
+        const auto red=dir.filePath("red.mp4"),blue=dir.filePath("blue.mp4");EditorController e;QVERIFY(e.importFiles({blue,red,blue,red,blue,red}));
+        e.selectClip(1);e.selectClip(4,Qt::ControlModifier);e.selectTransition(0);QVERIFY(e.setTransitionRange(e.transitionRange()["key"].toString(),"dissolve",18));
+        QCOMPARE(e.duration(),306);const auto output=dir.filePath("range.mp4");QVERIFY(e.exportTo(output));QTRY_VERIFY_WITH_TIMEOUT(!e.exporting(),20000);QCOMPARE(e.exportState(),QString("Completed"));
+        QString ffprobe=QStandardPaths::findExecutable("ffprobe");if(ffprobe.isEmpty())ffprobe=QFileInfo(ffmpeg).absolutePath()+"/ffprobe";
+        QProcess inspect;inspect.start(ffprobe,{"-v","error","-select_streams","v:0","-count_frames","-show_entries","stream=nb_read_frames","-of","csv=p=0",output});
+        QVERIFY(inspect.waitForFinished(10000));QCOMPARE(inspect.exitCode(),0);QCOMPARE(inspect.readAllStandardOutput().trimmed().toInt(),306);
+        inspect.start(ffprobe,{"-v","error","-select_streams","a:0","-show_entries","stream=codec_name","-of","csv=p=0",output});QVERIFY(inspect.waitForFinished(10000));QCOMPARE(inspect.readAllStandardOutput().trimmed(),QByteArray("aac"));
+        Project exported;exported.clips={{output,0,306/60.0}};Mlt::Profile profile;Media::configureOutputProfile(profile,160,90);QString error;
+        auto timeline=Media::buildTimeline(exported,profile,&error);QVERIFY2(timeline,qPrintable(error));
+        const auto colorAt=[&](int at){timeline->seek(at);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());auto format=mlt_image_rgba;int w=160,h=90;uint8_t *pixels=nullptr;if(mlt_frame_get_image(frame->get_frame(),&pixels,&format,&w,&h,0)||!pixels)return QColor();return QImage(pixels,w,h,w*4,QImage::Format_RGBA8888).pixelColor(w/2,h/2);};
+        for(int frame:{111,153,195}){const auto color=colorAt(frame);QVERIFY(color.red()>70&&color.blue()>70);}
+        QVERIFY(colorAt(59).blue()>200);QVERIFY(colorAt(60).red()>200);QVERIFY(colorAt(245).blue()>200);QVERIFY(colorAt(246).red()>200);
+    }
     void globalCrossfadeExportsAppendedAndSplitCuts_data() {
         QTest::addColumn<bool>("shortClip");
         QTest::newRow("all-full-duration")<<false;

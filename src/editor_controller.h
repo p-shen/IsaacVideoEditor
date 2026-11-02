@@ -80,6 +80,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(QVariantList transitions READ transitions NOTIFY projectChanged)
     Q_PROPERTY(QVariantList transitionPresets READ transitionPresets CONSTANT)
     Q_PROPERTY(int selectedTransition READ selectedTransition NOTIFY stateChanged)
+    Q_PROPERTY(QVariantMap transitionRange READ transitionRange NOTIFY transitionRangeChanged)
     Q_PROPERTY(QVariantMap currentTransition READ currentTransition NOTIFY stateChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY stateChanged)
     Q_PROPERTY(QString recoveryStatus READ recoveryStatus NOTIFY stateChanged)
@@ -252,6 +253,8 @@ public:
     QVariantList transitionPresets() const;
     int selectedTransition() const {return transitionIndex_;}
     QVariantMap currentTransition() const;
+    QVariantMap transitionRange() const;
+    Q_INVOKABLE bool setTransitionRange(const QString &key,const QString &type,int frames);
     Q_INVOKABLE void selectAudio(int lane);
     Q_INVOKABLE void updateAudio(int lane,const QVariantMap &fields);
     Q_INVOKABLE void beginAudioGesture();
@@ -309,6 +312,7 @@ public:
     Q_INVOKABLE void dismissNotice();
     Q_INVOKABLE void retryPreviews();
 signals:
+    void transitionRangeChanged();
     void compositionChanged();
     void projectChanged();
     void sourceChanged();
@@ -339,6 +343,7 @@ private:
     int audioPlayableFrames(const Project &project,int lane) const;
     std::optional<Project> audioPreview_;
     int audioLane_=1,soloLane_=-1,soloClip_=-1,transitionIndex_=-1;
+    quint64 transitionRangeRevision_=0;
     double masterPeak_=-60;
     bool masterClipped_=false,audioGestureWasPlaying_=false;
     VisualTransform *selectedTransform(Project &project) const;
