@@ -18,6 +18,25 @@ class RecoveryExportTest : public QObject {
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
     Project sample() const { Project p; p.clips.append({fixture(),0,2}); return p; }
 private slots:
+    void iphoneExportChoiceIsOptInAndShowsResolution() {
+        EditorController editor;QVERIFY(editor.importFiles({fixture()}));editor.setCanvas(2880,3840);
+        QQmlApplicationEngine engine;setEditorQmlContext(engine,editor);QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        engine.load(QUrl::fromLocalFile(QDir::current().filePath("qml/Main.qml")));QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window=qobject_cast<QQuickWindow*>(engine.rootObjects().first());QVERIFY(window);QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *dialog=window->findChild<QObject*>("exportOptionsDialog");QVERIFY(dialog);
+        auto *check=window->findChild<QQuickItem*>("iphoneExportCheckBox");QVERIFY(check);
+        auto *resolution=window->findChild<QObject*>("exportResolutionLabel");QVERIFY(resolution);
+        QVERIFY(QMetaObject::invokeMethod(dialog,"open"));QTRY_VERIFY(dialog->property("visible").toBool());
+        QVERIFY(!check->property("checked").toBool());QVERIFY(resolution->property("text").toString().startsWith("2880×3840"));
+        QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,check->mapToScene({check->width()/2,check->height()/2}).toPoint());
+        QTRY_VERIFY(check->property("checked").toBool());QVERIFY(resolution->property("text").toString().startsWith("2160×2880"));
+        QCOMPARE(editor.project().canvasWidth,2880);QCOMPARE(editor.project().canvasHeight,3840);
+        const auto screenshots=qEnvironmentVariable("ISAAC_IPHONE_EXPORT_SCREENSHOTS");
+        if(!screenshots.isEmpty()){QDir().mkpath(screenshots);QTest::qWait(100);QVERIFY(window->grabWindow().save(screenshots+"/export-options.png"));}
+        QVERIFY(QMetaObject::invokeMethod(dialog,"close"));QTest::qWait(150);
+        QVERIFY(QMetaObject::invokeMethod(dialog,"open"));QTRY_VERIFY(!check->property("checked").toBool());
+        QCOMPARE(warnings.count(),0);
+    }
     void initTestCase(){QQuickStyle::setStyle("Basic");registerEditorQmlTypes();}
     void crashWriter() {
         const auto directory=qEnvironmentVariable("ISAAC_RECOVERY_CRASH_TEST");

@@ -36,7 +36,7 @@ int runExportWorker(const QStringList &arguments){
     int last=-1;
     const bool ok=Media::exportMp4(*project,arguments[3],[&](int value){if(value==last)return;last=value;sendEvent({{"event","progress"},{"value",value}});},&error,
         [&]{return QFileInfo::exists(arguments[4]);},
-        [](const QString &message){sendEvent({{"event","diagnostic"},{"message",message}});},arguments.contains("--software"));
+        [](const QString &message){sendEvent({{"event","diagnostic"},{"message",message}});},arguments.contains("--software"),arguments.contains("--iphone"));
     sendEvent({{"event","result"},{"ok",ok},{"error",error}});
     return ok?0:1;
 }
@@ -60,7 +60,7 @@ void ExportJob::log(const QByteArray &message){
     if(!log_.isOpen()||log_.size()>=maxLogBytes)return;
     log_.write(message.left(maxLogBytes-log_.size()));log_.flush();
 }
-bool ExportJob::start(const Project &snapshot,const QString &destination,QString *error){
+bool ExportJob::start(const Project &snapshot,const QString &destination,QString *error,bool optimizeForIphone){
     const auto fail=[&](const QString &message){if(error)*error=message;return false;};
     if(running_||destination.isEmpty())return fail("Choose an output file.");
     const auto problem=snapshot.validate();if(!problem.isEmpty())return fail(problem);
@@ -79,7 +79,7 @@ bool ExportJob::start(const Project &snapshot,const QString &destination,QString
         if(fallback.open()){fallback.setAutoRemove(false);log_.setFileName(fallback.fileName());fallback.close();log_.open(QIODevice::WriteOnly);}
     }
     log((QDateTime::currentDateTimeUtc().toString(Qt::ISODate)+"\nExporting "+QString::number(snapshot.durationFrames())+" frames to "+destination_+"\n").toUtf8());
-    running_=true;canceled_=hardware_=retried_=false;
+    optimizeForIphone_=optimizeForIphone;running_=true;canceled_=hardware_=retried_=false;
     launch(false);return true;
 }
 void ExportJob::launch(bool software){
@@ -87,6 +87,7 @@ void ExportJob::launch(bool software){
     resultReceived_=resultSuccess_=protocolFailed_=hardware_=probeTimedOut_=false;workerError_.clear();output_.clear();
     QStringList args={"--export-worker",staging_->filePath("snapshot.isaac.json"),staging_->filePath("render.mp4"),staging_->filePath("cancel")};
     if(software)args.append("--software");
+    if(optimizeForIphone_)args.append("--iphone");
     auto environment=QProcessEnvironment::systemEnvironment();environment.insert("QT_QPA_PLATFORM","offscreen");
     process_.setProcessEnvironment(environment);process_.setWorkingDirectory(QDir::currentPath());process_.start(program_,args);
 }

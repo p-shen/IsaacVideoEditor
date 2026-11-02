@@ -274,7 +274,7 @@ void UpdateChecker::preparePackage() {
     downloadFailed(tr("In-app installation is not supported on this operating system.")); return;
 # endif
     runPreparation(tar, {"-tf", archive}, [this, tar, root, archive](const QByteArray &listing) {
-        const auto entries = QString::fromUtf8(listing).split('\n', Qt::SkipEmptyParts);
+        const auto entries = updateArchiveEntries(listing);
         if (entries.isEmpty()) { downloadFailed(tr("The update archive is empty.")); return; }
         for (const auto &entry : entries) {
             if (!safeUpdateArchiveEntry(entry, root)) {

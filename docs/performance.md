@@ -14,6 +14,10 @@ Photos load when their overlay becomes active. References to the same canonical 
 
 ## Export
 
+Exports retain native canvas resolution by default. The optional **Optimize for iPhone** setting fits the output within a landscape 3840 × 2160 or portrait 2160 × 3840 envelope without upscaling or changing the project. It uses H.264 High at Level 4.2 for HD-sized rasters and Level 5.2 for larger rasters, with peak bitrate limits of 16 or 40 Mbps and a two-second rate-control buffer. NVIDIA, Apple, and software encoders receive the same compatibility policy. Hardware output validation checks the resulting level and pixel format, and retries preserve the selected mode.
+
+This addresses an iPhone 15 Plus Photos import failure with a 2880 × 3840, 60 fps, H.264 High Level 6.0 export at approximately 112 Mbps. The original-format short sample could not be imported; the user confirmed successful imports of 2160 × 2880 Level 5.2 and 1080 × 1440 Level 4.2 samples. These samples used software encoding, so a new optimized NVIDIA export still needs a device check.
+
 Plain edits use one MLT frame-processing worker while FFmpeg retains its automatic codec threading. Compositions can use up to eight frame-processing workers, limited by CPU count and the memory required for the output dimensions. Export always disables frame dropping.
 
 Queues reserve space for working frame copies as well as buffered frames. Their memory allowance is at most one eighth of available RAM, capped at 2 GiB. This permits parallel 4K rendering on a large workstation without forcing large queues onto a smaller computer. Queue estimates do not include every allocation made by codecs or the operating system.

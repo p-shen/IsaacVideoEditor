@@ -40,6 +40,9 @@ QStringList recentAudioFiles(const QString &directory, int limit = 10);
 // The smallest source raster, with camera orientation, determines the auto canvas.
 std::optional<VideoSize> projectOutputSize(const Project &project, QString *error = nullptr, bool allowOffline = false);
 
+// Native dimensions by default; iPhone mode fits within a 4K envelope without changing the canvas.
+std::optional<VideoSize> mp4OutputSize(const Project &project, bool optimizeForIphone = false, QString *error = nullptr);
+
 // Square-pixel, progressive 60 fps output at the requested canvas size.
 void configureOutputProfile(Mlt::Profile &profile, int width = 1920, int height = 1080);
 
@@ -54,7 +57,8 @@ std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
 bool exportMp4(const Project &project, const QString &path,
                std::function<void(int)> progress = {}, QString *error = nullptr,
                std::function<bool()> canceled = {},
-               std::function<void(const QString &)> diagnostic = {}, bool softwareOnly = false);
+               std::function<void(const QString &)> diagnostic = {}, bool softwareOnly = false,
+               bool optimizeForIphone = false);
 
 // Used when adding a clip or audio file to display its available duration.
 double mediaDurationSeconds(const QString &path, QString *error = nullptr);

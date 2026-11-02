@@ -43,6 +43,25 @@ private slots:
         auto asset=assets[0].toObject(); asset["digest"]=QJsonValue(); assets[0]=asset; object["assets"]=assets;
         QVERIFY(releaseUpdatePackage(object,"macos-arm64",&error).url.isEmpty()); QVERIFY(!error.isEmpty());
     }
+    void parsesArchiveListingLineEndings_data() {
+        QTest::addColumn<QByteArray>("listing"); QTest::addColumn<QStringList>("entries");
+        const QStringList windowsEntries{"IsaacVideoEditor/", "IsaacVideoEditor/IsaacVideoEditor.exe"};
+        QTest::newRow("LF")<<QByteArray("IsaacVideoEditor/\nIsaacVideoEditor/IsaacVideoEditor.exe\n")<<windowsEntries;
+        QTest::newRow("CRLF")<<QByteArray("IsaacVideoEditor/\r\nIsaacVideoEditor/IsaacVideoEditor.exe\r\n")<<windowsEntries;
+        QTest::newRow("mixed endings")<<QByteArray("IsaacVideoEditor/\r\nIsaacVideoEditor/IsaacVideoEditor.exe\n")<<windowsEntries;
+        QTest::newRow("no final newline")<<QByteArray("IsaacVideoEditor/\r\nIsaacVideoEditor/IsaacVideoEditor.exe")<<windowsEntries;
+        QTest::newRow("blank lines")<<QByteArray("\r\n\n")<<QStringList{};
+        QTest::newRow("embedded carriage return")<<QByteArray("IsaacVideoEditor/bad\rname.dll\r\n")
+            <<QStringList{"IsaacVideoEditor/bad\rname.dll"};
+        QTest::newRow("extra carriage return")<<QByteArray("IsaacVideoEditor/bad.dll\r\r\n")
+            <<QStringList{"IsaacVideoEditor/bad.dll\r"};
+        QTest::newRow("preserve whitespace")<<QByteArray("IsaacVideoEditor/ spaced name.dll \r\n")
+            <<QStringList{"IsaacVideoEditor/ spaced name.dll "};
+    }
+    void parsesArchiveListingLineEndings() {
+        QFETCH(QByteArray,listing); QFETCH(QStringList,entries);
+        QCOMPARE(updateArchiveEntries(listing),entries);
+    }
     void rejectsUnsafeArchivePaths_data() {
         QTest::addColumn<QString>("entry"); QTest::addColumn<bool>("safe");
         QTest::newRow("normal")<<"IsaacVideoEditor.app/Contents/MacOS/IsaacVideoEditor"<<true;
@@ -52,6 +71,9 @@ private slots:
         QTest::newRow("absolute")<<"/IsaacVideoEditor.app/Contents"<<false;
         QTest::newRow("drive")<<"IsaacVideoEditor.app/C:/important"<<false;
         QTest::newRow("backslash")<<"IsaacVideoEditor.app/..\\important"<<false;
+        QTest::newRow("embedded carriage return")<<"IsaacVideoEditor.app/bad\rname"<<false;
+        QTest::newRow("trailing carriage return")<<"IsaacVideoEditor.app/bad\r"<<false;
+        QTest::newRow("embedded newline")<<"IsaacVideoEditor.app/bad\nname"<<false;
         QTest::newRow("unexpected root")<<"other.app/Contents"<<false;
     }
     void rejectsUnsafeArchivePaths() {

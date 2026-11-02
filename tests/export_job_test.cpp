@@ -20,6 +20,22 @@ class ExportJobTest : public QObject {
     Project sample() const {Project p;p.clips={{QDir::current().filePath("tests/fixtures/seek.mp4"),0,2}};return p;}
     QByteArray contents(const QString &path){QFile f(path);return f.open(QIODevice::ReadOnly)?f.readAll():QByteArray{};}
 private slots:
+    void iphoneModeSurvivesHardwareFallback_data() {
+        QTest::addColumn<QByteArray>("mode");
+        QTest::newRow("normal-worker")<<QByteArray{};
+        QTest::newRow("NVIDIA-crash")<<QByteArray("crash-nvenc");
+    }
+    void iphoneModeSurvivesHardwareFallback() {
+        QFETCH(QByteArray,mode);const auto previous=qgetenv("ISAAC_TEST_EXPORT_MODE");
+        qputenv("ISAAC_TEST_EXPORT_MODE",mode);const auto restore=qScopeGuard([&]{qputenv("ISAAC_TEST_EXPORT_MODE",previous);});
+        auto p=sample();p.clips[0].outSeconds=.1;p.canvasWidth=2880;p.canvasHeight=3840;
+        QTemporaryDir dir;ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;
+        const auto output=dir.filePath("phone.mp4");QVERIFY2(job.start(p,output,&error,true),qPrintable(error));
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,15000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));
+        const auto info=Media::mediaInfo(output);QVERIFY(info);QCOMPARE(info->width,2160);QCOMPARE(info->height,2880);
+        QVERIFY(contents(job.logPath()).contains("mode=iPhone"));
+        if(!mode.isEmpty())QVERIFY(contents(job.logPath()).contains("Retrying with software"));
+    }
     void actualWorkerExportsAndLogsEncoder() {
         QTemporaryDir dir;ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QSignalSpy progress(&job,&ExportJob::progressChanged);QString error;
         QVERIFY2(job.start(sample(),dir.filePath("video.mp4"),&error),qPrintable(error));

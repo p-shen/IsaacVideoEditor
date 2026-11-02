@@ -15,7 +15,7 @@ class ExportJob final : public QObject {
 public:
     explicit ExportJob(const QString &program, QObject *parent=nullptr);
     ~ExportJob() override;
-    bool start(const Project &snapshot, const QString &destination, QString *error=nullptr);
+    bool start(const Project &snapshot, const QString &destination, QString *error=nullptr, bool optimizeForIphone=false);
     void cancel();
     void stopAndWait();
     QString logPath() const { return log_.fileName(); }
@@ -38,4 +38,5 @@ private:
     QByteArray output_;
     bool running_=false, canceled_=false, hardware_=false, retried_=false, probeTimedOut_=false;
     bool resultReceived_=false, resultSuccess_=false, protocolFailed_=false;
+    bool optimizeForIphone_=false;
 };

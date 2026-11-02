@@ -18,6 +18,7 @@
 #include <QScopeGuard>
 #include <QStyleHints>
 #include <QTimer>
+#include <QTemporaryDir>
 #include <QAccessible>
 #include <QSignalSpy>
 #include <QtTest>
@@ -35,6 +36,68 @@ class QmlShellTest : public QObject {
     }
 private slots:
     void initTestCase() { qputenv("SDL_AUDIODRIVER","dummy"); Media::initializeMlt(); QQuickStyle::setStyle("Basic"); applyAppTheme(*qobject_cast<QApplication*>(qApp)); registerEditorQmlTypes(); }
+    void exportDetailsStayOptionalAndReachableWithLargeText() {
+        QTemporaryDir directory; EditorController editor; QQmlApplicationEngine engine;
+        QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        auto *window=load(engine,editor); QVERIFY(window);
+        QStringList clips; for(int i=0;i<60;++i)clips.append(fixture()); QVERIFY(editor.importFiles(clips));
+        const auto folder=directory.filePath(QString("Long export folder ").repeated(5)); QVERIFY(QDir().mkpath(folder));
+        const auto output=folder+"/My finished video.mp4"; QVERIFY(editor.exportTo(output));
+        auto *panel=window->findChild<QObject*>("exportPanel"); QVERIFY(panel);
+        auto *details=window->findChild<QQuickItem*>("exportDetails"); QVERIFY(details);
+        auto *toggle=window->findChild<QQuickItem*>("exportDetailsToggle"); QVERIFY(toggle);
+        auto *path=window->findChild<QQuickItem*>("exportFullPath"); QVERIFY(path);
+        auto *filename=window->findChild<QQuickItem*>("exportFileName"); QVERIFY(filename);
+        auto *cancel=window->findChild<QQuickItem*>("cancelExportButton"); QVERIFY(cancel);
+        auto *retry=window->findChild<QQuickItem*>("retryExportButton"); QVERIFY(retry);
+        auto *play=window->findChild<QQuickItem*>("openExportButton"); QVERIFY(play);
+        QVERIFY(!details->property("expanded").toBool()); QVERIFY(!path->isVisible());
+        QCOMPARE(filename->property("text").toString(),QString("My finished video.mp4"));
+        QVERIFY(cancel->isVisible()); QVERIFY(!retry->isVisible()); QVERIFY(!play->isVisible());
+        const auto captures=qEnvironmentVariable("ISAAC_EXPORT_SCREENSHOTS");
+        const auto capture=[&](const QString &name){
+            if(captures.isEmpty())return true;
+            QDir().mkpath(captures); QTest::qWait(60);
+            return window->grabWindow().save(captures+"/"+name+".png");
+        };
+        for(bool dark:{true,false}){
+            setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+            QVERIFY(capture(dark?"exporting-dark":"exporting-light"));
+        }
+        toggle->forceActiveFocus(); QTest::keyClick(window,Qt::Key_Space);
+        QTRY_VERIFY(path->isVisible()); QCOMPARE(path->property("text").toString(),output);
+        window->resize(760,560); auto font=qApp->font(); font.setPointSize(24); window->setProperty("font",font);
+        QTest::qWait(80);
+        QVERIFY(panel->property("height").toReal()<=window->height()-40);
+        auto *log=window->findChild<QQuickItem*>("exportDetailsLogButton"); QVERIFY(log);
+        auto *scroll=window->findChild<QQuickItem*>("exportDetailsScroll"); QVERIFY(scroll);
+        log->forceActiveFocus(); QTest::qWait(60);
+        const auto logBounds=log->mapRectToScene(log->boundingRect());
+        const auto scrollBounds=scroll->mapRectToScene(scroll->boundingRect());
+        QVERIFY(logBounds.top()>=scrollBounds.top()); QVERIFY(logBounds.bottom()<=scrollBounds.bottom());
+        QVERIFY(capture("export-large-details"));
+        toggle->forceActiveFocus(); QTest::keyClick(window,Qt::Key_Space);
+        QTRY_VERIFY(!path->isVisible());
+        cancel->forceActiveFocus(); QTest::qWait(60);
+        const auto bounds=cancel->mapRectToScene(cancel->boundingRect());
+        QVERIFY(bounds.top()>=0); QVERIFY(bounds.bottom()<=window->height());
+        QVERIFY(bounds.left()>=0); QVERIFY(bounds.right()<=window->width());
+        QVERIFY(capture("export-large-text"));
+        QTest::keyClick(window,Qt::Key_Space);
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.exporting(),10000);
+        QCOMPARE(editor.exportState(),QString("Canceled"));
+        QVERIFY(!cancel->isVisible()); QVERIFY(retry->isVisible()); QVERIFY(!play->isVisible());
+        QVERIFY(capture("export-canceled"));
+        window->setProperty("font",qApp->font()); window->resize(1320,860);
+        Project shortEdit; shortEdit.clips.append({fixture(),0,2});
+        const auto projectPath=directory.filePath("short.isaac.json");
+        QVERIFY(saveProject(shortEdit,projectPath)); QVERIFY(editor.loadFrom(projectPath));
+        QVERIFY(editor.exportTo(output)); QTRY_VERIFY_WITH_TIMEOUT(!editor.exporting(),20000);
+        QCOMPARE(editor.exportState(),QString("Completed"));
+        QVERIFY(play->isVisible()); QVERIFY(!retry->isVisible()); QVERIFY(!cancel->isVisible());
+        QVERIFY(capture("export-completed"));
+        QCOMPARE(warnings.count(),0);
+    }
     void visualOverlayTracksAndActionsAreRemoved() {
         EditorController editor;QQmlApplicationEngine engine;QSignalSpy warnings(&engine,&QQmlEngine::warnings);
         auto *window=load(engine,editor);QVERIFY(window);QVERIFY(editor.importFiles({fixture()}));

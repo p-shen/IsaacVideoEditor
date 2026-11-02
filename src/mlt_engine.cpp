@@ -12,8 +12,12 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QScopeGuard>
+#include <QSize>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QtMath>
@@ -278,6 +282,16 @@ std::optional<VideoSize> projectOutputSize(const Project &project, QString *erro
     return result;
 }
 
+std::optional<VideoSize> mp4OutputSize(const Project &project, bool optimizeForIphone, QString *error) {
+    auto result=projectOutputSize(project,error);
+    if(!result || !optimizeForIphone)return result;
+    QSize size(result->width,result->height);
+    const QSize bounds=size.width()>=size.height()?QSize(3840,2160):QSize(2160,3840);
+    if(size.width()>bounds.width() || size.height()>bounds.height())
+        size.scale(bounds,Qt::KeepAspectRatio);
+    return VideoSize{std::max(2,size.width()/2*2),std::max(2,size.height()/2*2)};
+}
+
 std::unique_ptr<Mlt::Tractor> buildTimeline(const Project &project,
                                             Mlt::Profile &profile,
                                             QString *error, bool allowOffline, Mlt::Tractor *previousTimeline) {
@@ -431,18 +445,28 @@ ExportResources exportResources(const Project &project, const VideoSize &size,
     result.queueBytes=quint64(result.buffer)*frameBytes;
     return result;
 }
-void configureMp4Consumer(Mlt::Consumer &consumer, const QString &encoder, const VideoSize &size) {
+void configureMp4Consumer(Mlt::Consumer &consumer, const QString &encoder, const VideoSize &size, bool optimizeForIphone) {
     consumer.set("f","mp4");consumer.set("vcodec",encoder.toLatin1().constData());
     consumer.set("acodec","aac");consumer.set("pix_fmt","yuv420p");consumer.set("movflags","+faststart");
+    qint64 maximumBitrate=150000000;
+    if(optimizeForIphone) {
+        const qint64 macroblocks=qint64((size.width+15)/16)*((size.height+15)/16);
+        const bool hd=macroblocks<=8704 && macroblocks*Project::fps<=522240;
+        consumer.set("vprofile","high");consumer.set("vlevel",hd?"4.2":"5.2");
+        // Bound VBR peaks as well as the average: unconstrained NVENC can exceed device limits.
+        maximumBitrate=hd?16000000:40000000;
+        consumer.set("vmaxrate",static_cast<std::int64_t>(maximumBitrate));
+        consumer.set("vbufsize",static_cast<std::int64_t>(maximumBitrate*2));
+    }
     if(isHardwareH264Encoder(encoder)) {
-        const qint64 bitrate=std::clamp(qint64(size.width)*size.height*Project::fps*75/1000,qint64(2000000),qint64(150000000));
+        const qint64 bitrate=std::clamp(qint64(size.width)*size.height*Project::fps*75/1000,qint64(2000000),maximumBitrate);
         consumer.set("vb",static_cast<std::int64_t>(bitrate));consumer.set("color_range","tv");
         if(encoder==QLatin1String("h264_videotoolbox"))consumer.set("allow_sw",0);
         else {consumer.set("preset","p4");consumer.set("rc","vbr");consumer.set("cq",20);}
     } else {consumer.set("preset","veryfast");consumer.set("crf",20);}
 }
 bool completeMp4(Mlt::Profile &profile, const QString &path, int frames,
-                  const VideoSize &size, bool hardware) {
+                  const VideoSize &size, bool hardware, bool optimizeForIphone) {
     auto check=openMedia(profile,path,nullptr);
     const int videoIndex=check?check->get_int("video_index"):-1;
     const QByteArray prefix=QString("meta.media.%1.codec.").arg(videoIndex).toLatin1();
@@ -454,18 +478,23 @@ bool completeMp4(Mlt::Profile &profile, const QString &path, int frames,
     if(inspector.isEmpty())inspector=QStandardPaths::findExecutable("ffprobe",{"/opt/homebrew/bin","/usr/local/bin"});
     if(inspector.isEmpty())return false;
     QProcess inspect;
-    inspect.start(inspector,{"-v","error","-select_streams","v:0","-show_entries","stream=nb_frames","-of","csv=p=0",path});
+    inspect.start(inspector,{"-v","error","-select_streams","v:0","-show_entries","stream=nb_frames,level,pix_fmt","-of","json",path});
     if(!inspect.waitForFinished(5000)) {
         inspect.kill();inspect.waitForFinished(1000);return false;
     }
-    bool valid=false;const auto count=inspect.readAllStandardOutput().trimmed().toLongLong(&valid);
-    return inspect.exitStatus()==QProcess::NormalExit && inspect.exitCode()==0 && valid && count==frames;
+    const auto streams=QJsonDocument::fromJson(inspect.readAllStandardOutput()).object()["streams"].toArray();
+    if(streams.size()!=1)return false;
+    const auto video=streams.first().toObject();bool valid=false;
+    const auto count=video["nb_frames"].toString().toLongLong(&valid);
+    return inspect.exitStatus()==QProcess::NormalExit && inspect.exitCode()==0 && valid && count==frames &&
+        (!optimizeForIphone || (video["level"].toInt()>0 && video["level"].toInt()<=52)) &&
+        video["pix_fmt"].toString()==QLatin1String("yuv420p");
 }
 }
 
 bool exportMp4(const Project &project, const QString &path,
                std::function<void(int)> progress, QString *error, std::function<bool()> canceled,
-               std::function<void(const QString &)> diagnostic, bool softwareOnly) {
+                std::function<void(const QString &)> diagnostic, bool softwareOnly, bool optimizeForIphone) {
     if (error) error->clear();
     const auto wasCanceled=[&]{if(canceled&&canceled()){if(error)*error="Export canceled.";return true;}return false;};
     if(wasCanceled())return false;
@@ -492,7 +521,7 @@ bool exportMp4(const Project &project, const QString &path,
         }
     }
     initializeMlt();
-    const auto size = projectOutputSize(project, error);
+    const auto size = mp4OutputSize(project, optimizeForIphone, error);
     if (!size) return false;
     Mlt::Profile profile;
     configureOutputProfile(profile, size->width, size->height);
@@ -523,7 +552,9 @@ bool exportMp4(const Project &project, const QString &path,
         if(!timeline || wasCanceled())return false;
         Mlt::Consumer consumer(profile,"avformat",encodedPath.constData());
         if(!consumer.is_valid()){if(error)*error="MP4 exporter is unavailable.";return false;}
-        configureMp4Consumer(consumer,encoder,*size);
+        configureMp4Consumer(consumer,encoder,*size,optimizeForIphone);
+        if(diagnostic)diagnostic(QString("Output: %1x%2 at %3 fps; mode=%4").arg(size->width).arg(size->height).arg(Project::fps)
+            .arg(optimizeForIphone?"iPhone":"native"));
         consumer.set("real_time",-settings.workers);consumer.set("buffer",settings.buffer);consumer.set("prefill",1);
         if(consumer.connect(*timeline)!=0 || consumer.start()!=0) {
             if(error)*error="Could not start MP4 export.";return false;
@@ -541,7 +572,7 @@ bool exportMp4(const Project &project, const QString &path,
         consumer.stop();if(wasCanceled())return false;
         const auto compositionError=VisualRendering::renderError(*timeline);
         if(!compositionError.isEmpty()){if(error)*error=compositionError;return false;}
-        if(consumer.get_int("error") || !completeMp4(profile,temporaryPath,total,*size,isHardwareH264Encoder(encoder))) {
+        if(consumer.get_int("error") || !completeMp4(profile,temporaryPath,total,*size,isHardwareH264Encoder(encoder),optimizeForIphone)) {
             if(error)*error="MP4 export failed. Check the source files and free disk space.";return false;
         }
         if(diagnostic) {
@@ -565,7 +596,7 @@ bool exportMp4(const Project &project, const QString &path,
         const auto probeEncoded=QFile::encodeName(probePath);
         Mlt::Consumer consumer(profile,"avformat",probeEncoded.constData());
         if(!color.is_valid() || !consumer.is_valid())return false;
-        configureMp4Consumer(consumer,encoder,*size);
+        configureMp4Consumer(consumer,encoder,*size,optimizeForIphone);
         consumer.set("an",1);consumer.set("audio_off",1);consumer.set("real_time",-1);consumer.set("buffer",1);consumer.set("prefill",1);
         if(consumer.connect(color)!=0 || consumer.start()!=0)return false;
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
@@ -574,7 +605,7 @@ bool exportMp4(const Project &project, const QString &path,
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         const bool completed=consumer.is_stopped();consumer.stop();
-        return completed && !wasCanceled() && !consumer.get_int("error") && completeMp4(profile,probePath,probeFrames,*size,true);
+        return completed && !wasCanceled() && !consumer.get_int("error") && completeMp4(profile,probePath,probeFrames,*size,true,optimizeForIphone);
     };
     bool rendered=false;
     const auto hardware=hardwareH264Encoder();

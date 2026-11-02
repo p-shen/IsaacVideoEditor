@@ -43,6 +43,10 @@ UpdatePackage releaseUpdatePackage(const QJsonObject &release, const QString &pl
     return {};
 }
 
+QStringList updateArchiveEntries(const QByteArray &listing) {
+    return QString::fromUtf8(listing).replace("\r\n", "\n").split('\n', Qt::SkipEmptyParts);
+}
+
 bool safeUpdateArchiveEntry(const QString &entry, const QString &root) {
     if (entry.isEmpty() || entry.contains('\\') || entry.contains(':') || entry.contains(QChar::Null) ||
         entry.contains('\r') || entry.contains('\n')) return false;

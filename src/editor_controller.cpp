@@ -748,10 +748,10 @@ void EditorController::rebuild() {
     if(position_!=settledPosition){position_=settledPosition;emit positionChanged();}
     mediaCache_->setInteractive(false);
 }
-void EditorController::exportDialog() {
+void EditorController::exportDialog(bool optimizeForIphone) {
     if(exporting()||project_.clips.isEmpty()) return;
-    auto p=QFileDialog::getSaveFileName(nullptr,"Export MP4 · "+format_,moviesDirectory(),"MP4 video (*.mp4)");
-    if(p.isEmpty()) return; if(!p.endsWith(".mp4",Qt::CaseInsensitive)) p+=".mp4"; exportTo(p);
+    auto p=QFileDialog::getSaveFileName(nullptr,"Export MP4 · "+exportFormat(optimizeForIphone),moviesDirectory(),"MP4 video (*.mp4)");
+    if(p.isEmpty()) return; if(!p.endsWith(".mp4",Qt::CaseInsensitive)) p+=".mp4"; exportTo(p,optimizeForIphone);
 }
 
 void EditorController::attachTimeline(QObject *object) {

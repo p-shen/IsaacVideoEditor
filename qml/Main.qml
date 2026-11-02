@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.impl as Impl
 import QtQuick.Layouts
 import "." as UI
 import Isaac 1.0
@@ -99,7 +100,7 @@ ApplicationWindow {
     Action { id: saveAction; text: "Save"; shortcut: StandardKey.Save; onTriggered: editor.save() }
     Action { id: saveAsAction; text: "Save As…"; shortcut: StandardKey.SaveAs; onTriggered: editor.saveAs() }
     Action { id: importAction; text: "Import"; shortcut: "Ctrl+I"; onTriggered: editor.importDialog() }
-    Action { id: exportAction; text: "Export…"; shortcut: "Ctrl+E"; enabled: !editor.exporting && editor.duration > 0; onTriggered: editor.exportDialog() }
+    Action { id: exportAction; text: "Export…"; shortcut: "Ctrl+E"; enabled: !editor.exporting && editor.duration > 0; onTriggered: exportOptionsDialog.open() }
     Action { id: undoAction; text: editor.undoText ? "Undo " + editor.undoText : "Undo"; shortcut: StandardKey.Undo; enabled: editor.canUndo && !window.textEditing; onTriggered: editor.undo() }
     Action { id: redoAction; text: editor.redoText ? "Redo " + editor.redoText : "Redo"; shortcut: StandardKey.Redo; enabled: editor.canRedo && !window.textEditing; onTriggered: editor.redo() }
     Action { id: splitAction; text: "Split"; shortcut: "Ctrl+B"; enabled: editor.canSplit && !window.textEditing; onTriggered: editor.split() }
@@ -637,30 +638,134 @@ ApplicationWindow {
         }
         onAccepted: editor.selectRange(rangeFirst.value - 1,rangeLast.value - 1)
     }
+    Dialog {
+        id: exportOptionsDialog
+        objectName: "exportOptionsDialog"
+        title: "Export video"
+        anchors.centerIn: parent
+        modal: true
+        width: Math.min(window.width - 40,480)
+        onOpened: iphoneExportCheck.checked = false
+        contentItem: ColumnLayout {
+            spacing: 12
+            Label { text: "Keep native resolution, or create a copy optimized for iPhone Photos."; Layout.fillWidth: true; wrapMode: Text.Wrap }
+            CheckBox {
+                id: iphoneExportCheck
+                objectName: "iphoneExportCheckBox"
+                text: "Optimize for iPhone"
+                Accessible.description: "May reduce large video dimensions to fit 4K. Keeps the aspect ratio and 60 frames per second."
+            }
+            Label {
+                objectName: "exportResolutionLabel"
+                text: exportOptionsDialog.visible ? editor.exportFormat(iphoneExportCheck.checked) : ""
+                Layout.fillWidth: true; wrapMode: Text.Wrap
+            }
+            Label {
+                text: iphoneExportCheck.checked ? "Large video is scaled down to fit 4K for compatibility with Photos. Your project stays at its original resolution." : "Exports at your native canvas resolution."
+                Layout.fillWidth: true; wrapMode: Text.Wrap
+            }
+        }
+        footer: DialogButtonBox {
+            UI.Button { text: "Cancel"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+            UI.Button { text: "Choose file…"; highlighted: true; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+        }
+        onAccepted: editor.exportDialog(iphoneExportCheck.checked)
+    }
     Popup {
         id: exportPanel
         objectName: "exportPanel"
+        readonly property bool completed: editor.exportState === "Completed"
+        readonly property bool retryable: editor.exportState === "Failed" || editor.exportState === "Canceled"
         anchors.centerIn: parent
         modal: false; dim: false
         closePolicy: Popup.CloseOnEscape
         width: Math.min(window.width - 40,520)
-        ColumnLayout {
-            width: parent.width
-            Label { text: "MP4 · " + editor.exportState; font.weight: Font.DemiBold }
-            Label { text: editor.exportDestination; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
-            Label { text: editor.exportDetails; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            Label { text: editor.exportRevision; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            Label { text: "You can keep editing. This export uses the revision shown above."; visible: editor.exporting; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            ProgressBar { from: 0; to: 100; value: editor.exportProgress; Layout.fillWidth: true }
-            Label { text: editor.exportProgress + "%" }
+        height: Math.min(implicitHeight,window.height - 40)
+        padding: 16
+        background: Rectangle { color: UI.Theme.panel; radius: UI.Theme.panelRadius; border.color: UI.Theme.border }
+        contentItem: ColumnLayout {
+            spacing: 14
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                Impl.IconImage {
+                    source: Qt.resolvedUrl("icons/" + (exportPanel.completed ? "check" : exportPanel.retryable ? "close" : "export") + ".svg")
+                    sourceSize.width: width; sourceSize.height: height
+                    Layout.preferredWidth: 28; Layout.preferredHeight: 28
+                    color: UI.Theme.accent
+                    Accessible.ignored: true
+                }
+                Label {
+                    text: exportPanel.completed ? "Video ready" : editor.exportState === "Failed" ? "Export failed" : editor.exportState === "Canceled" ? "Export canceled" : editor.exportState === "Canceling" ? "Canceling…" : "Exporting video"
+                    font.weight: Font.DemiBold
+                    font.pixelSize: window.font.pixelSize * 1.15
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    Accessible.role: Accessible.AlertMessage
+                }
+                UI.Button {
+                    text: "Dismiss export progress"; iconName: "close"; iconOnly: true; flat: true
+                    helpText: editor.exporting ? "Hide progress and keep editing" : "Close"
+                    onClicked: exportPanel.close()
+                }
+            }
+            Label {
+                objectName: "exportFileName"
+                text: editor.exportDestination.replace(/^.*[\\/]/, "")
+                textFormat: Text.PlainText
+                Layout.fillWidth: true
+                elide: Text.ElideMiddle
+                HoverHandler { id: exportFileHover }
+                ToolTip.visible: exportFileHover.hovered
+                ToolTip.text: editor.exportDestination
+                Accessible.description: editor.exportDestination
+            }
+            RowLayout {
+                visible: editor.exporting
+                Layout.fillWidth: true
+                spacing: 12
+                ProgressBar {
+                    from: 0; to: 100; value: editor.exportProgress
+                    indeterminate: editor.exportState === "Canceling"
+                    Layout.fillWidth: true
+                    Accessible.name: "Export progress"
+                }
+                Label { text: editor.exportProgress + "%"; visible: editor.exportState !== "Canceling" }
+            }
+            ScrollView {
+                id: exportScroll
+                objectName: "exportDetailsScroll"
+                implicitHeight: exportDetails.implicitHeight
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumHeight: 0
+                contentWidth: availableWidth
+                clip: true
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                UI.InspectorDetails {
+                    id: exportDetails
+                    objectName: "exportDetails"
+                    width: exportScroll.availableWidth
+                    title: "Details"
+                    Label { text: "MP4 · " + editor.exportDetails; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { text: editor.exportRevision; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                    Label { objectName: "exportFullPath"; text: editor.exportDestination; textFormat: Text.PlainText; Layout.fillWidth: true; wrapMode: Text.WrapAnywhere }
+                    UI.Button {
+                        objectName: "exportDetailsLogButton"
+                        text: "View log"; iconName: "external-link"
+                        visible: editor.exportLog !== "" && editor.exportState !== "Failed"
+                        onClicked: editor.openExportLog()
+                    }
+                }
+            }
             Flow {
-                Layout.fillWidth: true; spacing: 6
-                UI.Button { text: "Cancel export"; visible: editor.exporting; enabled: editor.exportState !== "Canceling"; onClicked: editor.cancelExport() }
-                UI.Button { text: "Retry same revision"; visible: editor.exportState === "Failed" || editor.exportState === "Canceled"; onClicked: editor.retryExport() }
-                UI.Button { text: "Reveal in folder"; visible: editor.exportState === "Completed"; onClicked: editor.revealExport() }
-                UI.Button { text: "Open export log"; visible: editor.exportLog !== ""; onClicked: editor.openExportLog() }
-                UI.Button { text: "Open video"; visible: editor.exportState === "Completed"; onClicked: editor.openExport() }
-                UI.Button { text: editor.exporting ? "Keep editing" : "Close"; onClicked: exportPanel.close() }
+                Layout.fillWidth: true; spacing: 8
+                UI.Button { text: "Keep editing"; iconName: "edit"; visible: editor.exporting; highlighted: true; helpText: "Keep editing; this export uses the revision captured when it started"; onClicked: exportPanel.close() }
+                UI.Button { objectName: "openExportButton"; text: "Play video"; iconName: "play"; visible: exportPanel.completed; highlighted: true; onClicked: editor.openExport() }
+                UI.Button { objectName: "retryExportButton"; text: "Retry"; iconName: "reset"; visible: exportPanel.retryable; highlighted: true; helpText: "Retry the revision captured for this export"; onClicked: editor.retryExport() }
+                UI.Button { objectName: "cancelExportButton"; text: "Cancel"; iconName: "close"; visible: editor.exporting; enabled: editor.exportState !== "Canceling"; helpText: "Cancel export"; onClicked: editor.cancelExport() }
+                UI.Button { text: "Show in folder"; iconName: "folder"; iconOnly: true; visible: exportPanel.completed; onClicked: editor.revealExport() }
+                UI.Button { text: "View log"; iconName: "external-link"; visible: editor.exportState === "Failed" && editor.exportLog !== ""; onClicked: editor.openExportLog() }
             }
         }
     }

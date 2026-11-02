@@ -293,8 +293,9 @@ public:
     Q_INVOKABLE void newProject();
     Q_INVOKABLE void openProject();
     Q_INVOKABLE void importDialog();
-    Q_INVOKABLE void exportDialog();
-    Q_INVOKABLE bool exportTo(const QString &path);
+    Q_INVOKABLE void exportDialog(bool optimizeForIphone=false);
+    Q_INVOKABLE bool exportTo(const QString &path,bool optimizeForIphone=false);
+    Q_INVOKABLE QString exportFormat(bool optimizeForIphone=false) const;
     Q_INVOKABLE bool requestClose();
     Q_INVOKABLE void chooseVoice();
     Q_INVOKABLE void chooseMusic();
@@ -381,7 +382,8 @@ private:
     QVariantList recoveryCandidates_,relinkProposals_;
     QString exportState_,exportDestination_,exportRevision_,exportDetails_,exportLog_;
     std::optional<Project> retryExportProject_;
-    bool startExport(const Project &,const QString &,const QString &revision);
+    bool retryExportForIphone_=false;
+    bool startExport(const Project &,const QString &,const QString &revision,bool optimizeForIphone);
     QImage frame_;
     int exportProgress_=0,scrubPosition_=0;
     bool scrubbing_=false,skim_=false,resumeAfterScrub_=false,resumeWhenSettled_=false,loading_=false,proxyPending_=false;

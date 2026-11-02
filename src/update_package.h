@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 struct UpdatePackage {
@@ -14,4 +15,5 @@ struct UpdatePackage {
 
 QString updatePlatform();
 UpdatePackage releaseUpdatePackage(const QJsonObject &release, const QString &platform, QString *error);
+QStringList updateArchiveEntries(const QByteArray &listing);
 bool safeUpdateArchiveEntry(const QString &entry, const QString &root);

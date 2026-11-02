@@ -129,22 +129,27 @@ bool EditorController::requestClose(){
     }
     if(!maybeSave())return false;if(recovery_)recovery_->clear();return true;
 }
-bool EditorController::exportTo(const QString &path){
+QString EditorController::exportFormat(bool optimizeForIphone) const {
+    const auto size=Media::mp4OutputSize(project_,optimizeForIphone);
+    return size?QString("%1×%2 · 60 fps · H.264 / AAC").arg(size->width).arg(size->height):QString{};
+}
+bool EditorController::exportTo(const QString &path,bool optimizeForIphone){
     if(visualBefore_)endVisualGesture(false);
     if(audioPreview_)endAudioGesture(false);
     if(textDragBefore_)endTextDrag(false);
-    return startExport(project_,path,title()+(dirty()?" · unsaved revision":" · saved revision")+QString(" · %1 frames").arg(duration()));
+    return startExport(project_,path,title()+(dirty()?" · unsaved revision":" · saved revision")+QString(" · %1 frames").arg(duration()),optimizeForIphone);
 }
-bool EditorController::startExport(const Project &snapshot,const QString &path,const QString &revision){
+bool EditorController::startExport(const Project &snapshot,const QString &path,const QString &revision,bool optimizeForIphone){
     if(exporting()||snapshot.clips.isEmpty()||path.isEmpty())return false;
     const auto normalized=[](const QString &p){const QFileInfo f(p);return f.exists()?f.canonicalFilePath():f.absoluteFilePath();};
     const auto output=normalized(path);QStringList sources={snapshot.voicePath,snapshot.musicPath};for(const auto &c:snapshot.clips)sources.append(c.path);for(const auto &asset:snapshot.assets)sources.append(asset.path);
     for(const auto &overlay:snapshot.visualOverlays)sources.append(overlay.path);
     for(const auto &source:sources)if(!source.isEmpty()&&output.compare(normalized(source),Qt::CaseInsensitive)==0){report("Choose a different file from your source media.");return false;}
-    exportDestination_=QFileInfo(path).absoluteFilePath();exportRevision_=revision;retryExportProject_=snapshot;exportLog_.clear();
-    QString error=snapshot.validate();const auto size=error.isEmpty()?Media::projectOutputSize(snapshot,&error):std::nullopt;
+    exportDestination_=QFileInfo(path).absoluteFilePath();exportRevision_=revision;retryExportProject_=snapshot;retryExportForIphone_=optimizeForIphone;exportLog_.clear();
+    QString error=snapshot.validate();const auto size=error.isEmpty()?Media::mp4OutputSize(snapshot,optimizeForIphone,&error):std::nullopt;
     if(!size){exportState_="Failed";report(error);return false;}
     exportDetails_=QString("%1×%2 · 60 fps · H.264 / AAC · original media").arg(size->width).arg(size->height);
+    if(optimizeForIphone)exportDetails_+=" · optimized for iPhone";
     scrubbing_=skim_=resumeAfterScrub_=resumeWhenSettled_=false;preview_->pause();proxyCache_->setPaused(!performanceBudget_.prepareDuringExport);
     sourcePreview_->pause();mediaCache_->setInteractive(!performanceBudget_.prepareDuringExport);
     auto *job=new ExportJob(exportWorkerExecutable(),this);exportJob_=job;
@@ -166,7 +171,7 @@ bool EditorController::startExport(const Project &snapshot,const QString &path,c
         report(success?"Exported "+QFileInfo(path).fileName():canceled?"Export canceled. Existing output was preserved.":"Export failed: "+error);emit stateChanged();
     });
     exportProgress_=0;exportState_="Exporting";
-    if(!job->start(snapshot,path,&error)){
+    if(!job->start(snapshot,path,&error,optimizeForIphone)){
         exportJob_=nullptr;delete job;proxyCache_->setPaused(false);mediaCache_->setInteractive(playing()||scrubbing_||skim_);
         exportState_="Failed";report(error);emit stateChanged();return false;
     }
@@ -174,6 +179,6 @@ bool EditorController::startExport(const Project &snapshot,const QString &path,c
 }
 void EditorController::cancelExport(){if(exportJob_){exportState_="Canceling";exportJob_->cancel();emit stateChanged();}}
 void EditorController::openExportLog(){if(!exportLog_.isEmpty())QDesktopServices::openUrl(QUrl::fromLocalFile(exportLog_));}
-bool EditorController::retryExport(){return retryExportProject_&&startExport(*retryExportProject_,exportDestination_,exportRevision_);}
+bool EditorController::retryExport(){return retryExportProject_&&startExport(*retryExportProject_,exportDestination_,exportRevision_,retryExportForIphone_);}
 void EditorController::revealExport(){if(exportState_=="Completed")QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(exportDestination_).absolutePath()));}
 void EditorController::openExport(){if(exportState_=="Completed")QDesktopServices::openUrl(QUrl::fromLocalFile(exportDestination_));}

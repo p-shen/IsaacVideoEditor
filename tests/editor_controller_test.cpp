@@ -208,6 +208,23 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!preview->isSeeking(),2000);
         QVERIFY(!e.playing());
     }
+    void exportDetailsShowCompatibleDimensionsWithoutChangingCanvas_data() {
+        QTest::addColumn<bool>("optimize");QTest::addColumn<QString>("dimensions");
+        QTest::newRow("native-default")<<false<<QString("2880×3840 · 60 fps");
+        QTest::newRow("iPhone")<<true<<QString("2160×2880 · 60 fps");
+    }
+    void exportDetailsShowCompatibleDimensionsWithoutChangingCanvas() {
+        QFETCH(bool,optimize);QFETCH(QString,dimensions);
+        EditorController e;QVERIFY(e.importFiles({fixture()}));e.setCanvas(2880,3840);
+        QTemporaryDir dir;QVERIFY(e.exportTo(dir.filePath("phone.mp4"),optimize));
+        const auto details=e.exportDetails();
+        e.cancelExport();QTRY_VERIFY_WITH_TIMEOUT(!e.exporting(),10000);
+        QVERIFY2(details.startsWith(dimensions),qPrintable(details));
+        QCOMPARE(e.project().canvasWidth,2880);QCOMPARE(e.project().canvasHeight,3840);
+        e.setCanvas(160,90);QVERIFY(e.retryExport());const auto retriedDetails=e.exportDetails();
+        e.cancelExport();QTRY_VERIFY_WITH_TIMEOUT(!e.exporting(),10000);
+        QVERIFY2(retriedDetails.startsWith(dimensions),qPrintable(retriedDetails));
+    }
     void skimAndScrubKeepIndependentPosition() {
         EditorController e; QVERIFY(e.importFiles({fixture()}));
         e.seek(30); QCOMPARE(e.position(),30);

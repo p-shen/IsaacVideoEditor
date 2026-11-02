@@ -56,6 +56,8 @@ Volume, mute and music looping stay visible for the selected source. Open **Timi
 
 Choose **File → Export…** for H.264/AAC MP4 at 60 fps. Export reads the original media and uses your canvas settings. **Auto resolution** follows the smallest original video in the edit, including its camera orientation. You can keep editing while export finishes; it uses the revision captured when you started it.
 
+Native resolution is the default. Select **Optimize for iPhone** to fit large exports within 3840 × 2160 (or the portrait equivalent), preserving aspect ratio and 60 fps, with bounded H.264 level and bitrate for Photos compatibility. The export dialog shows the resulting dimensions before you choose a file. This option does not change your project canvas; retries keep the original export choice.
+
 ## Useful controls
 
 | Control | Action |

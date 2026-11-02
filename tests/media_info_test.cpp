@@ -29,6 +29,9 @@ private slots:
     void invalidatesChangedAndMissingSources();
     void rejectsEmptyAndNonVideoProjects();
     void exportUsesLowestResolution();
+    void exportKeepsH264WithinPhoneCompatibleBounds_data();
+    void exportKeepsH264WithinPhoneCompatibleBounds();
+    void nativeExportRetainsOversizedCanvas();
     void exportResourcesAreBoundedAndKeepEveryFrame_data();
     void exportResourcesAreBoundedAndKeepEveryFrame();
     void findsRecentAudioFiles();
@@ -229,6 +232,50 @@ void MediaInfoTest::exportUsesLowestResolution() {
     QCOMPARE(stream.value("height").toInt(), 1440);
     QCOMPARE(stream.value("r_frame_rate").toString(), QString("60/1"));
     QCOMPARE(stream.value("nb_frames").toString(), QString("12"));
+}
+
+void MediaInfoTest::exportKeepsH264WithinPhoneCompatibleBounds_data() {
+    QTest::addColumn<QSize>("canvas");
+    QTest::addColumn<QSize>("expected");
+    QTest::addColumn<int>("level");
+    QTest::newRow("reported-portrait") << QSize(2880,3840) << QSize(2160,2880) << 52;
+    QTest::newRow("large-landscape") << QSize(4800,2700) << QSize(3840,2160) << 52;
+    QTest::newRow("standard-portrait-4k") << QSize(2160,3840) << QSize(2160,3840) << 52;
+    QTest::newRow("square") << QSize(4320,4320) << QSize(2160,2160) << 52;
+    QTest::newRow("small-unchanged") << QSize(320,180) << QSize(320,180) << 42;
+}
+
+void MediaInfoTest::nativeExportRetainsOversizedCanvas() {
+    Project project;project.clips={{file("hd.mp4"),0,.1}};
+    project.canvasWidth=2880;project.canvasHeight=3840;
+    const auto output=file("native.mp4");QString error;
+    QVERIFY2(Media::exportMp4(project,output,{},&error,{}, {},true),qPrintable(error));
+    const auto info=Media::mediaInfo(output);QVERIFY(info);
+    QCOMPARE(info->width,2880);QCOMPARE(info->height,3840);
+}
+
+void MediaInfoTest::exportKeepsH264WithinPhoneCompatibleBounds() {
+    QFETCH(QSize,canvas);QFETCH(QSize,expected);QFETCH(int,level);
+    Project project;project.clips={{file("hd.mp4"),0,.1}};
+    project.canvasWidth=canvas.width();project.canvasHeight=canvas.height();
+    const auto output=file("phone-compatible.mp4");QString error;
+    QVERIFY2(Media::exportMp4(project,output,{},&error,{}, {},true,true),qPrintable(error));
+    const auto canvasAfter=Media::projectOutputSize(project);
+    QVERIFY(canvasAfter);QCOMPARE(QSize(canvasAfter->width,canvasAfter->height),canvas);
+    auto inspector=QStandardPaths::findExecutable("ffprobe");
+    if(inspector.isEmpty())inspector=QStandardPaths::findExecutable("ffprobe",{"/opt/homebrew/bin","/usr/local/bin"});
+    QVERIFY(!inspector.isEmpty());QProcess inspect;
+    inspect.start(inspector,{"-v","error","-select_streams","v:0","-show_entries",
+        "stream=width,height,r_frame_rate,nb_frames,profile,level,pix_fmt","-of","json",output});
+    QVERIFY(inspect.waitForFinished(15000));QCOMPARE(inspect.exitCode(),0);
+    const auto streams=QJsonDocument::fromJson(inspect.readAllStandardOutput()).object()["streams"].toArray();
+    QCOMPARE(streams.size(),1);const auto stream=streams.first().toObject();
+    QCOMPARE(QSize(stream["width"].toInt(),stream["height"].toInt()),expected);
+    QCOMPARE(stream["profile"].toString(),QString("High"));
+    QVERIFY(stream["level"].toInt()>0);QVERIFY(stream["level"].toInt()<=level);
+    QCOMPARE(stream["pix_fmt"].toString(),QString("yuv420p"));
+    QCOMPARE(stream["r_frame_rate"].toString(),QString("60/1"));
+    QCOMPARE(stream["nb_frames"].toString(),QString("6"));
 }
 
 void MediaInfoTest::exportResourcesAreBoundedAndKeepEveryFrame_data() {
