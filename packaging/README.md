@@ -8,7 +8,9 @@ bash packaging/package-linux.sh build-release dist v0.1.0
 bash packaging/package-windows.sh build-release dist v0.1.0
 ```
 
-Run only the command for the host platform. macOS uses Homebrew and `macdeployqt`; Linux uses Qt 6.8.3, MLT/FFmpeg packages, linuxdeploy and its Qt/AppImage plugins; Windows uses the MSYS2 UCRT64 toolchain and `windeployqt`. Exact dependency installation and pinned deployment tools are in [the workflow](../.github/workflows/release.yml).
+Run only the command for the host platform. macOS uses Homebrew and `macdeployqt`; Linux uses Qt 6.8.3, MLT/FFmpeg packages, linuxdeploy and its Qt/AppImage plugins; Windows uses the MSYS2 UCRT64 toolchain, `windeployqt`, and Inno Setup 6 (`ISCC.exe` on PATH or in its standard Program Files (x86) directory). Exact dependency installation and pinned deployment tools are in [the workflow](../.github/workflows/release.yml).
+
+Windows produces both the portable ZIP and `IsaacVideoEditor-VERSION-windows-x86_64-Setup.exe` from the same staged payload. `APP_VERSION` supplies the numeric application version when `VERSION` is a CI artifact label. Setup installs for the current user, adds a Start menu shortcut and an optional desktop shortcut, and registers an uninstaller. The portable ZIP remains the in-app update payload; installer metadata is outside its manifest and is preserved by the update helper. Inno's uninstaller removes the files recorded during setup, without recursively deleting user-added files.
 
 ## Runtime layout
 
@@ -34,5 +36,7 @@ python3 -m unittest discover -s packaging/tests -p 'test_*.py'
 ```
 
 The macOS dependency tests require macOS development tools. For Linux's official Qt SDK, `QT_LICENSE_DIR` points at notices collected from the matching Qt source version; the workflow provisions it. Runtime package inventories and license notices are retained inside the downloads.
+
+Windows CI also runs `tests/windows_installer_smoke_test.py SETUP_EXE PORTABLE_ZIP` to check install, reinstall, shortcut targets, the installed app, preservation of uninstaller files during an actual in-app update, and uninstallation without deleting a user-added project. This script refuses to run outside a disposable Windows GitHub Actions runner.
 
 See [publishing and validating releases](../docs/releases.md) for the user-facing process and signing limitations.

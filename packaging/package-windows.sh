@@ -77,3 +77,4 @@ PY
 [[ -s "$work/$name.zip" ]] || fail "ZIP creation failed"
 mv -- "$work/$name.zip" "$output_dir/$name.zip"
 echo "$output_dir/$name.zip"
+python3 "$repo/packaging/package-windows-installer.py" "$stage" "$output_dir" "$version" "${APP_VERSION:-$version}"

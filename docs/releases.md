@@ -4,6 +4,7 @@ The **Release downloads** GitHub Actions workflow builds self-contained download
 
 | Download | Target |
 | --- | --- |
+| `IsaacVideoEditor-VERSION-windows-x86_64-Setup.exe` | Windows x64 installer (recommended) |
 | `IsaacVideoEditor-VERSION-macos-arm64.zip` | Apple silicon Mac running macOS 15 or newer |
 | `IsaacVideoEditor-VERSION-linux-x86_64.AppImage` | Linux x64 with glibc 2.39 or newer, such as Ubuntu 24.04+ |
 | `IsaacVideoEditor-VERSION-windows-x86_64.zip` | Windows x64 |
@@ -42,6 +43,6 @@ Successful release runs remove their temporary CI artifacts after attaching the 
 
 - **macOS:** extract the ZIP and move `IsaacVideoEditor.app` to Applications. The initial package targets Apple silicon.
 - **Linux:** make the AppImage executable with `chmod +x IsaacVideoEditor-*-linux-x86_64.AppImage`, then open it. If FUSE is unavailable, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
-- **Windows:** extract the entire ZIP, open its `IsaacVideoEditor` folder, and launch `IsaacVideoEditor.exe`. Keep the included DLLs, plugins, and data folders beside it.
+- **Windows:** run the `-Setup.exe` download to install for your account without administrator access, then launch **IsaacVideoEditor** from Start or the optional desktop shortcut. Remove it through Windows Settings → Apps. In-app updates still use the portable ZIP automatically. Alternatively, extract the entire portable ZIP, open its `IsaacVideoEditor` folder, and launch `IsaacVideoEditor.exe`; keep the included DLLs, plugins, and data folders beside it.
 
 You do not need the development tools listed in [the build guide](building.md) to use these packages. Keep your original media files available when opening saved projects.

@@ -178,12 +178,18 @@ jobs:
           python -m zipfile -e dist/*.zip "$RUNNER_TEMP/package check"
           ISAAC_CLEAN_RUNTIME=1 python tests/package_smoke_test.py \
             "$RUNNER_TEMP/package check/IsaacVideoEditor/IsaacVideoEditor.exe"
+      - name: Check installed application
+        if: github.event.release.tag_name != '0.5'
+        shell: pwsh
+        run: python tests/windows_installer_smoke_test.py (Get-Item dist/*-Setup.exe).FullName (Get-Item dist/*.zip).FullName
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         if: success() || (failure() && hashFiles('dist/*.zip') != '')
         with:
           name: windows-download
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*-Setup.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -209,8 +215,8 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           cd dist
-          sha256sum ./*.zip ./*.AppImage > SHA256SUMS.txt
-          gh release upload "$RELEASE_TAG" ./*.zip ./*.AppImage SHA256SUMS.txt \
+          sha256sum ./*.zip ./*.AppImage ./*-Setup.exe > SHA256SUMS.txt
+          gh release upload "$RELEASE_TAG" ./*.zip ./*.AppImage ./*-Setup.exe SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --clobber
       - name: Remove temporary CI downloads
         env:
