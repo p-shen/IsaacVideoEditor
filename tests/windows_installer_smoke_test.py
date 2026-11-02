@@ -128,8 +128,12 @@ def main(installer, archive):
         with (app / 'isaac-package-files.txt').open('a', encoding='utf-8') as manifest:
             manifest.write('../outside/keep.mov\n/absolute.mov\nC:/outside.mov\nunsafe-junction/keep.mov\n')
         uninstaller = next(app.glob('unins*.exe'))
-        run(uninstaller, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
-        wait_for(lambda: not executable.exists())
+        run(uninstaller, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', f'/LOG={root / "uninstall.log"}')
+        try:
+            wait_for(lambda: not executable.exists() and not (app / added_file).exists() and not (app / added_file).parent.exists())
+        except RuntimeError:
+            print((root / 'uninstall.log').read_text(encoding='utf-8', errors='replace')[-12000:], flush=True)
+            raise
         require(not (app / added_file).exists(), 'Uninstall left a dependency introduced by an update')
         require(not (app / added_file).parent.exists(), 'Uninstall left an empty updated dependency directory')
         require(project.read_text() == 'preserve this project', 'Uninstall removed a user project')
