@@ -35,12 +35,14 @@ def main(installer, archive):
     installer, archive = Path(installer).resolve(), Path(archive).resolve()
     with tempfile.TemporaryDirectory(prefix='Isaac setup check ') as directory:
         root = Path(directory).resolve()
-        app = root / 'installed application'
+        app = Path(os.environ['LOCALAPPDATA']) / 'Programs/IsaacVideoEditor'
+        require(not app.exists(), 'The disposable runner already has an installation')
         log = root / 'setup.log'
 
-        def install():
+        def install(desktop=False):
+            tasks = ['/TASKS=desktopicon'] if desktop else []
             run(installer, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
-                '/TASKS=desktopicon', f'/DIR={app}', f'/LOG={log}')
+                *tasks, f'/LOG={log}')
 
         install()
         executable = app / 'IsaacVideoEditor.exe'
@@ -54,6 +56,11 @@ def main(installer, archive):
                 'Could not locate the desktop')
         shortcuts = [Path(os.environ['APPDATA']) / 'Microsoft/Windows/Start Menu/Programs/IsaacVideoEditor.lnk',
                      Path(desktop.value) / 'IsaacVideoEditor.lnk']
+        require(shortcuts[0].is_file(), 'Missing Start menu shortcut')
+        require(not shortcuts[1].exists(), 'Desktop shortcut should be optional and unchecked by default')
+        project = app / 'my project.isaac.json'
+        project.write_text('preserve this project')
+        install(desktop=True)
         for shortcut in shortcuts:
             require(shortcut.is_file(), f'Missing shortcut: {shortcut}')
             target = subprocess.check_output(['powershell.exe', '-NoProfile', '-Command',
@@ -61,9 +68,6 @@ def main(installer, archive):
                 env={**os.environ, 'ISAAC_SHORTCUT': str(shortcut)}, text=True, timeout=30).strip()
             require(Path(target).resolve() == executable, f'Incorrect shortcut target: {target}')
 
-        project = app / 'my project.isaac.json'
-        project.write_text('preserve this project')
-        install()
         require(project.read_text() == 'preserve this project', 'Reinstall changed a user project')
         uninstall_files = {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in app.glob('unins*') if file.is_file()}
         require(any(name.endswith('.exe') for name in uninstall_files), 'Missing uninstaller')
@@ -78,6 +82,11 @@ def main(installer, archive):
         with zipfile.ZipFile(archive) as source:
             source.extractall(prepared)
         (prepared / 'IsaacVideoEditor').rename(prepared / 'payload')
+        added_file = Path('future-runtime/new-runtime.dll')
+        (prepared / 'payload' / added_file).parent.mkdir()
+        (prepared / 'payload' / added_file).write_text('a dependency introduced by a future update')
+        with (prepared / 'payload/isaac-package-files.txt').open('a', encoding='utf-8') as manifest:
+            manifest.write(added_file.as_posix() + '\n')
         (prepared / 'ready').write_bytes(b'IsaacVideoEditor update 1\n')
         helper_dir = root / 'helper'
         helper_dir.mkdir()
@@ -104,9 +113,12 @@ def main(installer, archive):
             require(hashlib.sha256((app / name).read_bytes()).hexdigest() == digest,
                     f'Update changed installer metadata: {name}')
         require(project.read_text() == 'preserve this project', 'Update changed a user project')
+        require((app / added_file).is_file(), 'Update did not install the new dependency')
         uninstaller = next(app.glob('unins*.exe'))
         run(uninstaller, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
         wait_for(lambda: not executable.exists())
+        require(not (app / added_file).exists(), 'Uninstall left a dependency introduced by an update')
+        require(not (app / added_file).parent.exists(), 'Uninstall left an empty updated dependency directory')
         require(project.read_text() == 'preserve this project', 'Uninstall removed a user project')
         require(not any(shortcut.exists() for shortcut in shortcuts), 'Uninstall left application shortcuts')
         try:
@@ -114,6 +126,8 @@ def main(installer, archive):
                 raise RuntimeError('Uninstall left its Windows Settings registration')
         except FileNotFoundError:
             pass
+        project.unlink()
+        app.rmdir()
         print('Installer, shortcuts, reinstall, application smoke, in-app update and uninstall checks passed.')
 
 
