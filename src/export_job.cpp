@@ -60,7 +60,7 @@ void ExportJob::log(const QByteArray &message){
     if(!log_.isOpen()||log_.size()>=maxLogBytes)return;
     log_.write(message.left(maxLogBytes-log_.size()));log_.flush();
 }
-bool ExportJob::start(const Project &snapshot,const QString &destination,QString *error,bool optimizeForIphone){
+bool ExportJob::start(const Project &snapshot,const QString &destination,QString *error,bool optimizeForIphone,bool softwareOnly){
     const auto fail=[&](const QString &message){if(error)*error=message;return false;};
     if(running_||destination.isEmpty())return fail("Choose an output file.");
     const auto problem=snapshot.validate();if(!problem.isEmpty())return fail(problem);
@@ -80,7 +80,7 @@ bool ExportJob::start(const Project &snapshot,const QString &destination,QString
     }
     log((QDateTime::currentDateTimeUtc().toString(Qt::ISODate)+"\nExporting "+QString::number(snapshot.durationFrames())+" frames to "+destination_+"\n").toUtf8());
     optimizeForIphone_=optimizeForIphone;running_=true;canceled_=hardware_=retried_=false;
-    launch(false);return true;
+    launch(softwareOnly);return true;
 }
 void ExportJob::launch(bool software){
     probeDeadline_.stop();
@@ -109,6 +109,8 @@ void ExportJob::readOutput(){
                 hardware_=Media::isHardwareH264Encoder(message.mid(16).trimmed());
                 if(hardware_&&!canceled_&&!probeDeadline_.isActive())probeDeadline_.start();
             }else if(message.startsWith("Hardware probe succeeded: ")||message.startsWith("Hardware encoder unavailable: "))probeDeadline_.stop();
+            else if(message.startsWith("GPU processing probe: ")){hardware_=true;if(!canceled_)probeDeadline_.start();}
+            else if(message.startsWith("GPU processing probe succeeded: ")||message.startsWith("GPU processing fallback: "))probeDeadline_.stop();
             emit diagnostic(message);
         }else if(kind=="result"&&event["ok"].isBool()){
             probeDeadline_.stop();resultReceived_=true;resultSuccess_=event["ok"].toBool();workerError_=event["error"].toString();

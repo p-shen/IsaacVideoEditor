@@ -11,8 +11,11 @@ struct Budget {
     qsizetype frameCacheBytes=32*1024*1024;
     quint64 exportQueueBytes=64*1024*1024;
     bool prepareDuringExport=false;
+    int prefetchFrames=0;
 };
 Resources resources();
+struct ProcessMemory {quint64 residentBytes=0,peakResidentBytes=0;};
+ProcessMemory processMemory();
 Budget budgetFor(const Resources &resources);
 Budget budget();
 }

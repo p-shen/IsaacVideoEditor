@@ -87,6 +87,11 @@ QuickTimeline::QuickTimeline(QQuickItem *parent) : QQuickPaintedItem(parent), fo
 const Project &QuickTimeline::displayProject() const {
     return dragging_ && gesture_ != Gesture::None && gesture_ != Gesture::Scrub ? preview_ : project_;
 }
+const Project::TimelineData &QuickTimeline::timingFor(const Project &project) const {
+    if(&project==&project_)return projectTiming_;
+    if(&project==&preview_){if(previewTimingDirty_){previewTiming_=preview_.timelineData();previewTimingDirty_=false;}return previewTiming_;}
+    temporaryTiming_=project.timelineData();return temporaryTiming_;
+}
 QVariantList QuickTimeline::visualOverlayPreview() const {
     auto p=displayProject();p.normalizeVisuals();QVariantList result;
     for(int i=0;i<p.visualOverlays.size();++i)result.append(QVariantMap{{"startFrame",p.overlayStartFrame(i)},{"durationFrames",p.overlayFrames(i)},{"hostSourceFrame",p.visualOverlays[i].hostSourceFrame}});
@@ -110,11 +115,11 @@ double QuickTimeline::xForFrame(int frame) const { return origin() + frame * pix
 double QuickTimeline::unclampedFrameAt(double x) const { return (x - origin() + contentOffset_) * 60 / pixelsPerSecond_; }
 int QuickTimeline::frameAt(double x) const {
     if (!std::isfinite(x)) return 0;
-    return qBound(0, qRound(unclampedFrameAt(x)), std::max(0, project_.durationFrames() - 1));
+    return qBound(0, qRound(unclampedFrameAt(x)), std::max(0, projectTiming_.duration - 1));
 }
 QRectF QuickTimeline::rectForClip(const Project &p, int index) const {
     if (index < 0 || index >= p.clips.size()) return {};
-    return QRectF(xForFrame(p.clipStartFrame(index)), rulerHeight() + textHeight() + 8,
+    return QRectF(xForFrame(timingFor(p).starts.value(index)), rulerHeight() + textHeight() + 8,
                   std::max(1.0, p.clipFrames(p.clips[index]) * pixelsPerSecond_ / 60), videoHeight() - 16);
 }
 QRectF QuickTimeline::clipRect(int index) const { return rectForClip(displayProject(), index); }
@@ -140,8 +145,8 @@ void QuickTimeline::setSelectedText(int index){if(index==selectedText_)return;se
 QRectF QuickTimeline::audioRect(int lane) const {
     if(lane!=1&&lane!=2)return {};
     const auto &p=displayProject();const int start=lane==1?qRound(p.voiceStartSeconds*60):0;
-    const int frames=lane==1?std::max(0,std::min(p.durationFrames()-start,qRound(voiceDurationSeconds_*60))):
-        p.musicLoopToEnd?p.durationFrames():std::min(p.durationFrames(),qRound(musicDurationSeconds_*60));
+    const int frames=lane==1?std::max(0,std::min(timingFor(p).duration-start,qRound(voiceDurationSeconds_*60))):
+        p.musicLoopToEnd?timingFor(p).duration:std::min(timingFor(p).duration,qRound(musicDurationSeconds_*60));
     if((lane==1?p.voicePath:p.musicPath).isEmpty()||frames<=0)return {};
     return {xForFrame(start),qreal(rulerHeight()+textHeight()+videoHeight()+(lane-1)*audioHeight()+6),frames*pixelsPerSecond_/60,qreal(audioHeight()-12)};
 }
@@ -149,8 +154,8 @@ double QuickTimeline::gainY(const QRectF &r,double db) const {return r.bottom()-
 bool QuickTimeline::audioGesture() const {return gesture_==Gesture::AudioMove||gesture_==Gesture::AudioGain||gesture_==Gesture::AudioFadeIn||gesture_==Gesture::AudioFadeOut||gesture_==Gesture::Transition;}
 QRectF QuickTimeline::transitionRect(int index) const {
     const auto &p=displayProject();if(index<=0||index>=p.clips.size())return {};
-    const double width=std::max(14.0,p.transitionFramesBefore(index)*pixelsPerSecond_/60);
-    return {xForFrame(p.clipStartFrame(index)),qreal(rulerHeight()+textHeight()+7),width,qreal(std::max(20,QFontMetrics(font_).height()+4))};
+    const double width=std::max(14.0,timingFor(p).transitions.value(index)*pixelsPerSecond_/60);
+    return {xForFrame(timingFor(p).starts.value(index)),qreal(rulerHeight()+textHeight()+7),width,qreal(std::max(20,QFontMetrics(font_).height()+4))};
 }
 int QuickTimeline::transitionAt(const QPointF &point) const {
     for (int i=1;i<project_.clips.size();++i) if (transitionRect(i).contains(point)) {
@@ -159,7 +164,7 @@ int QuickTimeline::transitionAt(const QPointF &point) const {
     }
     return -1;
 }
-int QuickTimeline::cutNear(double x) const {int result=-1;double distance=24;for(int i=1;i<project_.clips.size();++i){double d=std::abs(x-xForFrame(project_.clipStartFrame(i)));if(d<distance){distance=d;result=i;}}return result;}
+int QuickTimeline::cutNear(double x) const {int result=-1;double distance=24;for(int i=1;i<project_.clips.size();++i){double d=std::abs(x-xForFrame(projectTiming_.starts.value(i)));if(d<distance){distance=d;result=i;}}return result;}
 int QuickTimeline::clipAt(const QPointF &point) const {
     if (point.x() < labelWidth()) return -1;
     int edge = -1;
@@ -192,7 +197,7 @@ void QuickTimeline::setProject(const Project &p, const QVector<double> &duration
     if (gesture_ != Gesture::None) finishGesture(true);
     endSkim();
     musicDurationSeconds_=std::isfinite(musicDuration)?std::max(0.0,musicDuration):0;
-    project_ = p;
+    project_ = p;projectTiming_=project_.timelineData();
     updateTextLanes();
     setHoveredMedia(-1);
     setImplicitHeight(rulerHeight()+textHeight()+videoHeight()+2*audioHeight());
@@ -205,7 +210,7 @@ void QuickTimeline::setProject(const Project &p, const QVector<double> &duration
     emit gestureChanged();
 }
 void QuickTimeline::setPosition(int frame) {
-    frame = qBound(0, frame, std::max(0, project_.durationFrames() - 1));
+    frame = qBound(0, frame, std::max(0, projectTiming_.duration - 1));
     const bool changed = position_ != frame;
     position_ = frame;
     const double x = xForFrame(position_);
@@ -387,9 +392,9 @@ void QuickTimeline::refreshMedia() {
     }
     const int voiceStart = qRound(p.voiceStartSeconds * 60);
     const double voiceLeft = xForFrame(voiceStart);
-    const double voiceRight = xForFrame(std::min(p.durationFrames(), voiceStart + qRound(voiceDurationSeconds_ * 60)));
+    const double voiceRight = xForFrame(std::min(timingFor(p).duration, voiceStart + qRound(voiceDurationSeconds_ * 60)));
     if (voiceRight >= visibleLeft && voiceLeft <= visibleRight && voiceRight > voiceLeft) requestWave(p.voicePath);
-    if (xForFrame(p.durationFrames()) >= visibleLeft) requestWave(p.musicPath);
+    if (xForFrame(timingFor(p).duration) >= visibleLeft) requestWave(p.musicPath);
     mediaCache_->endViewport();
     emit mediaStatusChanged();
 }
@@ -504,13 +509,13 @@ void QuickTimeline::mousePressEvent(QMouseEvent *event) {
     } else if (const int caption=captionAt(event->position());caption>=0) {
         const auto rect=captionRect(caption);const double edge=std::min(9.0,rect.width()/3);
         gesture_=event->position().x()-rect.left()<edge?Gesture::TextStart:rect.right()-event->position().x()<edge?Gesture::TextEnd:Gesture::TextBody;
-        gestureCaption_=true;gestureTextIndex_=caption;preview_=project_;emit captionSelected(caption,int(event->modifiers()));setKeepMouseGrab(true);updateInteractive();
+        gestureCaption_=true;gestureTextIndex_=caption;preview_=project_;previewTimingDirty_=true;emit captionSelected(caption,int(event->modifiers()));setKeepMouseGrab(true);updateInteractive();
     } else if (const int text=textAt(event->position());text>=0) {
         const auto rect=textRect(text);const double edge=std::min(9.0,rect.width()/3);
         gesture_=event->position().x()-rect.left()<edge?Gesture::TextStart:rect.right()-event->position().x()<edge?Gesture::TextEnd:Gesture::TextBody;
-        gestureTextIndex_=text;preview_=project_;emit textSelected(text);setKeepMouseGrab(true);updateInteractive();
+        gestureTextIndex_=text;preview_=project_;previewTimingDirty_=true;emit textSelected(text);setKeepMouseGrab(true);updateInteractive();
     } else if(const int cut=transitionAt(event->position());cut>=0){
-        gesture_=Gesture::Transition;gestureTransition_=selectedTransition_=cut;preview_=project_;
+        gesture_=Gesture::Transition;gestureTransition_=selectedTransition_=cut;preview_=project_;previewTimingDirty_=true;
         emit transitionSelected(cut);emit audioGestureStarted();setKeepMouseGrab(true);updateInteractive();
     } else if (index >= 0) {
         gestureClip_ = index;
@@ -520,7 +525,7 @@ void QuickTimeline::mousePressEvent(QMouseEvent *event) {
         group_.clear();
         if (selection_.contains(index)) for (const QVariant &v : selection_) group_.append(v.toInt());
         else group_.append(index);
-        preview_ = project_;
+        preview_ = project_;previewTimingDirty_=true;
         previewOrder_.resize(project_.clips.size());
         std::iota(previewOrder_.begin(), previewOrder_.end(), 0);
         setKeepMouseGrab(true);
@@ -537,7 +542,7 @@ void QuickTimeline::mousePressEvent(QMouseEvent *event) {
                 else if(event->position().y()<rect.top()+12&&std::abs(event->position().x()-fadeOutX)<10)gesture_=Gesture::AudioFadeOut;
                 else if(std::abs(event->position().y()-gainY(rect,a.gainDb))<5)gesture_=Gesture::AudioGain;
                 else if(gestureAudioLane_==1)gesture_=Gesture::AudioMove;
-                if(gesture_!=Gesture::None){preview_=project_;emit audioGestureStarted();setKeepMouseGrab(true);updateInteractive();}
+                if(gesture_!=Gesture::None){preview_=project_;previewTimingDirty_=true;emit audioGestureStarted();setKeepMouseGrab(true);updateInteractive();}
             }
         }else emit clearSelectionRequested();
     }
@@ -570,14 +575,14 @@ int QuickTimeline::snappedSourceFrame(double raw, int minimum, int maximum, Qt::
     const Clip &clip = project_.clips[gestureClip_];
     const bool start = gesture_ == Gesture::TrimStart;
     const int oldSource = qRound((start ? clip.inSeconds : clip.outSeconds) * 60);
-    const int oldEdge = project_.clipStartFrame(gestureClip_) + (start ? 0 : project_.clipFrames(clip));
+    const int oldEdge = projectTiming_.starts.value(gestureClip_) + (start ? 0 : project_.clipFrames(clip));
     struct Target { int frame; QString label; bool playhead = false; };
     QVector<Target> targets{{position_, "Playhead", true}};
     if (oldEdge != 0) targets.append({0, "Start"});
-    if (oldEdge != project_.durationFrames()) targets.append({project_.durationFrames(), "End"});
+    if (oldEdge != projectTiming_.duration) targets.append({projectTiming_.duration, "End"});
     for (int i = 0; i < project_.clips.size(); ++i) {
         if (i == gestureClip_) continue;
-        const int first = project_.clipStartFrame(i);
+        const int first = projectTiming_.starts.value(i);
         targets.append({first, QString("Clip %1 start").arg(i + 1)});
         targets.append({first + project_.clipFrames(project_.clips[i]), QString("Clip %1 end").arg(i + 1)});
     }
@@ -601,7 +606,7 @@ int QuickTimeline::boundaryAt(double x) const {
     int boundary = 0;
     double distance = std::numeric_limits<double>::max();
     for (int i = 0; i <= project_.clips.size(); ++i) {
-        const int frame = i == project_.clips.size() ? project_.durationFrames() : project_.clipStartFrame(i);
+        const int frame = i == project_.clips.size() ? projectTiming_.duration : projectTiming_.starts.value(i);
         const double candidate = std::abs(xForFrame(frame) - x);
         if (candidate < distance) { boundary = i; distance = candidate; }
     }
@@ -631,21 +636,22 @@ QString QuickTimeline::reorderPlacementLabel() const {
         : QString("Place at end");
 }
 void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
+    previewTimingDirty_=true;
     if(dragging_&&audioGesture()){
-        preview_=project_;const int delta=qRound((lastPoint_.x()-pressPoint_.x()+contentOffset_-pressOffset_)*60/pixelsPerSecond_);
+        preview_=project_;previewTimingDirty_=true;const int delta=qRound((lastPoint_.x()-pressPoint_.x()+contentOffset_-pressOffset_)*60/pixelsPerSecond_);
         if(gesture_==Gesture::Transition){
-            const int requested=std::clamp(project_.transitionFramesBefore(gestureTransition_)+delta,0,600);
+            const int requested=std::clamp(projectTiming_.transitions.value(gestureTransition_)+delta,0,600);
             const auto &clip=project_.clips[gestureTransition_];
             const QString type=requested?(clip.hardCutBefore||clip.transitionType=="cut"?QString("dissolve"):clip.transitionType):QString("cut");
             preview_.setTransition(gestureTransition_,type,requested);
-            const int effective=preview_.transitionFramesBefore(gestureTransition_);
-            gestureText_=QString("%1 · %2 frames overlap · Project %3%4").arg(Transitions::name(type)).arg(effective).arg(timecode(preview_.durationFrames())).arg(effective<requested?" · Clamped to playable media":"");
+            const int effective=timingFor(preview_).transitions.value(gestureTransition_);
+            gestureText_=QString("%1 · %2 frames overlap · Project %3%4").arg(Transitions::name(type)).arg(effective).arg(timecode(timingFor(preview_).duration)).arg(effective<requested?" · Clamped to playable media":"");
             emit transitionPreviewRequested(gestureTransition_,type,requested);
         }else{
             auto a=project_.audioControls(gestureAudioLane_);QVariantMap fields;
             const auto rect=audioRect(gestureAudioLane_);
             const int frames=qRound(rect.width()*60/pixelsPerSecond_);
-            if(gesture_==Gesture::AudioMove){const int start=std::clamp(qRound(project_.voiceStartSeconds*60)+delta,0,std::max(0,project_.durationFrames()-1));preview_.voiceStartSeconds=start/60.0;fields["startFrame"]=start;gestureText_=QString("Narration start · %1 · %2 frames").arg(timecode(start)).arg(start);}
+            if(gesture_==Gesture::AudioMove){const int start=std::clamp(qRound(project_.voiceStartSeconds*60)+delta,0,std::max(0,projectTiming_.duration-1));preview_.voiceStartSeconds=start/60.0;fields["startFrame"]=start;gestureText_=QString("Narration start · %1 · %2 frames").arg(timecode(start)).arg(start);}
             else if(gesture_==Gesture::AudioGain){a.gainDb=std::clamp(a.gainDb+(pressPoint_.y()-lastPoint_.y())*72/std::max(1.0,rect.height()-20),-60.0,12.0);fields["gainDb"]=a.gainDb;gestureText_=QString("%1 dB").arg(a.gainDb,0,'f',1);}
             else {const bool incoming=gesture_==Gesture::AudioFadeIn;int value=std::clamp((incoming?a.fadeInFrames:a.fadeOutFrames)+(incoming?delta:-delta),0,frames);if(incoming)a.fadeInFrames=value;else a.fadeOutFrames=value;fields[incoming?"fadeInFrames":"fadeOutFrames"]=value;gestureText_=QString("Fade %1 · %2 frames · %3 s").arg(incoming?"in":"out").arg(value).arg(value/60.0,0,'f',3);}
             preview_.setAudioControls(gestureAudioLane_,a);emit audioPreviewRequested(gestureAudioLane_,fields);
@@ -654,19 +660,19 @@ void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
     }
     const auto &textList=gestureCaption_?project_.captions:project_.textOverlays;
     if(dragging_&&textGesture()&&gestureTextIndex_>=0&&gestureTextIndex_<textList.size()){
-        preview_=project_;const auto &original=textList[gestureTextIndex_];auto &text=(gestureCaption_?preview_.captions:preview_.textOverlays)[gestureTextIndex_];
+        preview_=project_;previewTimingDirty_=true;const auto &original=textList[gestureTextIndex_];auto &text=(gestureCaption_?preview_.captions:preview_.textOverlays)[gestureTextIndex_];
         const int start=project_.textStartFrame(gestureTextIndex_,gestureCaption_);
         const int delta=qRound((lastPoint_.x()-pressPoint_.x()+contentOffset_-pressOffset_)*60/pixelsPerSecond_);
         const int end=start+original.durationFrames;
         int value=gesture_==Gesture::TextEnd?end+delta:start+delta;
         const int minimum=gesture_==Gesture::TextEnd?start+1:0;
-        const int limit=gestureCaption_?86400*60:project_.durationFrames();
+        const int limit=gestureCaption_?86400*60:projectTiming_.duration;
         int maximum=gesture_==Gesture::TextStart?end-1:gesture_==Gesture::TextBody?std::max(0,limit-original.durationFrames):limit;
-        if(gestureCaption_&&!original.hostId.isEmpty()&&gesture_!=Gesture::TextEnd)maximum=std::min(maximum,std::max(0,project_.durationFrames()-1));
+        if(gestureCaption_&&!original.hostId.isEmpty()&&gesture_!=Gesture::TextEnd)maximum=std::min(maximum,std::max(0,projectTiming_.duration-1));
         value=qBound(minimum,value,std::max(minimum,maximum));snapTimeline_=-1;
         if(snapping_&&!modifiers.testFlag(Qt::AltModifier)){
-            QVector<int> targets{0,position_,project_.durationFrames()};
-            for(int i=0;i<project_.clips.size();++i){const int clipStart=project_.clipStartFrame(i);targets<<clipStart<<clipStart+project_.clipFrames(project_.clips[i]);}
+            QVector<int> targets{0,position_,projectTiming_.duration};
+            for(int i=0;i<project_.clips.size();++i){const int clipStart=projectTiming_.starts.value(i);targets<<clipStart<<clipStart+project_.clipFrames(project_.clips[i]);}
             for(bool caption:{false,true}){const auto &list=caption?project_.captions:project_.textOverlays;for(int i=0;i<list.size();++i)if(caption!=gestureCaption_||i!=gestureTextIndex_){const int at=project_.textStartFrame(i,caption);targets<<at<<at+list[i].durationFrames;}}
             double distance=9;for(int target:targets){const double d=std::abs(target-value)*pixelsPerSecond_/60;if(target>=minimum&&target<=maximum&&d<=8&&d<distance){distance=d;snapTimeline_=target;}}
             if(snapTimeline_>=0)value=snapTimeline_;
@@ -675,19 +681,19 @@ void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
         if(gesture_==Gesture::TextBody)text.startFrame=value;
         else if(gesture_==Gesture::TextStart){text.startFrame=value;text.durationFrames=end-value;}
         else {text.startFrame=start;text.durationFrames=value-start;}
-        gestureText_=QString("%1 · %2 – %3 · %4 frames%5").arg(gestureCaption_?"Caption":"Text",timecode(text.startFrame),timecode(text.startFrame+text.durationFrames)).arg(text.durationFrames).arg(text.startFrame+text.durationFrames>project_.durationFrames()?" · video clamped at project end":"");
+        gestureText_=QString("%1 · %2 – %3 · %4 frames%5").arg(gestureCaption_?"Caption":"Text",timecode(text.startFrame),timecode(text.startFrame+text.durationFrames)).arg(text.durationFrames).arg(text.startFrame+text.durationFrames>projectTiming_.duration?" · video clamped at project end":"");
         setCursor(gesture_==Gesture::TextBody?Qt::ClosedHandCursor:Qt::SizeHorCursor);
         emit gestureChanged();updateViewport();return;
     }
     if (!dragging_ || gestureClip_ < 0 || gestureClip_ >= project_.clips.size()) return;
-    preview_ = project_;
+    preview_ = project_;previewTimingDirty_=true;
     if (gesture_ == Gesture::Body) {
         moveBoundary_ = boundaryAt(lastPoint_.x());
         previewOrder_ = reorderedIndices(moveBoundary_);
         preview_.reorderClips(previewOrder_);
         setCursor(Qt::ClosedHandCursor);
-        const int start = preview_.clipStartFrame(previewOrder_.indexOf(group_.first()));
-        gestureText_ = QString("%1 · Start %2 · Duration %3").arg(reorderPlacementLabel(), timecode(start), timecode(preview_.durationFrames()));
+        const int start = timingFor(preview_).starts.value(previewOrder_.indexOf(group_.first()));
+        gestureText_ = QString("%1 · Start %2 · Duration %3").arg(reorderPlacementLabel(), timecode(start), timecode(timingFor(preview_).duration));
         if (preview_.effectiveCrossfadeFrames() < project_.effectiveCrossfadeFrames()) gestureText_ += " · Other fades shorten";
     } else {
         const Clip &original = project_.clips[gestureClip_];
@@ -707,7 +713,7 @@ void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
             clip.outSeconds = value / 60.0;
             frames = value - old;
         }
-        gestureText_ = QString("%1%2 frames · Duration %3").arg(frames >= 0 ? "+" : "").arg(frames).arg(timecode(preview_.durationFrames()));
+        gestureText_ = QString("%1%2 frames · Duration %3").arg(frames >= 0 ? "+" : "").arg(frames).arg(timecode(timingFor(preview_).duration));
         if (preview_.effectiveCrossfadeFrames() < project_.effectiveCrossfadeFrames()) gestureText_ += " · Other fades shorten";
         if (snapSource_ >= 0) gestureText_ += " · Snap: " + snapLabel_;
         updateTrimComparison();
@@ -837,8 +843,8 @@ void QuickTimeline::keyPressEvent(QKeyEvent *event) {
     if(gesture_==Gesture::None&&selectedText_>=0&&selectedText_<project_.textOverlays.size()&&event->modifiers().testFlag(Qt::AltModifier)&&(event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)){
         const auto &text=project_.textOverlays[selectedText_];const int delta=event->key()==Qt::Key_Left?-1:1;
         int start=project_.textStartFrame(selectedText_),frames=text.durationFrames;
-        if(event->modifiers().testFlag(Qt::ShiftModifier))frames=qBound(1,frames+delta,std::max(1,project_.durationFrames()-start));
-        else start=qBound(0,start+delta,std::max(0,project_.durationFrames()-frames));
+        if(event->modifiers().testFlag(Qt::ShiftModifier))frames=qBound(1,frames+delta,std::max(1,projectTiming_.duration-start));
+        else start=qBound(0,start+delta,std::max(0,projectTiming_.duration-frames));
         emit textTimingRequested(selectedText_,start,frames);event->accept();return;
     }
     if (project_.clips.isEmpty()) { event->ignore(); return; }
@@ -849,7 +855,7 @@ void QuickTimeline::keyPressEvent(QKeyEvent *event) {
     case Qt::Key_PageUp: frame += 60; break;
     case Qt::Key_PageDown: frame -= 60; break;
     case Qt::Key_Home: frame = 0; break;
-    case Qt::Key_End: frame = project_.durationFrames() - 1; break;
+    case Qt::Key_End: frame = projectTiming_.duration - 1; break;
     default: QQuickPaintedItem::keyPressEvent(event); return;
     }
     endSkim();
@@ -888,36 +894,35 @@ QStringList QuickTimeline::droppedFiles(const QMimeData *mime) const {
 void QuickTimeline::updateDropPreview(double x,const QMimeData *mime) {
     const auto paths=droppedFiles(mime);
     dropActive_=!paths.isEmpty();dropValid_=dropActive_;
-    dropFrame_=qBound(0,qRound(unclampedFrameAt(x)),project_.durationFrames());
-    Project proposed=project_;int insertion=dropFrame_;
+    dropFrame_=qBound(0,qRound(unclampedFrameAt(x)),projectTiming_.duration);
+    Project proposed=project_;int insertion=dropFrame_;bool needsPreparation=false;
     for(const auto &path:paths) {
         const auto source=std::find_if(project_.assets.cbegin(),project_.assets.cend(),[&](const MediaAsset &a){return a.path==path;});
-        int first=0,last=0;
-        if(source!=project_.assets.cend()) {
-            if(source->kind!="video"){dropValid_=false;break;}
-            first=source->inFrame;last=source->outFrame;
-        }else {
-            if(!dropDurations_.contains(path)){const auto info=Media::mediaInfo(path);dropDurations_[path]=info&&info->width>0&&info->height>0?qRound(info->durationSeconds*60):0;}
-            last=dropDurations_[path];
+        if(source==project_.assets.cend()){needsPreparation=true;continue;}
+        if(source->kind!="video"||source->outFrame<=source->inFrame){dropValid_=false;break;}
+        if(!needsPreparation){
+            if(proposed.insertClipAtFrame({path,source->inFrame/60.0,source->outFrame/60.0},insertion)<0){dropValid_=false;break;}
+            insertion+=source->outFrame-source->inFrame;
         }
-        if(last<=first || proposed.insertClipAtFrame({path,first/60.0,last/60.0},insertion)<0){dropValid_=false;break;}
-        insertion+=last-first;
     }
-    gestureText_=dropValid_?QString("Insert at %1 · Result %2 frames (%3 s)").arg(dropFrame_).arg(proposed.durationFrames()).arg(proposed.durationFrames()/60.0,0,'f',3):
-        "Cannot insert here. Use a valid video range outside crossfades, or drop into Media to import only.";
+    if(needsPreparation)for(int i=1;i<project_.clips.size();++i)
+        if(dropFrame_>=projectTiming_.starts[i]&&dropFrame_<projectTiming_.starts[i]+projectTiming_.transitions[i])dropValid_=false;
+    gestureText_=!dropValid_?"Cannot insert here. Use a valid video range outside crossfades, or drop into Media to import only.":needsPreparation?
+        QString("Drop to prepare media and insert at %1").arg(timecode(dropFrame_)):
+        QString("Insert at %1 · Result %2 frames (%3 s)").arg(timecode(dropFrame_)).arg(proposed.durationFrames()).arg(proposed.durationFrames()/60.0,0,'f',3);
     emit gestureChanged();invalidateContents();
 }
 void QuickTimeline::dragEnterEvent(QDragEnterEvent *event) {
     if(event->mimeData()->hasFormat("application/x-isaac-transition")){dropActive_=true;event->acceptProposedAction();invalidateContents();return;}
-    dropDurations_.clear();updateDropPreview(event->position().x(),event->mimeData());
+    updateDropPreview(event->position().x(),event->mimeData());
     if(dropActive_)event->acceptProposedAction();else event->ignore();
 }
 void QuickTimeline::dragMoveEvent(QDragMoveEvent *event) {
     if(event->mimeData()->hasFormat("application/x-isaac-transition")){
         const int cut=cutNear(event->position().x());
-        if(cut>=0){if(presetCut_<0){preview_=project_;gesture_=Gesture::Transition;dragging_=true;emit audioGestureStarted();}presetCut_=gestureTransition_=cut;
-            preview_=project_;preview_.setTransition(cut,"dissolve",30);emit transitionSelected(cut);emit transitionPreviewRequested(cut,"dissolve",30);
-            gestureText_=QString("Dissolve · %1 frames · Project %2").arg(preview_.transitionFramesBefore(cut)).arg(timecode(preview_.durationFrames()));event->acceptProposedAction();emit gestureChanged();updateViewport();}
+        if(cut>=0){if(presetCut_<0){preview_=project_;previewTimingDirty_=true;gesture_=Gesture::Transition;dragging_=true;emit audioGestureStarted();}presetCut_=gestureTransition_=cut;
+            preview_=project_;previewTimingDirty_=true;preview_.setTransition(cut,"dissolve",30);emit transitionSelected(cut);emit transitionPreviewRequested(cut,"dissolve",30);
+            gestureText_=QString("Dissolve · %1 frames · Project %2").arg(timingFor(preview_).transitions.value(cut)).arg(timecode(timingFor(preview_).duration));event->acceptProposedAction();emit gestureChanged();updateViewport();}
         else event->ignore();return;
     }
     updateDropPreview(event->position().x(),event->mimeData());
@@ -925,7 +930,7 @@ void QuickTimeline::dragMoveEvent(QDragMoveEvent *event) {
 }
 void QuickTimeline::dragLeaveEvent(QDragLeaveEvent *event) {
     if(presetCut_>=0){presetCut_=-1;finishGesture(true);}
-    dropActive_=false;gestureText_.clear();dropDurations_.clear();emit gestureChanged();event->accept();invalidateContents();
+    dropActive_=false;gestureText_.clear();emit gestureChanged();event->accept();invalidateContents();
 }
 void QuickTimeline::dropEvent(QDropEvent *event) {
     if(event->mimeData()->hasFormat("application/x-isaac-transition")){
@@ -938,7 +943,7 @@ void QuickTimeline::dropEvent(QDropEvent *event) {
     updateDropPreview(event->position().x(),event->mimeData());
     dropActive_=false;
     if(dropValid_ && !paths.isEmpty()){event->acceptProposedAction();emit filesInserted(paths,dropFrame_);emit filesDropped(paths);}else event->ignore();
-    gestureText_.clear();dropDurations_.clear();emit gestureChanged();invalidateContents();
+    gestureText_.clear();emit gestureChanged();invalidateContents();
 }
 
 void QuickTimeline::paintContents(QPainter *painter) {
@@ -1001,7 +1006,7 @@ void QuickTimeline::paintContents(QPainter *painter) {
         p.save();p.setClipRect(rect.adjusted(10,2,-10,-2),Qt::IntersectClip);p.setPen(text);
         const QString name=t.text.section('\n',0,0).isEmpty()?QString(caption?"Caption %1":"Text %1").arg(i+1):t.text.section('\n',0,0);
         p.drawText(rect.adjusted(12,2,-12,-rect.height()/2),Qt::AlignVCenter,fm.elidedText(name,Qt::ElideRight,std::max(0,int(rect.width()-24))));
-        const int at=project.textStartFrame(i,caption);const QString status=QString("%1 – %2%3%4").arg(timecode(at),timecode(at+t.durationFrames),t.hostId.isEmpty()?"":" · attached",caption&&at+t.durationFrames>project.durationFrames()?" · clamped":"");
+        const int at=project.textStartFrame(i,caption);const QString status=QString("%1 – %2%3%4").arg(timecode(at),timecode(at+t.durationFrames),t.hostId.isEmpty()?"":" · attached",caption&&at+t.durationFrames>timingFor(project).duration?" · clamped":"");
         p.drawText(rect.adjusted(12,rect.height()/2,-12,-2),Qt::AlignVCenter,status);p.restore();
         if(selected){p.setPen(QPen(accent,2));for(double x:{rect.left()+4,rect.right()-4})p.drawLine(QPointF(x,rect.center().y()-8),QPointF(x,rect.center().y()+8));}
     }}
@@ -1093,13 +1098,13 @@ void QuickTimeline::paintContents(QPainter *painter) {
     for(int i=1;i<project.clips.size();++i){
         const auto r=transitionRect(i);if(r.right()<labels||r.left()>width())continue;
         p.setBrush(blend(base,accent,selectedTransition_==i?.5:.24));p.setPen(QPen(accent,selectedTransition_==i?2:1));p.drawRoundedRect(r,3,3);
-        p.setPen(text);p.drawText(r.adjusted(2,0,-2,0),Qt::AlignCenter,project.transitionFramesBefore(i)>0?QString("%1f").arg(project.transitionFramesBefore(i)):"|");
+        p.setPen(text);p.drawText(r.adjusted(2,0,-2,0),Qt::AlignCenter,timingFor(project).transitions.value(i)>0?QString("%1f").arg(timingFor(project).transitions.value(i)):"|");
     }
     const auto audioBlock = [&](int lane, const QString &path, int start, int frames) {
         const int y = ruler + video + (lane - 1) * audio;
         if (path.isEmpty() || frames <= 0) {
             const QString hint = path.isEmpty() ? (lane == 1 ? "Add narration" : "Add music")
-                : start >= project.durationFrames() ? "Narration starts after this edit" : "Narration duration unavailable";
+                : start >= timingFor(project).duration ? "Narration starts after this edit" : "Narration duration unavailable";
             p.setPen(muted);
             p.drawText(QRectF(labels + 16, y, std::max(0.0, width() - labels - 24), audio), Qt::AlignVCenter, fm.elidedText(hint, Qt::ElideRight, std::max(0, int(width() - labels - 24))));
             return;
@@ -1132,8 +1137,8 @@ void QuickTimeline::paintContents(QPainter *painter) {
         p.restore();
     };
     const int voiceStart = qRound(project.voiceStartSeconds * 60);
-    audioBlock(1, project.voicePath, voiceStart, std::max(0, std::min(project.durationFrames() - voiceStart, qRound(voiceDurationSeconds_ * 60))));
-    audioBlock(2, project.musicPath, 0, project.musicLoopToEnd?project.durationFrames():std::min(project.durationFrames(),qRound(musicDurationSeconds_*60)));
+    audioBlock(1, project.voicePath, voiceStart, std::max(0, std::min(timingFor(project).duration - voiceStart, qRound(voiceDurationSeconds_ * 60))));
+    audioBlock(2, project.musicPath, 0, project.musicLoopToEnd?timingFor(project).duration:std::min(timingFor(project).duration,qRound(musicDurationSeconds_*60)));
     if(dropActive_){
         const double x=xForFrame(dropFrame_);p.setPen(QPen(dropValid_?accent:text,3,dropValid_?Qt::SolidLine:Qt::DashLine));
         p.drawLine(QPointF(x,ruler),QPointF(x,ruler+video));

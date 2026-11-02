@@ -2,6 +2,7 @@
 #include "mlt_engine.h"
 #include "preview.h"
 #include "preview_cache.h"
+#include "recovery_store.h"
 #include <QDir>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -13,21 +14,98 @@ class EditorControllerTest : public QObject {
     Q_OBJECT
     QString fixture() const { return QDir::current().filePath("tests/fixtures/seek.mp4"); }
 private slots:
+    void preparationRetriesFailedMetadataBeforeChoosingAutoCanvas() {
+        QTemporaryDir dir;QFile original(fixture());QVERIFY(original.open(QIODevice::ReadOnly));const auto bytes=original.readAll();
+        const auto path=dir.filePath("temporary-failure.mp4");const auto modified=QDateTime::fromMSecsSinceEpoch(1700000000000LL);
+        QFile source(path);QVERIFY(source.open(QIODevice::WriteOnly));QCOMPARE(source.write(QByteArray(bytes.size(),'\0')),bytes.size());
+        QVERIFY(source.flush());QVERIFY(source.setFileTime(modified,QFileDevice::FileModificationTime));source.close();
+        QVERIFY(!Media::mediaInfo(path));
+        QVERIFY(source.open(QIODevice::WriteOnly));QCOMPARE(source.write(bytes),bytes.size());QVERIFY(source.flush());
+        QVERIFY(source.setFileTime(modified,QFileDevice::FileModificationTime));source.close();QVERIFY(!Media::mediaInfo(path));
+        Project project;project.clips={{path,0,1}};const auto saved=dir.filePath("retry.json");QVERIFY(saveProject(project,saved));
+        EditorController editor;QVERIFY(editor.loadFrom(saved));QTRY_VERIFY_WITH_TIMEOUT(!editor.loading(),5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.frame().isNull(),5000);QVERIFY(Media::mediaInfo(path));
+    }
+    void uiImportsAreDeferredAndDiscardStaleResults() {
+        EditorController e;QVariantList urls{QUrl::fromLocalFile(fixture())};
+        e.importUrls(urls);QCOMPARE(e.duration(),0);
+        QTRY_COMPARE_WITH_TIMEOUT(e.project().clips.size(),1,10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!e.loading(),10000);QTRY_VERIFY_WITH_TIMEOUT(!e.frame().isNull(),10000);
+        EditorController superseded;superseded.importUrls(urls);superseded.newProject();
+        QTest::qWait(300);QCOMPARE(superseded.duration(),0);QVERIFY(superseded.project().assets.isEmpty());
+    }
+    void canceledAndSupersededUiImportsDoNotCommit() {
+        const QVariantList urls{QUrl::fromLocalFile(fixture())};EditorController canceled;
+        canceled.importUrls(urls);canceled.cancelImport();QTest::qWait(100);
+        QCOMPARE(canceled.duration(),0);QVERIFY(canceled.project().assets.isEmpty());
+        EditorController superseded;superseded.importUrls(urls);superseded.importMediaUrls(urls);
+        QTRY_COMPARE_WITH_TIMEOUT(superseded.project().assets.size(),1,5000);QCOMPARE(superseded.duration(),0);
+        QTRY_VERIFY_WITH_TIMEOUT(!superseded.frame().isNull(),5000);
+    }
+    void timelinePreparationDeliversOneSettledStill() {
+        EditorController e;QSignalSpy frames(&e,&EditorController::frameChanged);
+        QVERIFY(e.importFiles({fixture()}));QCOMPARE(frames.size(),0);
+        e.setCanvas(240,136);e.setCanvas(160,90);e.seek(37);
+        QTRY_VERIFY_WITH_TIMEOUT(!e.frame().isNull(),5000);
+        QCOMPARE(e.frame().size(),QSize(160,90));QCOMPARE(e.position(),37);QCOMPARE(frames.size(),1);
+        const auto diagnostics=e.performanceDiagnostics();QVERIFY(diagnostics["timelinePreparationJobs"].toULongLong()>=3);
+        QVERIFY(diagnostics["supersededPreparationJobs"].toULongLong()>=2);
+    }
+    void asyncLegacyRecoveryPreservesOfferAndDirtyState() {
+        QTemporaryDir dir;QFile broken(dir.filePath("legacy-audio.wav"));QVERIFY(broken.open(QIODevice::WriteOnly));broken.write("not audio");broken.close();
+        QString offer;const auto projectPath=dir.filePath("original.isaac.json");
+        {RecoveryStore store(dir.path());Project p;p.clips={{fixture(),0,2}};p.voicePath=broken.fileName();store.schedule(p,projectPath);QVERIFY(store.flush());offer=store.snapshotPath();}
+        {EditorController canceled;canceled.enableRecovery(dir.path());canceled.recoverSnapshotAsync(offer);canceled.cancelImport();QTest::qWait(100);QCOMPARE(canceled.duration(),0);QVERIFY(QFile::exists(offer));}
+        EditorController e;e.enableRecovery(dir.path());QCOMPARE(e.recoveryCandidates().size(),1);
+        e.recoverSnapshotAsync(offer);QCOMPARE(e.duration(),0);QVERIFY(QFile::exists(offer));
+        QTRY_COMPARE_WITH_TIMEOUT(e.duration(),120,5000);
+        QVERIFY(e.dirty());QVERIFY(e.hasProjectFile());QVERIFY(e.title().startsWith("original.isaac.json"));
+        QVERIFY(!QFile::exists(projectPath));
+    }
+    void failedAsyncRelinkPreservesProject() {
+        QTemporaryDir dir;QFile broken(dir.filePath("broken.mp4"));QVERIFY(broken.open(QIODevice::WriteOnly));broken.write("not a media file");broken.close();
+        EditorController e;QVERIFY(e.importFiles({fixture()}));e.relinkMediaAsync(fixture(),broken.fileName());
+        QTRY_VERIFY_WITH_TIMEOUT(!e.notice().isEmpty(),5000);QCOMPARE(e.project().clips[0].path,fixture());
+        QVERIFY(!e.performanceDiagnostics()["importing"].toBool());
+    }
+    void projectResetsNotifyAudioLevels() {
+        EditorController e;auto *preview=e.findChild<Preview*>();QVERIFY(preview);
+        preview->audioPeak(1.1);QVERIFY(e.masterClipped());QSignalSpy levels(&e,&EditorController::audioLevelsChanged);
+        e.newProject();QVERIFY(!e.masterClipped());QCOMPARE(e.masterPeak(),-60.0);QVERIFY(!levels.isEmpty());
+        QTemporaryDir dir;Project saved;saved.clips={{fixture(),0,1}};QVERIFY(saveProject(saved,dir.filePath("levels.json")));
+        preview->audioPeak(1.1);levels.clear();QVERIFY(e.loadFrom(dir.filePath("levels.json")));
+        QVERIFY(!e.masterClipped());QCOMPARE(e.masterPeak(),-60.0);QVERIFY(!levels.isEmpty());
+    }
+    void playbackUsesNarrowPositionNotifications() {
+        EditorController e;QVERIFY(e.importFiles({fixture()}));QTRY_VERIFY(!e.frame().isNull());
+        QSignalSpy positions(&e,&EditorController::positionChanged),states(&e,&EditorController::stateChanged),composition(&e,&EditorController::compositionChanged);
+        e.togglePlayback();QTRY_VERIFY(positions.size()>2);states.clear();composition.clear();positions.clear();
+        QTest::qWait(120);QVERIFY(positions.size()>0);QCOMPARE(composition.size(),0);QVERIFY(states.size()<positions.size());
+        e.togglePlayback();
+    }
+    void preparedTimelineDiscardsOldRevision() {
+        EditorController e;QVERIFY(e.importFiles({fixture()}));
+        e.setCanvas(240,136);e.setCanvas(160,90);e.seek(37);
+        QTRY_VERIFY_WITH_TIMEOUT(!e.loading(),10000);QTRY_COMPARE(e.frame().size(),QSize(160,90));QCOMPARE(e.position(),37);
+        QTemporaryDir dir;QVERIFY(e.saveTo(dir.filePath("prepared.json")));
+        e.setCanvas(240,136);QVERIFY(e.saveTo(dir.filePath("prepared.json")));e.newProject();QTest::qWait(300);
+        QCOMPARE(e.duration(),0);QVERIFY(e.frame().isNull());
+    }
     void autoCanvasFollowsCameraOrientation() {
         EditorController e;
         QVERIFY(e.importFiles({QFINDTESTDATA("fixtures/rotation-metadata.mp4")}));
-        QCOMPARE(e.format(), QString("90×160 · 60 fps"));
+        QTRY_COMPARE(e.format(), QString("90×160 · 60 fps"));
         QTRY_COMPARE(e.frame().size(), QSize(90, 160));
         e.setCanvas(160, 90);
-        QCOMPARE(e.format(), QString("160×90 · 60 fps"));
+        QTRY_COMPARE(e.format(), QString("160×90 · 60 fps"));
         QTRY_COMPARE(e.frame().size(), QSize(160, 90));
         e.setCanvas(0, 0);
-        QCOMPARE(e.format(), QString("90×160 · 60 fps"));
+        QTRY_COMPARE(e.format(), QString("90×160 · 60 fps"));
         QTRY_COMPARE(e.frame().size(), QSize(90, 160));
     }
     void damagedSourceProxyFallsBackToOriginal() {
         QTemporaryDir dir;const auto source=dir.filePath("source.mp4");QVERIFY(QFile::copy(fixture(),source));
-        EditorController e;QVERIFY(e.importMedia({source}));auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);
+        EditorController e;QVERIFY(e.importMedia({source}));auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);QVERIFY(cache->setCacheDirectory(dir.filePath("cache")));
         cache->request(source,120);QTRY_VERIFY_WITH_TIMEOUT(!cache->readyCopy(source,0,120).path.isEmpty(),10000);
         const auto proxy=cache->readyCopy(source,0,120).path;QFile corrupt(proxy);QVERIFY(corrupt.open(QIODevice::WriteOnly));
         corrupt.write("invalid proxy");corrupt.close();
@@ -46,28 +124,28 @@ private slots:
         QVERIFY(encode.waitForFinished(15000));QCOMPARE(encode.exitCode(),0);
         const auto budget=Performance::budgetFor({32,quint64(168)<<30,quint64(128)<<30});
         EditorController e(nullptr,budget);QVERIFY(e.importFiles({source}));
-        QCOMPARE(e.frame().size(),QSize(1920,1080));
-        auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);
+        QTRY_COMPARE(e.frame().size(),QSize(1920,1080));
+        auto *cache=e.findChild<PreviewCache*>();QVERIFY(cache);QVERIFY(cache->setCacheDirectory(dir.filePath("cache")));
         QTRY_VERIFY_WITH_TIMEOUT(!cache->readyCopy(source,0,60).path.isEmpty(),20000);
         QTRY_COMPARE_WITH_TIMEOUT(e.previewStatus(),QString("Smooth preview"),5000);
         QSignalSpy changed(&e,&EditorController::frameChanged);
         e.seek(10);QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(),3000);
         const QImage timelineFrame=e.frame();
-        e.selectSource(0);e.seekSource(10);
-        QTRY_COMPARE_WITH_TIMEOUT(e.sourcePosition(),10,3000);
+        changed.clear();e.selectSource(0);cache->discard(source);e.seekSource(10);
+        QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(),3000);QTRY_COMPARE_WITH_TIMEOUT(e.sourcePosition(),10,3000);
         QTRY_COMPARE_WITH_TIMEOUT(e.frame(),timelineFrame,3000);
-        QCOMPARE(e.frame().size(),QSize(1920,1080));
+        QTRY_COMPARE(e.frame().size(),QSize(1920,1080));
         cache->discard(source);
     }
     void appendingPreservesPreviewWithMusicAndTransitions() {
         EditorController e;const auto source=QFINDTESTDATA("fixtures/rotation.mp4");
         QVERIFY(e.importFiles({source,source}));e.setCrossfade(.25);e.setMusicPath(source);e.seek(15);
-        const auto original=e.frame();QVERIFY(!original.isNull());const int before=e.duration();
+        QTRY_VERIFY(!e.frame().isNull());const auto original=e.frame();const int before=e.duration();
         QVERIFY(e.importFiles({source}));QCOMPARE(e.project().clips.size(),3);QVERIFY(e.duration()>before);
         QCOMPARE(e.position(),15);QCOMPARE(e.frame(),original);
         e.selectClip(0);e.beginVisualGesture();e.setTransform({{"opacity",0.}});
         QTRY_VERIFY_WITH_TIMEOUT(e.frame().pixelColor(e.frame().width()/2,e.frame().height()/2).red()<20,3000);
-        e.endVisualGesture(true);QCOMPARE(e.frame(),original);
+        e.endVisualGesture(true);QTRY_COMPARE(e.frame(),original);
         e.undo();QCOMPARE(e.duration(),before);QCOMPARE(e.frame(),original);
         e.redo();QCOMPARE(e.project().clips.size(),3);QCOMPARE(e.frame(),original);
         e.seek(e.duration()-1);QVERIFY(!e.frame().isNull());
@@ -88,7 +166,7 @@ private slots:
         const auto saved=dir.filePath("overlay.isaac.json");QVERIFY(e.saveTo(saved));
         const auto loaded=loadProject(saved);QVERIFY(loaded);
         QCOMPARE(loaded->visualOverlays[0].path,source);QCOMPARE(loaded->visualOverlays[0].sourceInFrame,30);
-        e.setVisualLaneVisible(0,false);QCOMPARE(e.previewStatus(),QString("Original media"));
+        e.setVisualLaneVisible(0,false);QTRY_COMPARE(e.previewStatus(),QString("Original media"));
         cache->discard(source);
     }
     void initTestCase() { qputenv("SDL_AUDIODRIVER","dummy"); Media::initializeMlt(); }

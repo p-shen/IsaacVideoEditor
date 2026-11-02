@@ -6,6 +6,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QtEndian>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -14,6 +15,21 @@ namespace {
 constexpr int MaximumQueuedJobs = 128;
 constexpr int MaximumQueuedPriorityJobs = 2;
 constexpr int MaximumImageBytes = 1024 * 1024;
+constexpr int MaximumBatchFrames = 8;
+constexpr int MaximumBatchSpan = 120; // Two seconds bounds foreground preemption and decode work.
+QImage nextPng(const QByteArray &bytes, qsizetype *offset) {
+    const qsizetype start = *offset;
+    if (bytes.mid(start, 8) != QByteArray::fromHex("89504e470d0a1a0a")) return {};
+    qsizetype cursor = start + 8;
+    while (cursor + 12 <= bytes.size()) {
+        const quint32 length = qFromBigEndian<quint32>(bytes.constData() + cursor);
+        if (length > quint32(MaximumImageBytes) || cursor + 12 + length > bytes.size()) return {};
+        const bool last = bytes.mid(cursor + 4, 4) == "IEND";
+        cursor += 12 + length;
+        if (last) { *offset = cursor; return QImage::fromData(bytes.mid(start, cursor - start), "PNG"); }
+    }
+    return {};
+}
 QString ffmpegPath() {
     const QString path = QStandardPaths::findExecutable("ffmpeg");
     return path.isEmpty()
@@ -30,7 +46,9 @@ MediaCache::MediaCache(QObject *parent, const Performance::Budget &budget) : QOb
         workers_.append(worker);
         connect(worker->process, &QProcess::readyReadStandardOutput, this, [this, worker] { readOutput(worker); });
         connect(worker->process, &QProcess::readyReadStandardError, this, [worker] { worker->process->readAllStandardError(); });
+        connect(worker->process, &QProcess::started, this, [this, worker] { worker->elapsed.start(); ++processCount_; });
         connect(worker->process, &QProcess::finished, this, [this, worker](int code, QProcess::ExitStatus status) {
+            if (worker->elapsed.isValid()) { preparationMs_ += worker->elapsed.elapsed(); worker->elapsed.invalidate(); }
             readOutput(worker);
             complete(worker, code == 0 && status == QProcess::NormalExit);
         });
@@ -103,24 +121,33 @@ QImage MediaCache::thumbnail(const QString &path, double sourceSeconds, int rota
         }
         if (nearest > toleranceFrames) {
             for (const auto *worker : workers_)
-                if (!worker->job.cancelled && worker->job.kind == Thumbnail && worker->job.identity == entry.identity && worker->job.rotation == rotation)
-                    consider(worker->job.frame);
+                if (!worker->job.cancelled)
+                    for (const auto &job : worker->batch)
+                        if (job.kind == Thumbnail && job.identity == entry.identity && job.rotation == rotation) consider(job.frame);
             for (const auto &job : queue_)
                 if (job.kind == Thumbnail && job.identity == entry.identity && job.rotation == rotation) consider(job.frame);
         }
     }
     const QString key = entry.identity + ':' + QString::number(frame) + ':' + QString::number(rotation);
     if (viewport_) viewportRequests_.insert(key);
-    if (const auto image = images_.object(key)) return *image;
+    if (const auto image = images_.object(key)) { ++thumbnailHits_; return *image; }
+    ++thumbnailMisses_;
     if (priority && pending_.contains(key)) {
+        for (auto *worker : workers_)
+            if (!worker->job.cancelled && worker->batch.size() > 1 &&
+                std::any_of(worker->batch.cbegin(), worker->batch.cend(), [&key](const Job &job) { return job.key == key; }))
+                cancel(worker, true);
         auto queued = std::find_if(queue_.begin(), queue_.end(), [&key](const Job &job) { return job.key == key; });
         if (queued != queue_.end()) {
             pending_.remove(key);
             queue_.erase(queued);
         }
     }
-    if (!pending_.contains(key) && !failures_.contains(key))
-        enqueue(Job{sourceKey(path), entry.path, entry.identity, key, entry.generation, frame, rotation, Thumbnail, priority});
+    if (!pending_.contains(key) && !failures_.contains(key)) {
+        Job job{sourceKey(path), entry.path, entry.identity, key, entry.generation, frame, rotation, Thumbnail, priority};
+        job.batchable = toleranceFrames > 0 && !priority;
+        enqueue(job);
+    }
     return {};
 }
 
@@ -238,12 +265,13 @@ bool MediaCache::isFresh(const Job &job) const {
 
 void MediaCache::cancel(Worker *worker, bool requeue) {
     if (worker->job.key.isEmpty() || worker->job.cancelled) return;
-    const Job job = worker->job;
     worker->job.cancelled = true;
-    pending_.remove(job.key);
-    if (requeue && !enqueue(job)) {
-        auto source = sources_.find(job.source);
-        if (source != sources_.end() && source->generation == job.generation) source->waveformState.clear();
+    for (const auto &job : worker->batch) {
+        pending_.remove(job.key);
+        if (requeue && !enqueue(job)) {
+            auto source = sources_.find(job.source);
+            if (source != sources_.end() && source->generation == job.generation) source->waveformState.clear();
+        }
     }
     if (worker->process->state() != QProcess::NotRunning) worker->process->kill();
     else complete(worker, false);
@@ -257,6 +285,12 @@ void MediaCache::startNext() {
             return !worker->job.cancelled && worker->job.kind == Waveform;
         });
         if (waveform != workers_.end()) cancel(*waveform, true);
+        else {
+            const auto batch = std::find_if(workers_.begin(), workers_.end(), [](const Worker *worker) {
+                return !worker->job.cancelled && !worker->job.priority && worker->batch.size() > 1;
+            });
+            if (batch != workers_.end()) cancel(*batch, true);
+        }
     }
     for (auto *worker : workers_) {
         if (!worker->job.key.isEmpty() || worker->process->state() != QProcess::NotRunning || queue_.isEmpty()) continue;
@@ -267,6 +301,19 @@ void MediaCache::startNext() {
         }
         worker->job = *next;
         queue_.erase(next);
+        worker->batch = {worker->job};
+        if (worker->job.batchable) {
+            const auto first = worker->job;
+            for (auto it = queue_.begin(); it != queue_.end() && worker->batch.size() < MaximumBatchFrames;) {
+                if (it->batchable && it->source == first.source && it->generation == first.generation &&
+                    it->identity == first.identity && it->rotation == first.rotation &&
+                    std::abs(it->frame - first.frame) <= MaximumBatchSpan / 2) {
+                    worker->batch.append(*it); it = queue_.erase(it);
+                } else ++it;
+            }
+            std::sort(worker->batch.begin(), worker->batch.end(), [](const Job &a, const Job &b) { return a.frame < b.frame; });
+            worker->job = worker->batch.first();
+        }
         worker->imageBytes.clear();
         worker->peaks.clear();
         worker->binSamples = 0;
@@ -298,7 +345,15 @@ void MediaCache::startNext() {
             // FFmpeg applies camera orientation before this explicit user rotation.
             filter = "tpad=stop=1:stop_mode=clone,setpts=ceil(PTS-0.5/(FRAME_RATE*TB)),fps=60:round=up," + filter;
             filter += "scale=w='max(1,trunc(min(160,min(iw*sar,90*dar))))':h='max(1,trunc(ow/dar))',setsar=1";
-            arguments << "-vf" << filter << "-frames:v" << "1" << "-an" << "-c:v" << "png" << "-threads" << threads << "-f" << "image2pipe" << "pipe:1";
+            if (worker->batch.size() > 1) {
+                QStringList positions;
+                for (const auto &frame : worker->batch) positions.append(QString("eq(pts,%1)").arg(frame.frame - worker->job.frame));
+                filter += ",select='" + positions.join('+') + "'";
+                arguments << "-fps_mode" << "passthrough";
+                batchedFrames_ += worker->batch.size();
+            }
+            ++thumbnailProcesses_;
+            arguments << "-vf" << filter << "-frames:v" << QString::number(worker->batch.size()) << "-an" << "-c:v" << "png" << "-threads" << threads << "-f" << "image2pipe" << "pipe:1";
         } else {
             arguments << "-i" << worker->job.path << "-map" << "0:a:0" << "-vn" << "-ac" << "1" << "-ar" << "2000"
                       << "-c:a" << "pcm_s16le" << "-threads" << threads << "-f" << "s16le" << "pipe:1";
@@ -312,7 +367,7 @@ void MediaCache::readOutput(Worker *worker) {
     const QByteArray bytes = worker->process->readAllStandardOutput();
     if (worker->job.key.isEmpty() || worker->job.cancelled || worker->outputOverflow) return;
     if (worker->job.kind == Thumbnail) {
-        if (worker->imageBytes.size() + bytes.size() <= MaximumImageBytes) worker->imageBytes.append(bytes);
+        if (worker->imageBytes.size() + bytes.size() <= MaximumImageBytes * worker->batch.size()) worker->imageBytes.append(bytes);
         else { worker->outputOverflow = true; worker->process->kill(); }
         return;
     }
@@ -332,34 +387,47 @@ void MediaCache::readOutput(Worker *worker) {
 void MediaCache::complete(Worker *worker, bool success) {
     const int maximumBins = waveforms_.maxCost() / int(sizeof(float));
     if (worker->job.key.isEmpty()) return;
-    const Job job = worker->job;
-    const bool fresh = isFresh(job);
-    success = success && !worker->outputOverflow;
-    if (fresh) {
-        if (job.kind == Thumbnail) {
-            const QImage image = success ? QImage::fromData(worker->imageBytes, "PNG") : QImage();
-            success = !image.isNull() && image.width() <= 160 && image.height() <= 90;
-            if (success) images_.insert(job.key, new QImage(image), int(image.sizeInBytes()));
-            else failures_.insert(job.key, new bool(true));
-        } else {
-            if (success && worker->binSamples > 0) {
-                if (worker->peaks.size() < maximumBins) worker->peaks.append(std::clamp(worker->binPeak, 0.0f, 1.0f));
-                else success = false;
+    bool changed = false;
+    qsizetype pngOffset = 0;
+    for (const auto &job : worker->batch) {
+        const bool fresh = !worker->job.cancelled && isFresh(job);
+        bool valid = success && !worker->outputOverflow;
+        QImage image;
+        if (job.kind == Thumbnail && valid) image = nextPng(worker->imageBytes, &pngOffset);
+        if (fresh) {
+            if (job.kind == Thumbnail) {
+                valid = !image.isNull() && image.width() <= 160 && image.height() <= 90;
+                if (valid) images_.insert(job.key, new QImage(image), int(image.sizeInBytes()));
+                else failures_.insert(job.key, new bool(true));
+            } else {
+                if (valid && worker->binSamples > 0) {
+                    if (worker->peaks.size() < maximumBins) worker->peaks.append(std::clamp(worker->binPeak, 0.0f, 1.0f));
+                    else valid = false;
+                }
+                valid = valid && !worker->peaks.isEmpty();
+                if (valid) waveforms_.insert(job.key, new QVector<float>(worker->peaks), int(worker->peaks.size() * sizeof(float)));
+                sources_[job.source].waveformState = valid ? "ready" : "unavailable";
             }
-            success = success && !worker->peaks.isEmpty();
-            if (success) waveforms_.insert(job.key, new QVector<float>(worker->peaks), int(worker->peaks.size() * sizeof(float)));
-            sources_[job.source].waveformState = success ? "ready" : "unavailable";
+            changed = true;
         }
+        // A replacement may already have queued the same key while a cancelled process exits.
+        const bool replacementPending = std::any_of(queue_.cbegin(), queue_.cend(), [&job](const Job &queued) { return queued.key == job.key; }) ||
+            std::any_of(workers_.cbegin(), workers_.cend(), [worker, &job](const Worker *other) {
+                return other != worker && !other->job.cancelled && std::any_of(other->batch.cbegin(), other->batch.cend(),
+                    [&job](const Job &active) { return active.key == job.key; });
+            });
+        if (!replacementPending) pending_.remove(job.key);
     }
-    // A replacement may already have queued the same key while a cancelled process exits.
-    const bool replacementPending = std::any_of(queue_.cbegin(), queue_.cend(), [&job](const Job &queued) { return queued.key == job.key; }) ||
-        std::any_of(workers_.cbegin(), workers_.cend(), [worker, &job](const Worker *other) {
-            return other != worker && !other->job.cancelled && other->job.key == job.key;
-        });
-    if (!replacementPending) pending_.remove(job.key);
     worker->job = {};
+    worker->batch.clear();
     worker->imageBytes = {};
     worker->peaks = {};
-    if (fresh) emit changed();
+    if (changed) emit this->changed();
     schedule();
+}
+
+QVariantMap MediaCache::diagnostics() const {
+    return {{"preparationMs", preparationMs_}, {"processes", QVariant::fromValue(processCount_)}, {"thumbnailHits", QVariant::fromValue(thumbnailHits_)}, {"thumbnailMisses", QVariant::fromValue(thumbnailMisses_)},
+            {"thumbnailProcesses", QVariant::fromValue(thumbnailProcesses_)}, {"batchedFrames", QVariant::fromValue(batchedFrames_)},
+            {"queuedJobs", queue_.size()}, {"thumbnailBytes", images_.totalCost()}, {"waveformBytes", waveforms_.totalCost()}};
 }

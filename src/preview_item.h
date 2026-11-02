@@ -1,17 +1,21 @@
 #pragma once
 #include <QQuickPaintedItem>
+#include <QQuickItem>
 #include <QImage>
 #include <QPointer>
+#include <atomic>
 #include "editor_controller.h"
 #include "media_cache.h"
-class VideoPreview : public QQuickPaintedItem {
+class VideoPreview : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(EditorController* controller READ controller WRITE setController NOTIFY controllerChanged)
+    Q_PROPERTY(qulonglong textureUploads READ textureUploads)
 public:
     explicit VideoPreview(QQuickItem *parent=nullptr);
     EditorController *controller() const { return controller_; }
     void setController(EditorController *controller);
-    void paint(QPainter *painter) override;
+    void paint(QPainter *painter);
+    qulonglong textureUploads() const {return textureUploads_.load();}
     Q_INVOKABLE QRectF textRect(int index) const;
     Q_INVOKABLE QRectF captionRect(int index) const;
     Q_INVOKABLE void cancelTextDrag() { mouseUngrabEvent(); }
@@ -20,12 +24,18 @@ signals:
     void textSelected();
     void captionSelected();
 protected:
+    QSGNode *updatePaintNode(QSGNode *,UpdatePaintNodeData *) override;
+    void geometryChange(const QRectF &,const QRectF &) override;
     void mousePressEvent(QMouseEvent *) override;
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
     void mouseUngrabEvent() override;
     void keyPressEvent(QKeyEvent *) override;
 private:
+    void refresh();
+    QImage image_;
+    QQuickPaintedItem *decorations_=nullptr;
+    std::atomic<qulonglong> textureUploads_{0};
     QRectF imageRect() const;
     QRectF timedRect(int index,bool caption) const;
     QPolygonF transformPolygon() const;

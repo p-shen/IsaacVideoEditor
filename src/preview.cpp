@@ -61,7 +61,7 @@ Preview::~Preview()
     frameEvent_.reset();
 }
 
-bool Preview::setProducer(Mlt::Producer *producer)
+bool Preview::setProducer(Mlt::Producer *producer, bool renderInitialStill)
 {
     quiesceSeek(true);
     stopConsumer();
@@ -100,7 +100,7 @@ bool Preview::setProducer(Mlt::Producer *producer)
     producer_ = producer;
     sourcePaths_=Media::sourceFiles(*producer);
     producerLength_ = producer->get_playtime();
-    if (!renderStill()) {
+    if (renderInitialStill && !renderStill()) {
         producer_ = nullptr;
         return false;
     }
@@ -109,11 +109,17 @@ bool Preview::setProducer(Mlt::Producer *producer)
 
 void Preview::updateRenderProfile(mlt_profile profile)
 {
-    const double scale = std::min({1.0, std::clamp(budget_.previewWidth,2,1920) / double(profile->width),
-                                   std::clamp(budget_.previewHeight,2,1080) / double(profile->height)});
+    const double scale = std::min({1.0, std::clamp(budget_.previewWidth,2,3840) / double(profile->width),
+                                   std::clamp(budget_.previewHeight,2,2160) / double(profile->height)});
     renderWidth_ = std::max(1, qRound(profile->width * scale));
     renderHeight_ = std::max(1, qRound(profile->height * scale));
-    consumer_->set_profile(profile);
+    // Consumer properties update its profile; never shrink the caller's source profile.
+    outputProfile_.set_explicit(1);outputProfile_.set_width(renderWidth_);outputProfile_.set_height(renderHeight_);
+    outputProfile_.set_frame_rate(profile->frame_rate_num,profile->frame_rate_den);
+    outputProfile_.set_progressive(profile->progressive);outputProfile_.set_colorspace(profile->colorspace);
+    outputProfile_.set_sample_aspect(profile->sample_aspect_num,profile->sample_aspect_den);
+    outputProfile_.set_display_aspect(profile->display_aspect_num,profile->display_aspect_den);
+    consumer_->set_profile(outputProfile_.get_profile());
     // Consumer properties override its profile and retain constructor values.
     consumer_->set("width", renderWidth_);
     consumer_->set("height", renderHeight_);
@@ -150,7 +156,7 @@ void Preview::play()
     emit playbackChanged(true);
 }
 
-void Preview::pause()
+void Preview::pause(bool renderPausedStill)
 {
     quiesceSeek();
     if (!producer_) {
@@ -161,7 +167,7 @@ void Preview::pause()
     if (wasPlaying) {
         emit playbackChanged(false);
     }
-    renderStill();
+    if(renderPausedStill)renderStill();
 }
 
 void Preview::seek(int frame)
@@ -192,6 +198,8 @@ void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> 
     stopConsumer();
     const auto generation = generation_.load();
     frame = std::clamp(frame, 0, std::max(0, producerLength_ - 1));
+    if(lastRequestedFrame_>=0 && frame!=lastRequestedFrame_)seekDirection_=frame>lastRequestedFrame_?1:-1;
+    lastRequestedFrame_=frame;
     if (commitPosition) {
         position_ = frame;
     }
@@ -199,7 +207,8 @@ void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> 
         const std::lock_guard<std::mutex> lock(seekMutex_);
         // A newer seek still needs the latest edit that has not reached the worker.
         if (edit) pendingEdit_ = std::move(edit);
-        pendingSeek_ = SeekRequest{frame, position_, commitPosition, generation, frameRevision()};
+        prefetch_.clear();
+        pendingSeek_ = SeekRequest{frame, position_, commitPosition, generation, frameRevision(),false,seekDirection_};
         if (!seekWorker_.joinable()) {
             seekWorker_ = std::thread(&Preview::seekLoop, this);
         }
@@ -224,6 +233,7 @@ void Preview::cancelPendingSeek()
     {
         const std::lock_guard<std::mutex> lock(seekMutex_);
         pendingSeek_.reset();
+        prefetch_.clear();
         pendingEdit_ = {};
     }
     resumeAfterSeek_ = false;
@@ -254,12 +264,12 @@ void Preview::seekLoop()
         SeekRequest request;
         {
             std::unique_lock<std::mutex> lock(seekMutex_);
-            seekWake_.wait(lock, [this] { return stopSeekWorker_ || pendingSeek_.has_value(); });
+            seekWake_.wait(lock, [this] { return stopSeekWorker_ || pendingSeek_.has_value() || !prefetch_.empty(); });
             if (stopSeekWorker_) {
                 return;
             }
-            request = *pendingSeek_;
-            pendingSeek_.reset();
+            if(pendingSeek_){request=*pendingSeek_;pendingSeek_.reset();}
+            else {request=prefetch_.front();prefetch_.pop_front();}
             seekBusy_ = true;
         }
         QImage image;
@@ -271,25 +281,34 @@ void Preview::seekLoop()
                 if(request.generation==generation_.load())edit=std::move(pendingEdit_);
             }
             if (edit) edit();
-            const auto revision=refreshSourceIdentity(request.frameRevision);
+            const auto revision=request.prefetch?request.frameRevision:refreshSourceIdentity(request.frameRevision);
+            request.frameRevision=revision;
             image=cachedFrame(request.frame,revision);
             if(image.isNull()){
+                const auto decodeStarted=std::chrono::steady_clock::now();
                 producer_->seek(request.frame);
                 std::unique_ptr<Mlt::Frame> frame(producer_->get_frame());
                 if (frame && frame->is_valid()) {
                     image = imageFromFrame(frame->get_frame(), renderWidth_, renderHeight_);
                 }
+                decodeMicros_+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-decodeStarted).count();
+                if(request.prefetch&&!image.isNull())++preloadedFrames_;
             }
             decodeError=VisualRendering::renderError(*producer_);
             if(decodeError.isEmpty())cacheFrame(request.frame,image,revision);
-            else image={};
+            else {
+                image={};
+                // Speculative future frames must not poison a valid current frame.
+                if(request.prefetch)VisualRendering::discardSpeculativeError(*producer_,decodeError);
+            }
             producer_->seek(request.restorePosition);
         }
-        QMetaObject::invokeMethod(this, [this, request, image, decodeError] {
+        if(!request.prefetch)QMetaObject::invokeMethod(this, [this, request, image, decodeError] {
             if (request.generation != generation_.load() || !producer_) {
                 return;
             }
             const bool resume = resumeAfterSeek_;
+            ++seekCount_;lastSeekMicros_=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-request.queuedAt).count();
             resumeAfterSeek_ = false;
             seeking_ = false;
             emit seekingChanged(false);
@@ -300,12 +319,15 @@ void Preview::seekLoop()
                 emit errorOccurred(decodeError.isEmpty()?tr("Could not decode this preview frame."):decodeError);
             } else {
                 emit frameReady(image);
+                ++deliveredFrames_;
                 if (request.generation == generation_.load()) {
                     emit seekSettled(request.frame, request.committed);
                 }
             }
             if (resume && request.generation == generation_.load()) {
                 play();
+            } else if(!image.isNull() && request.generation==generation_.load() && !playing_) {
+                queuePrefetch(request);
             }
         }, Qt::QueuedConnection);
         {
@@ -357,7 +379,10 @@ bool Preview::renderStill()
 void Preview::frameShown(mlt_properties, void *context, mlt_event_data data)
 {
     auto *self = static_cast<Preview *>(context);
-    if (!self || !self->playing_.load() || self->deliveryPending_.exchange(true)) {
+    if (!self || !self->playing_.load())return;
+    ++self->receivedFrames_;
+    if (self->deliveryPending_.exchange(true)) {
+        ++self->skippedFrames_;
         return;
     }
     self->publishFrame(mlt_event_data_to_frame(data), self->generation_.load());
@@ -394,12 +419,13 @@ void Preview::publishFrame(mlt_frame frame, std::uint64_t generation)
         }
         refreshCacheBudget();
         position_ = framePosition;
+        ++deliveredFrames_;
         emit frameReady(image);
         emit audioPeak(peak);
         emit positionChanged(position_);
         if (producer_ && producer_->get_playtime() > 0 &&
             position_ >= producer_->get_playtime() - 1) {
-            pause();
+            pause(false);
         }
     }, Qt::QueuedConnection);
 }
@@ -418,7 +444,40 @@ QImage Preview::cachedFrame(int frame,std::uint64_t revision){
     const std::lock_guard<std::mutex> lock(frameCacheMutex_);
     if(revision!=frameRevision_)return {};
     const auto *image=frameCache_.object(frame);
+    if(image)++cacheHits_;else ++cacheMisses_;
     return image?*image:QImage{};
+}
+
+void Preview::queuePrefetch(const SeekRequest &request) {
+    if(budget_.prefetchFrames<=0 || request.generation!=generation_.load() || playing_)return;
+    const qint64 frameKiB=(qint64(renderWidth_)*renderHeight_*4+1023)/1024;
+    int count=0;
+    {const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+        if(frameKiB>0)count=int(std::clamp(qint64(frameCache_.maxCost())/frameKiB-2,qint64(0),qint64(budget_.prefetchFrames)));}
+    {const std::lock_guard<std::mutex> lock(seekMutex_);
+        if(pendingSeek_ || request.generation!=generation_.load())return;
+        prefetch_.clear();
+        for(int i=1;i<=count;++i){const int frame=request.frame+i*request.direction;if(frame<0||frame>=producerLength_)break;
+            auto next=request;next.frame=frame;next.prefetch=true;prefetch_.push_back(next);}}
+    seekWake_.notify_one();
+}
+
+void Preview::setQualityLimit(const QSize &size) {
+    const QSize bounded(std::clamp(size.width(),2,3840),std::clamp(size.height(),2,2160));
+    if(budget_.previewWidth==bounded.width()&&budget_.previewHeight==bounded.height())return;
+    quiesceSeek();const bool resume=playing_.exchange(false);stopConsumer();
+    budget_.previewWidth=bounded.width();budget_.previewHeight=bounded.height();invalidateFrames();
+    if(producer_){updateRenderProfile(producer_->get_profile());resumeAfterSeek_=resume;requestSeek(position_);}
+}
+
+QVariantMap Preview::diagnostics() const {
+    const std::lock_guard<std::mutex> lock(frameCacheMutex_);
+    return {{"cacheHits",qulonglong(cacheHits_)},{"cacheMisses",qulonglong(cacheMisses_)},
+        {"preloadedFrames",qulonglong(preloadedFrames_)},{"receivedFrames",qulonglong(receivedFrames_)},
+        {"deliveredFrames",qulonglong(deliveredFrames_)},{"skippedFrames",qulonglong(skippedFrames_)},
+        {"seekCount",qulonglong(seekCount_)},{"lastSeekMs",lastSeekMicros_.load()/1000.0},
+        {"decodeMs",decodeMicros_.load()/1000.0},{"cachedBytes",qint64(frameCache_.totalCost())*1024},
+        {"cacheLimitBytes",qint64(frameCache_.maxCost())*1024},{"width",renderWidth_},{"height",renderHeight_}};
 }
 
 void Preview::cacheFrame(int frame,const QImage &image,std::uint64_t revision){

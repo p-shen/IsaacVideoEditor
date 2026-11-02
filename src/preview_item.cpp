@@ -10,6 +10,10 @@
 #include <QPainter>
 #include <QPalette>
 #include <QtMath>
+#include <QQuickWindow>
+#include <QSGImageNode>
+#include <QSGRectangleNode>
+#include <QSGTexture>
 namespace {
 void drawFit(QPainter *p,const QImage &image,const QRectF &bounds) {
     p->fillRect(bounds,QColor("#101114"));
@@ -18,19 +22,68 @@ void drawFit(QPainter *p,const QImage &image,const QRectF &bounds) {
     QRectF target(QPointF((bounds.width()-size.width())/2,(bounds.height()-size.height())/2),size);
     p->setRenderHint(QPainter::SmoothPixmapTransform); p->drawImage(target,image);
 }
+class Decorations final : public QQuickPaintedItem {
+public:
+    explicit Decorations(VideoPreview *owner):QQuickPaintedItem(owner),owner_(owner){setAcceptedMouseButtons(Qt::NoButton);setZ(1);}
+    void paint(QPainter *p) override {owner_->paint(p);}
+private:VideoPreview *owner_;
+};
+struct PreviewNodes final : QSGNode {
+    QSGRectangleNode *background=nullptr;
+    QSGImageNode *video=nullptr;
+    QSGTexture *texture=nullptr;
+    qint64 imageKey=0;
+    ~PreviewNodes() override {if(video){removeChildNode(video);delete video;}delete texture;}
+};
 }
-VideoPreview::VideoPreview(QQuickItem *parent):QQuickPaintedItem(parent) { setOpaquePainting(true);setAcceptedMouseButtons(Qt::LeftButton);setActiveFocusOnTab(true); }
+VideoPreview::VideoPreview(QQuickItem *parent):QQuickItem(parent) {
+    setFlag(ItemHasContents);setAcceptedMouseButtons(Qt::LeftButton);setActiveFocusOnTab(true);decorations_=new Decorations(this);
+}
+void VideoPreview::refresh(){
+    image_=controller_?controller_->frame():QImage();update();
+    decorations_->setVisible(controller_&&!controller_->playing()&&!controller_->sourceMode()&&
+        (controller_->transformMode()||controller_->selectedText()>=0||controller_->selectedCaption()>=0));
+    if(decorations_->isVisible())decorations_->update();
+}
+void VideoPreview::geometryChange(const QRectF &next,const QRectF &before){
+    QQuickItem::geometryChange(next,before);decorations_->setSize(next.size());decorations_->update();update();
+}
+QSGNode *VideoPreview::updatePaintNode(QSGNode *previous,UpdatePaintNodeData *) {
+    if(!window())return previous;
+    auto *nodes=static_cast<PreviewNodes*>(previous);
+    if(!nodes){nodes=new PreviewNodes;nodes->background=window()->createRectangleNode();
+        if(nodes->background){nodes->background->setColor(QColor("#101114"));nodes->appendChildNode(nodes->background);}}
+    if(nodes->background)nodes->background->setRect(boundingRect());
+    if(image_.isNull()){
+        if(nodes->video){nodes->removeChildNode(nodes->video);delete nodes->video;nodes->video=nullptr;}
+        delete nodes->texture;nodes->texture=nullptr;nodes->imageKey=0;return nodes;
+    }
+    if(!nodes->video || nodes->imageKey!=image_.cacheKey()){
+        auto *texture=window()->createTextureFromImage(image_);
+        if(!texture)return nodes;
+        const bool created=!nodes->video;
+        if(created){nodes->video=window()->createImageNode();if(!nodes->video){delete texture;return nodes;}
+            nodes->video->setOwnsTexture(false);nodes->video->setFiltering(QSGTexture::Linear);}
+        nodes->video->setTexture(texture);delete nodes->texture;nodes->texture=texture;nodes->imageKey=image_.cacheKey();++textureUploads_;
+        if(created)nodes->appendChildNode(nodes->video);}
+    nodes->video->setRect(imageRect());nodes->video->setSourceRect(QRectF(QPointF(0,0),image_.size()));return nodes;
+}
 void VideoPreview::setController(EditorController *c) {
     if(controller_==c) return;
     if(controller_) disconnect(controller_,nullptr,this,nullptr);
     controller_=c;
     if(c){
-        connect(c,&EditorController::compositionChanged,this,[this]{update();});
-        connect(c,&EditorController::frameChanged,this,[this]{update();});
-        connect(c,&EditorController::selectionChanged,this,[this]{update();});
-        connect(c,&EditorController::positionChanged,this,[this]{update();});
+        connect(c,&EditorController::compositionChanged,this,[this]{refresh();});
+        connect(c,&EditorController::frameChanged,this,[this]{refresh();});
+        connect(c,&EditorController::selectionChanged,this,[this]{refresh();});
+        connect(c,&EditorController::positionChanged,this,[this]{if(decorations_->isVisible())decorations_->update();});
+        connect(c,&EditorController::stateChanged,this,[this]{
+            const bool show=controller_&&!controller_->playing()&&!controller_->sourceMode()&&
+                (controller_->transformMode()||controller_->selectedText()>=0||controller_->selectedCaption()>=0);
+            if(show!=decorations_->isVisible())refresh();});
+        connect(c,&QObject::destroyed,this,[this]{refresh();});
     }
-    emit controllerChanged(); update();
+    emit controllerChanged();refresh();
 }
 QRectF VideoPreview::imageRect() const {
     if(!controller_||controller_->frame().isNull())return {};
@@ -68,7 +121,6 @@ QPointF VideoPreview::rotationHandle() const {
     const QPointF top=(polygon[0]+polygon[1])/2,center=(polygon[0]+polygon[2])/2;const auto vector=top-center;const double distance=std::hypot(vector.x(),vector.y());return distance>0?top+vector*(24/distance):top;
 }
 void VideoPreview::paint(QPainter *p) {
-    drawFit(p,controller_?controller_->frame():QImage(),boundingRect());
     if(controller_&&!controller_->playing()&&controller_->transformMode()){
         const auto polygon=transformPolygon();if(polygon.isEmpty())return;
         const auto accent=QGuiApplication::palette().highlight().color();p->setPen(QPen(accent,2));p->setBrush(Qt::NoBrush);p->drawPolygon(polygon);
@@ -125,7 +177,7 @@ void VideoPreview::keyPressEvent(QKeyEvent *e){
     if(controller_&&!controller_->sourceMode()&&(controller_->selectedText()>=0||controller_->selectedCaption()>=0)&&e->key()>=Qt::Key_Left&&e->key()<=Qt::Key_Down){
         const auto rect=imageRect();if(rect.isEmpty())return;const bool caption=controller_->selectedCaption()>=0;const auto t=caption?controller_->project().captions[controller_->selectedCaption()]:controller_->project().textOverlays[controller_->selectedText()];const double step=e->modifiers().testFlag(Qt::ShiftModifier)?10:1;
         if(caption)controller_->beginCaptionEdit(controller_->selectedCaption());else controller_->beginTextDrag();controller_->dragTextTo(t.x+(e->key()==Qt::Key_Left?-step:e->key()==Qt::Key_Right?step:0)/rect.width(),t.y+(e->key()==Qt::Key_Up?-step:e->key()==Qt::Key_Down?step:0)/rect.height());controller_->endTextDrag(false);e->accept();
-    }else QQuickPaintedItem::keyPressEvent(e);
+    }else QQuickItem::keyPressEvent(e);
 }
 CachedFrame::CachedFrame(QQuickItem *parent):QQuickPaintedItem(parent) { setOpaquePainting(true); }
 void CachedFrame::setCache(MediaCache *c) {

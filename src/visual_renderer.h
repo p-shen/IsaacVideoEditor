@@ -11,6 +11,8 @@ bool attachTransform(Mlt::Producer &source,Mlt::Tractor &timeline,const Clip &cl
 bool attachOverlays(Mlt::Tractor &timeline,Mlt::Profile &profile,const Project &project,QString *error,bool allowOffline=false);
 // First overlay decode failure on this producer; remains set until the timeline is rebuilt.
 QString renderError(Mlt::Producer &producer);
+// Only a speculative, exclusively owned preview decode may discard its own failure.
+void discardSpeculativeError(Mlt::Producer &producer,const QString &expected);
 // Preview serializes this with playback and decoding, including transport changes.
 void update(Mlt::Tractor &timeline,const Project &project);
 }

@@ -15,7 +15,7 @@ class ExportJob final : public QObject {
 public:
     explicit ExportJob(const QString &program, QObject *parent=nullptr);
     ~ExportJob() override;
-    bool start(const Project &snapshot, const QString &destination, QString *error=nullptr, bool optimizeForIphone=false);
+    bool start(const Project &snapshot, const QString &destination, QString *error=nullptr, bool optimizeForIphone=false, bool softwareOnly=false);
     void cancel();
     void stopAndWait();
     QString logPath() const { return log_.fileName(); }

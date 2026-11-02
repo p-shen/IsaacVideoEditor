@@ -9,6 +9,10 @@
 #include <QPointer>
 #include <QHash>
 #include <QTimer>
+#include <QThreadPool>
+#include <QElapsedTimer>
+#include <atomic>
+#include <functional>
 #include <mlt++/Mlt.h>
 #include <memory>
 class Preview;
@@ -22,13 +26,13 @@ class EditorController final : public QObject {
     Q_PROPERTY(QVariantList assets READ assets NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap currentSource READ currentSource NOTIFY sourceChanged)
     Q_PROPERTY(int selectedSource READ selectedSource NOTIFY sourceChanged)
-    Q_PROPERTY(int sourcePosition READ sourcePosition NOTIFY sourceChanged)
+    Q_PROPERTY(int sourcePosition READ sourcePosition NOTIFY sourcePositionChanged)
     Q_PROPERTY(bool sourceMode READ sourceMode NOTIFY sourceChanged)
-    Q_PROPERTY(QString sourceTimeText READ sourceTimeText NOTIFY sourceChanged)
+    Q_PROPERTY(QString sourceTimeText READ sourceTimeText NOTIFY sourcePositionChanged)
     Q_PROPERTY(QVariantList visualOverlays READ visualOverlays NOTIFY compositionChanged)
     Q_PROPERTY(QVariantList visualLanes READ visualLanes NOTIFY compositionChanged)
     Q_PROPERTY(int selectedOverlay READ selectedOverlay NOTIFY compositionChanged)
-    Q_PROPERTY(QVariantMap currentTransform READ currentTransform NOTIFY compositionChanged)
+    Q_PROPERTY(QVariantMap currentTransform READ currentTransform NOTIFY transformChanged)
     Q_PROPERTY(QVariantMap canvas READ canvas NOTIFY compositionChanged)
     Q_PROPERTY(bool transformMode READ transformMode WRITE setTransformMode NOTIFY compositionChanged)
     Q_PROPERTY(bool visualPreviewActive READ visualPreviewActive NOTIFY compositionChanged)
@@ -52,7 +56,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(int position READ position NOTIFY positionChanged)
     Q_PROPERTY(QString timeText READ timeText NOTIFY positionChanged)
     Q_PROPERTY(bool playing READ playing NOTIFY stateChanged)
-    Q_PROPERTY(bool canSplit READ canSplit NOTIFY stateChanged)
+    Q_PROPERTY(bool canSplit READ canSplit NOTIFY splitAvailabilityChanged)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
     Q_PROPERTY(QString undoText READ undoText NOTIFY stateChanged)
@@ -75,8 +79,8 @@ class EditorController final : public QObject {
     Q_PROPERTY(QVariantMap currentAudio READ currentAudio NOTIFY stateChanged)
     Q_PROPERTY(int audioLane READ audioLane NOTIFY stateChanged)
     Q_PROPERTY(int soloLane READ soloLane NOTIFY stateChanged)
-    Q_PROPERTY(double masterPeak READ masterPeak NOTIFY stateChanged)
-    Q_PROPERTY(bool masterClipped READ masterClipped NOTIFY stateChanged)
+    Q_PROPERTY(double masterPeak READ masterPeak NOTIFY audioLevelsChanged)
+    Q_PROPERTY(bool masterClipped READ masterClipped NOTIFY audioLevelsChanged)
     Q_PROPERTY(QVariantList transitions READ transitions NOTIFY projectChanged)
     Q_PROPERTY(QVariantList transitionPresets READ transitionPresets CONSTANT)
     Q_PROPERTY(int selectedTransition READ selectedTransition NOTIFY stateChanged)
@@ -90,6 +94,9 @@ class EditorController final : public QObject {
     Q_PROPERTY(QString exportDestination READ exportDestination NOTIFY stateChanged)
     Q_PROPERTY(QString exportRevision READ exportRevision NOTIFY stateChanged)
     Q_PROPERTY(QString exportDetails READ exportDetails NOTIFY stateChanged)
+    Q_PROPERTY(QString cacheDirectory READ cacheDirectory NOTIFY stateChanged)
+    Q_PROPERTY(int cacheLimitGiB READ cacheLimitGiB NOTIFY stateChanged)
+    Q_PROPERTY(int previewQuality READ previewQuality NOTIFY stateChanged)
 public:
     explicit EditorController(QObject *parent=nullptr,const Performance::Budget &budget=Performance::budget());
     ~EditorController() override;
@@ -103,6 +110,7 @@ public:
     QString sourceTimeText() const;
     Q_INVOKABLE QVariantList filteredAssets(const QString &search,const QString &kind,const QString &usage) const;
     Q_INVOKABLE bool importMedia(const QStringList &paths);
+    Q_INVOKABLE void cancelImport();
     Q_INVOKABLE void importMediaUrls(const QVariantList &urls);
     Q_INVOKABLE void importAndAppendDialog();
     Q_INVOKABLE void selectSource(int index);
@@ -119,6 +127,7 @@ public:
     Q_INVOKABLE bool insertSource();
     Q_INVOKABLE bool insertSourceAt(int frame);
     Q_INVOKABLE QVariantMap sourceInsertionPreview(int frame) const;
+    Q_INVOKABLE void dropMediaAtAsync(const QStringList &paths,int frame);
     Q_INVOKABLE bool dropMediaAt(const QStringList &paths,int frame);
     Q_INVOKABLE bool removeSource(int index,bool confirmed=false);
     Q_INVOKABLE void confirmRemoveSource(int index);
@@ -134,6 +143,7 @@ public:
     bool transformMode() const {return transformMode_;}
     void setTransformMode(bool enabled);
     Q_INVOKABLE bool addVisualOverlay(const QString &path,int frame=-1,int lane=0,int sourceInFrame=0,int sourceOutFrame=-1);
+    Q_INVOKABLE void dropVisualMediaAsync(const QVariantList &urls,int frame,int lane);
     Q_INVOKABLE bool dropVisualMedia(const QVariantList &urls,int frame,int lane);
     bool visualPreviewActive() const { return visualBefore_.has_value(); }
     Q_INVOKABLE void chooseVisualOverlay();
@@ -197,7 +207,7 @@ public:
     QVariantList selectedIndices() const { return selection_; }
     QVariantMap currentClip() const;
     int selectedClip() const { return primary_; }
-    int duration() const { return project_.durationFrames(); }
+    int duration() const { return timelineData_.duration; }
     int position() const { return position_; }
     QString timeText() const;
     bool playing() const;
@@ -221,7 +231,7 @@ public:
     double voiceStart() const { return project_.voiceStartSeconds; }
     double musicDb() const { return project_.musicDb; }
     double crossfade() const { return project_.crossfadeFrames/60.0; }
-    bool loading() const { return loading_; }
+    bool loading() const { return loading_||preparing_||sourcePreparing_||importing_; }
     QString recoveryStatus() const;
     QVariantList recoveryCandidates() const { return recoveryCandidates_; }
     QVariantList missingMedia() const;
@@ -230,10 +240,20 @@ public:
     QString exportDestination() const { return exportDestination_; }
     QString exportRevision() const { return exportRevision_; }
     QString exportDetails() const { return exportDetails_; }
+    QString cacheDirectory() const;
+    int cacheLimitGiB() const;
+    int previewQuality() const {return previewQuality_;}
+    Q_INVOKABLE bool setCacheDirectory(const QString &directory);
+    Q_INVOKABLE void chooseCacheDirectory();
+    Q_INVOKABLE void setCacheLimitGiB(int gib);
+    Q_INVOKABLE void setPreviewQuality(int maxHeight);
+    Q_INVOKABLE QVariantMap performanceDiagnostics() const;
     void enableRecovery(const QString &directory={});
     Q_INVOKABLE bool recoverSnapshot(const QString &path);
+    Q_INVOKABLE void recoverSnapshotAsync(const QString &path);
     Q_INVOKABLE void discardRecovery(const QString &path);
     Q_INVOKABLE void retryRecovery();
+    Q_INVOKABLE void relinkMediaAsync(const QString &missing,const QString &replacement);
     Q_INVOKABLE bool relinkMedia(const QString &missing,const QString &replacement);
     Q_INVOKABLE void locateMissing(const QString &path);
     Q_INVOKABLE void chooseRelinkFolder();
@@ -299,7 +319,9 @@ public:
     Q_INVOKABLE bool requestClose();
     Q_INVOKABLE void chooseVoice();
     Q_INVOKABLE void chooseMusic();
+    Q_INVOKABLE void setVoicePathAsync(const QString &path);
     Q_INVOKABLE void setVoicePath(const QString &path);
+    Q_INVOKABLE void setMusicPathAsync(const QString &path);
     Q_INVOKABLE void setMusicPath(const QString &path);
     Q_INVOKABLE void setVoiceStart(double seconds);
     Q_INVOKABLE void setMusicDb(double db);
@@ -310,21 +332,35 @@ public:
     Q_INVOKABLE void retryPreviews();
 signals:
     void compositionChanged();
+    void transformChanged();
     void projectChanged();
     void sourceChanged();
+    void sourcePositionChanged();
+    void sourceMetadataChanged();
+    void splitAvailabilityChanged();
+    void audioLevelsChanged();
     void selectionChanged();
     void positionChanged();
     void stateChanged();
     void frameChanged();
 private:
     Performance::Budget performanceBudget_;
+    QSize automaticPreviewSize_;
+    int previewQuality_=0;
     struct State { Project project; QVariantList selection; int primary=-1; int text=-1; int overlay=-1; int caption=-1; QVariantList captions; };
     State state() const;
     void apply(const State &state,int position,bool forceRebuild=false);
     bool commit(const Project &next,const QVariantList &selection,int primary,const QString &label,bool force=false,int text=-2,int overlay=-2,int caption=-2,const QVariantList &captions={});
     void rebuild();
     void rebuildSource();
-    bool addImported(Project &next,const QStringList &paths,bool append,QStringList &problems);
+    void startImport(const QStringList &paths,bool append,int insertFrame=-1);
+    void chooseAudioAsync(const QString &path,bool music);
+    void startVisualImport(const QStringList &paths,int frame,int lane);
+    void loadProjectAsync(const QString &path,const QVariantMap &recoveryOffer={});
+    void applyLoadedProject(Project loaded,const QString &path,const QHash<QString,double> &durations);
+    bool relinkInspectedMedia(const QString &missing,const QString &replacement,const QVariantMap &inspection);
+    QVariantMap sourceAsset(int index) const;
+    static bool addImported(Project &next,const QStringList &paths,bool append,QStringList &problems,const std::function<bool()> &canceled={});
     void refreshPendingProxy();
     void scheduleRecovery();
     void prioritizeProxy(int frame);
@@ -346,6 +382,8 @@ private:
     int transformSourceFrame() const;
     void applyComposition(const Project &project,const QString &label);
     Project project_;
+    Project::TimelineData timelineData_;
+    Project preparationSnapshot_;
     int selectedOverlay_=-1;
     bool transformMode_=false;
     std::optional<State> visualBefore_;
@@ -367,9 +405,14 @@ private:
     bool sourceMode_=false,sourceViewDirty_=false,sourceScrubbing_=false;
     int sourceScrubFrame_=0;
     Mlt::Profile sourceProfile_;
+    std::shared_ptr<void> sourceProxyLease_;
+    std::unique_ptr<Mlt::Profile> preparedSourceProfile_;
     std::unique_ptr<Mlt::Producer> sourceProducer_;
+    bool sourceUsesProxy_=false;
     std::unique_ptr<Preview> sourcePreview_;
     Mlt::Profile profile_;
+    QVector<std::shared_ptr<void>> timelineProxyLeases_;
+    std::unique_ptr<Mlt::Profile> preparedProfile_;
     std::unique_ptr<Mlt::Tractor> timeline_;
     std::unique_ptr<Preview> preview_;
     PreviewCache *proxyCache_=nullptr;
@@ -388,5 +431,12 @@ private:
     int exportProgress_=0,scrubPosition_=0;
     bool scrubbing_=false,skim_=false,resumeAfterScrub_=false,resumeWhenSettled_=false,loading_=false,proxyPending_=false;
     QTimer loadingTimer_;
-    bool rebuilding_=false;
+    bool rebuilding_=false,preparing_=false,sourcePreparing_=false,importing_=false;
+    bool playWhenPrepared_=false,sourcePlayWhenPrepared_=false;
+    quint64 projectRevision_=0;
+    std::atomic<quint64> preparationRevision_{0},sourceRevision_{0},importRevision_{0};
+    QThreadPool preparationPool_,sourcePool_,importPool_;
+    QElapsedTimer preparationClock_,sourceClock_,importClock_;
+    quint64 preparationJobs_=0,sourceJobs_=0,importJobs_=0,supersededJobs_=0;
+    qint64 preparationMs_=0,sourcePreparationMs_=0,importMs_=0,metadataMs_=0,timelineBuildMs_=0;
 };

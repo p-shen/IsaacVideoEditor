@@ -74,8 +74,8 @@ ColumnLayout {
         Layout.fillWidth: true; spacing: 4
         UI.Button { objectName: "appendSourceButton"; text: "Append"; enabled: controller.currentSource.validRange === true && controller.currentSource.kind === "video"; onClicked: controller.appendSource() }
         UI.Button { objectName: "insertSourceButton"; text: "Insert at playhead"; enabled: { controller.currentSource; controller.duration; return controller.sourceInsertionPreview(controller.position).valid } onClicked: controller.insertSource() }
-        UI.Button { text: "Use as narration"; visible: controller.currentSource.kind === "audio"; onClicked: controller.setVoicePath(controller.currentSource.path) }
-        UI.Button { text: "Use as music"; visible: controller.currentSource.kind === "audio"; onClicked: controller.setMusicPath(controller.currentSource.path) }
+        UI.Button { text: "Use as narration"; visible: controller.currentSource.kind === "audio"; onClicked: controller.setVoicePathAsync(controller.currentSource.path) }
+        UI.Button { text: "Use as music"; visible: controller.currentSource.kind === "audio"; onClicked: controller.setMusicPathAsync(controller.currentSource.path) }
     }
     Label {
         Layout.fillWidth: true; wrapMode: Text.Wrap; color: UI.Theme.muted

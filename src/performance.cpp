@@ -3,14 +3,19 @@
 #include <QThread>
 #include <algorithm>
 #include <limits>
+#if defined(Q_OS_UNIX)
+#include <sys/resource.h>
+#endif
 #if defined(Q_OS_MACOS)
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #elif defined(Q_OS_WIN)
 #define NOMINMAX
 #include <windows.h>
+#include <psapi.h>
 #elif defined(Q_OS_LINUX)
 #include <sys/sysinfo.h>
+#include <unistd.h>
 #endif
 
 namespace Performance {
@@ -67,7 +72,26 @@ Budget budgetFor(const Resources &r){
         b.exportQueueBytes=std::min(available/8,2*GiB);
     }
     b.prepareDuringExport=cores>=16&&available>=8*GiB;
+    if(cores>=12&&available>=8*GiB)b.prefetchFrames=16;
     return b;
 }
 Budget budget(){return budgetFor(resources());}
+ProcessMemory processMemory(){
+    ProcessMemory result;
+#if defined(Q_OS_MACOS)
+    mach_task_basic_info_data_t info{};mach_msg_type_number_t count=MACH_TASK_BASIC_INFO_COUNT;
+    if(task_info(mach_task_self(),MACH_TASK_BASIC_INFO,reinterpret_cast<task_info_t>(&info),&count)==KERN_SUCCESS)
+        result.residentBytes=info.resident_size;
+    rusage usage{};if(getrusage(RUSAGE_SELF,&usage)==0)result.peakResidentBytes=quint64(usage.ru_maxrss);
+#elif defined(Q_OS_LINUX)
+    QFile statm("/proc/self/statm");
+    if(statm.open(QIODevice::ReadOnly)){bool ok=false;const auto pages=statm.readAll().simplified().split(' ').value(1).toULongLong(&ok);
+        if(ok)result.residentBytes=pages*quint64(sysconf(_SC_PAGESIZE));}
+    rusage usage{};if(getrusage(RUSAGE_SELF,&usage)==0)result.peakResidentBytes=quint64(usage.ru_maxrss)*1024;
+#elif defined(Q_OS_WIN)
+    PROCESS_MEMORY_COUNTERS counters{};
+    if(GetProcessMemoryInfo(GetCurrentProcess(),&counters,sizeof(counters))){result.residentBytes=counters.WorkingSetSize;result.peakResidentBytes=counters.PeakWorkingSetSize;}
+#endif
+    result.peakResidentBytes=std::max(result.peakResidentBytes,result.residentBytes);return result;
+}
 }

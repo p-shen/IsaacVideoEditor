@@ -46,6 +46,12 @@ class MediaCacheTest : public QObject {
 private slots:
     void thumbnailsRespectOrientation_data();
     void thumbnailsRespectOrientation();
+    void nearbyFilmstripFramesShareOneProcess();
+    void batchedFilmstripMatchesExactFrames_data();
+    void batchedFilmstripMatchesExactFrames();
+    void batchedVfrWithOffsetMatchesExactFrames();
+    void priorityPreemptsBlockedFilmstripBatch_data();
+    void priorityPreemptsBlockedFilmstripBatch();
     void exactFrameKeys();
     void filmstripReusesNearbyCompletedFrames();
     void filmstripReusesNearbyPendingFrames();
@@ -107,6 +113,99 @@ void MediaCacheTest::thumbnailsRespectOrientation() {
     const double aspect = double(image.width()) / image.height();
     QVERIFY(qAbs(aspect - (portrait ? 9.0 / 16 : 16.0 / 9)) < 0.04);
     QCOMPARE(cache.thumbnail(path, 0.25, rotation), image);
+}
+
+void MediaCacheTest::nearbyFilmstripFramesShareOneProcess() {
+    const QString path = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
+    MediaCache cache(nullptr, Performance::Budget{});
+    QSignalSpy processes(cache.findChild<QProcess *>(), &QProcess::started);
+    for (int frame : {0, 3, 6, 9, 12, 15}) cache.thumbnail(path, frame / 60.0, 0, false, 1);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, 15.0 / 60, 0, false, 1).isNull(), 10000);
+    QCOMPARE(processes.count(), 1);
+    for (int frame : {0, 3, 6, 9, 12, 15})
+        QCOMPARE(frameId(cache.thumbnail(path, frame / 60.0)), (frame + 1) / 2);
+}
+
+void MediaCacheTest::batchedFilmstripMatchesExactFrames_data() {
+    QTest::addColumn<QString>("fixture");
+    for (const QString &name : {"proxy-timing-30.mp4", "proxy-timing-2997.mp4", "proxy-timing-5994.mp4"})
+        QTest::newRow(qPrintable(name)) << "fixtures/" + name;
+}
+
+void MediaCacheTest::batchedFilmstripMatchesExactFrames() {
+    QFETCH(QString, fixture);
+    const auto source = QTest::qFindTestData(qPrintable(fixture), __FILE__, __LINE__);
+    const int frames = qRound(Media::mediaDurationSeconds(source) * 60);
+    for (int start : {0, 1, 59, 121, 299}) {
+        if (start + 11 >= frames) continue;
+        MediaCache batched(nullptr, Performance::Budget{}), exact(nullptr, Performance::Budget{});
+        for (int frame : {start, start + 3, start + 8, start + 11}) {
+            batched.thumbnail(source, frame / 60.0, 0, false, 1);
+            exact.thumbnail(source, frame / 60.0);
+        }
+        for (int frame : {start, start + 3, start + 8, start + 11}) {
+            QTRY_VERIFY_WITH_TIMEOUT(!batched.thumbnail(source, frame / 60.0).isNull(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(!exact.thumbnail(source, frame / 60.0).isNull(), 5000);
+            QCOMPARE(frameId(batched.thumbnail(source, frame / 60.0)), frameId(exact.thumbnail(source, frame / 60.0)));
+        }
+    }
+}
+
+void MediaCacheTest::batchedVfrWithOffsetMatchesExactFrames() {
+    QTemporaryDir directory;
+    const auto source = directory.filePath("offset-variable.mkv");
+    QVERIFY(encode({"-v", "error", "-copyts", "-i", QFINDTESTDATA("fixtures/proxy-timing-2997.mp4"),
+        "-vf", "select='not(mod(n,2))+not(mod(n,7))',setpts=PTS+2/TB", "-fps_mode", "passthrough",
+        "-c:v", "libx264", "-crf", "0", source}));
+    QProcess timing;
+    timing.start(executable("ffprobe"), {"-v", "error", "-select_streams", "v:0", "-show_entries", "stream=start_time",
+        "-of", "default=noprint_wrappers=1:nokey=1", source});
+    QVERIFY(timing.waitForFinished(5000));
+    QCOMPARE(timing.exitCode(), 0);
+    QVERIFY(timing.readAllStandardOutput().trimmed().toDouble() >= 1.9);
+    MediaCache batched(nullptr, Performance::Budget{}), exact(nullptr, Performance::Budget{});
+    for (int frame : {1, 4, 9, 12, 299, 302, 307, 310}) {
+        batched.thumbnail(source, frame / 60.0, 0, false, 1);
+        exact.thumbnail(source, frame / 60.0);
+    }
+    for (int frame : {1, 4, 9, 12, 299, 302, 307, 310}) {
+        QTRY_VERIFY_WITH_TIMEOUT(!batched.thumbnail(source, frame / 60.0).isNull(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!exact.thumbnail(source, frame / 60.0).isNull(), 5000);
+        QCOMPARE(frameId(batched.thumbnail(source, frame / 60.0)), frameId(exact.thumbnail(source, frame / 60.0)));
+    }
+}
+
+void MediaCacheTest::priorityPreemptsBlockedFilmstripBatch_data() {
+    QTest::addColumn<int>("priorityFrame");
+    QTest::newRow("new-frame") << 9;
+    QTest::newRow("already-in-batch") << 3;
+}
+
+void MediaCacheTest::priorityPreemptsBlockedFilmstripBatch() {
+#ifdef Q_OS_WIN
+    QSKIP("The blocked-process fixture uses a POSIX shell.");
+#else
+    QFETCH(int, priorityFrame);
+    QTemporaryDir directory;
+    const auto ffmpeg = executable("ffmpeg");
+    QFile script(directory.filePath("ffmpeg"));
+    QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write("#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in *select=*) exec /bin/sleep 30;; esac; done\nexec \"" + ffmpeg.toUtf8() + "\" \"$@\"\n");
+    script.close();
+    QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    const auto previous = qgetenv("PATH");
+    const auto restore = qScopeGuard([&] { qputenv("PATH", previous); });
+    qputenv("PATH", directory.path().toUtf8());
+    MediaCache cache(nullptr, Performance::Budget{});
+    const auto source = QFINDTESTDATA("fixtures/proxy-timing-30.mp4");
+    for (int frame : {0, 3, 6}) cache.thumbnail(source, frame / 60.0, 0, false, 1);
+    QCoreApplication::processEvents();
+    QTRY_VERIFY_WITH_TIMEOUT(cache.findChild<QProcess *>()->state() != QProcess::NotRunning, 1000);
+    cache.setInteractive(true);
+    cache.thumbnail(source, priorityFrame / 60.0, 0, true);
+    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(source, priorityFrame / 60.0, 0, true).isNull(), 2000);
+    cache.retainSources({});
+#endif
 }
 
 void MediaCacheTest::exactFrameKeys() {
@@ -383,6 +482,17 @@ void MediaCacheTest::missingSourceAndRetry() {
     const QString path = directory.filePath("missing.mp4");
     MediaCache cache(nullptr, Performance::Budget{});
     QSignalSpy changed(&cache, &MediaCache::changed);
+    auto *process = cache.findChild<QProcess *>();
+    const QString errors = directory.filePath("ffmpeg-errors");
+    process->setStandardErrorFile(errors);
+    const auto failureDetails = [&] {
+        QFile log(errors), source(path);
+        log.open(QIODevice::ReadOnly);
+        source.open(QIODevice::ReadOnly);
+        return QString("FFmpeg exit %1, state %2, source bytes %3, header %4, errors: %5")
+            .arg(process->exitCode()).arg(int(process->state())).arg(source.size())
+            .arg(QString::fromLatin1(source.read(32).toHex()), QString::fromUtf8(log.readAll()));
+    };
     cache.waveform(path);
     QTRY_COMPARE_WITH_TIMEOUT(cache.waveformState(path), QString("unavailable"), 1000);
     const int failures = changed.count();
@@ -396,7 +506,7 @@ void MediaCacheTest::missingSourceAndRetry() {
     QVERIFY(changed.count() > failures);
     QVERIFY(QFile::copy(QFINDTESTDATA("fixtures/rotation.mp4"), path));
     QVERIFY(cache.thumbnail(path, 0).isNull());
-    QTRY_VERIFY_WITH_TIMEOUT(!cache.thumbnail(path, 0).isNull(), 10000);
+    QTRY_VERIFY2_WITH_TIMEOUT(!cache.thumbnail(path, 0).isNull(), qPrintable(failureDetails()), 10000);
 }
 
 void MediaCacheTest::failedFfmpegSpawnDoesNotLoop() {

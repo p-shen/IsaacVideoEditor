@@ -537,6 +537,8 @@ void TransportTest::trimmedPreviewUsesPartialCopy() {
     auto *preview = window.findChild<Preview *>();
     QVERIFY(cache);
     QVERIFY(preview);
+    QString cacheError;
+    QVERIFY2(cache->setCacheDirectory(directory.filePath("cache"), &cacheError), qPrintable(cacheError));
     cache->setPaused(true);
     QSignalSpy ready(cache, &PreviewCache::ready);
     QSignalSpy failed(cache, &PreviewCache::failed);

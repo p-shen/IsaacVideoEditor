@@ -87,7 +87,42 @@ private slots:
     void capableBudgetAllowsFullHdPreview();
     void failedOverlayDecodeCannotPublishPreviewFrame();
     void changedSourceIdentityInvalidatesCachedFrames();
+    void preloadsNearbyFramesWithoutPublishingThem();
+    void explicitQualityAllows4kWithoutInitialDecode();
+    void speculativeFailureDoesNotPoisonCurrentFrame();
 };
+
+void PreviewAsyncTest::preloadsNearbyFramesWithoutPublishingThem() {
+    Mlt::Profile profile;configure(profile,64,64);Mlt::Producer source(profile,"color","red");source.set_in_and_out(0,119);
+    Performance::Budget budget;budget.frameCacheBytes=4*1024*1024;budget.prefetchFrames=4;
+    Preview preview(profile,nullptr,budget);QVERIFY(preview.setProducer(&source));DecodeGate gate(source);gate.armed=false;
+    QSignalSpy frames(&preview,&Preview::frameReady),settled(&preview,&Preview::seekSettled);
+    preview.requestSeek(40);QTRY_COMPARE_WITH_TIMEOUT(settled.count(),1,3000);
+    QTRY_VERIFY_WITH_TIMEOUT(gate.calls.load()>=5,1000);
+    QCOMPARE(frames.count(),1);QCOMPARE(preview.position(),40);
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::explicitQualityAllows4kWithoutInitialDecode() {
+    Mlt::Profile profile;configure(profile,3840,2160);Mlt::Producer source(profile,"color","red");source.set_in_and_out(0,119);
+    Preview preview(profile,nullptr,Performance::Budget{});QSignalSpy frames(&preview,&Preview::frameReady);
+    QVERIFY(preview.setProducer(&source,false));QCOMPARE(frames.count(),0);
+    preview.setQualityLimit(QSize(3840,2160));QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(),5000);
+    QCOMPARE(qvariant_cast<QImage>(frames.last()[0]).size(),QSize(3840,2160));preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::speculativeFailureDoesNotPoisonCurrentFrame() {
+    QTemporaryDir dir;const auto imagePath=dir.filePath("broken.png");QImage still(8,8,QImage::Format_RGB32);still.fill(Qt::yellow);QVERIFY(still.save(imagePath));
+    QFile broken(imagePath);QVERIFY(broken.open(QIODevice::ReadWrite));QVERIFY(broken.resize(33));broken.close();
+    Project p;p.clips={{QFINDTESTDATA("fixtures/seek.mp4"),0,2}};VisualOverlay o;o.path=imagePath;o.startFrame=2;o.durationFrames=20;p.visualOverlays.append(o);
+    Mlt::Profile profile;configure(profile,64,64);auto timeline=Media::buildTimeline(p,profile);QVERIFY(timeline);
+    Performance::Budget budget;budget.prefetchFrames=4;Preview preview(profile,nullptr,budget);QVERIFY(preview.setProducer(timeline.get(),false));
+    QSignalSpy frames(&preview,&Preview::frameReady),errors(&preview,&Preview::errorOccurred),settled(&preview,&Preview::seekSettled);
+    preview.requestSeek(0);QTRY_COMPARE_WITH_TIMEOUT(settled.count(),1,3000);
+    QTRY_VERIFY_WITH_TIMEOUT(preview.diagnostics()["preloadedFrames"].toULongLong()>0,3000);
+    preview.requestSeek(0);QTRY_COMPARE_WITH_TIMEOUT(settled.count(),2,3000);QCOMPARE(errors.count(),0);QVERIFY(!frames.isEmpty());
+    preview.requestSeek(2);QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(),3000);preview.setProducer(nullptr);
+}
 
 void PreviewAsyncTest::changedSourceIdentityInvalidatesCachedFrames() {
     QTemporaryDir dir;const auto path=dir.filePath("overlay.bmp");

@@ -2,13 +2,28 @@
 
 October 31, 2026 · Source revision `75e21a762245ddcb33145ad501961fc3285ac1ae`
 
-The high-priority follow-up is implemented. See [Workstation performance](performance.md) for current behavior and [implementation measurements](performance-implementation-results.json) for verification. The findings below describe the starting revision named above.
+The high-priority and remaining implementation work is now present. See [Workstation performance](performance.md) for current behavior, [remaining performance results](performance-remaining-results.md) for follow-up verification, and [earlier implementation measurements](performance-implementation-results.json) for the first pass. The numbered findings below preserve the original audit and its starting revision; they do not describe current gaps. Actual Threadripper/NVIDIA acceptance remains hardware-dependent.
 
 IsaacVideoEditor can benefit substantially from a workstation with more cores, an NVIDIA GPU, and 168 GB of RAM, but the current application does not adapt its video workflows to that hardware. The clearest gaps are missing NVIDIA encoding, a fixed MLT frame-processing setting, serial background queues, and small fixed editing caches. FFmpeg already uses multiple CPU cores; the application is not entirely single threaded.
 
 On the available eight-logical-core Apple silicon Mac, controlled software exports with four MLT processing workers took about half the time of the current setting for a title, transform, and image overlay, and about 42% of the time for the corresponding video overlay. Plain footage showed no useful gain. These are local workload comparisons, not predictions for a Threadripper or RTX 4070 Ti.
 
 The original audit changed documentation only. Its baseline measurements and verification details are in [performance-audit-results.json](performance-audit-results.json).
+
+## Current implementation status — November 1, 2026
+
+| Original finding | Current implementation |
+| --- | --- |
+| 1. NVIDIA acceleration | NVENC export/proxy encoding plus an optional probed NVDEC/CUDA/NVENC export path for supported cuts/static compositions; explicit MLT fallback for unsupported effects and formats. |
+| 2. Core scaling | CPU/memory-aware processing and queue budgets; codec automatic threading retained; export frame dropping disabled. |
+| 3. Preparation queues | Bounded independent jobs, urgent-request preemption, nearby thumbnail batching, and preparation alongside export when resources permit. |
+| 4. RAM and preview | Bounded frame/image/media caches, directional preloading, source-copy reuse, and automatic or explicit preview quality through 4K. |
+| 5–6. Composition/presentation | Inactive conversion bypass with color regressions, per-worker rendering resources, shared immutable images, reusable scene-graph video textures, and optional CUDA composition for the supported subset. Complex unsupported effects retain the CPU renderer. |
+| 7. Editing waits/scans | UI media inspection and graph preparation off the UI thread, one asynchronous settled still, stale-result checks, cached timeline/usage data, and narrower notifications. |
+| 8. Storage/timing | Owned-artifact quota/LRU with active/cross-process protection, selectable cache location, and persistent verified cadence checks. |
+| Diagnostics/acceptance | Runtime counters, stage/memory/fallback reporting, real-application editing/export commands, and a reproducible synthetic benchmark matrix with independent frame-count checks and NVIDIA engine sampling. |
+
+The remaining acceptance work requires the actual workstation: run the matrix and a long representative export, confirm CUDA quality/throughput and bounded memory, test editing during export, and import a new optimized NVIDIA output into iPhone Photos. The Mac checks cannot establish those hardware results.
 
 ## Findings by priority
 

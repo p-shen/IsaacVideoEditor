@@ -62,7 +62,7 @@ private slots:
     void missingOverlayRetainsConnectionAndRelinks(){
         QTemporaryDir dir;const auto imagePath=dir.filePath("replacement.png");QImage image(160,90,QImage::Format_RGB32);image.fill(Qt::red);QVERIFY(image.save(imagePath));
         Project p;p.clips.append({fixture(),0,2});VisualOverlay o;o.path=dir.filePath("missing.png");o.hostId=p.clips[0].id;o.hostSourceFrame=20;o.durationFrames=40;p.visualOverlays.append(o);
-        const auto path=dir.filePath("offline.isaac.json");QVERIFY(saveProject(p,path));EditorController e;QVERIFY(e.loadFrom(path));QVERIFY(!e.frame().isNull());QCOMPARE(e.missingMedia().size(),1);
+        const auto path=dir.filePath("offline.isaac.json");QVERIFY(saveProject(p,path));EditorController e;QVERIFY(e.loadFrom(path));QTRY_VERIFY_WITH_TIMEOUT(!e.frame().isNull(),5000);QCOMPARE(e.missingMedia().size(),1);
         QVERIFY(e.relinkMedia(o.path,imagePath));QCOMPARE(e.project().visualOverlays[0].hostId,o.hostId);QCOMPARE(e.project().overlayStartFrame(0),20);
         e.undo();QCOMPARE(e.project().visualOverlays[0].path,o.path);QVERIFY(!e.frame().isNull());
         Mlt::Profile profile;Media::configureOutputProfile(profile,320,180);QString error;QVERIFY(!Media::buildTimeline(e.project(),profile,&error));QVERIFY(error.contains("Overlay",Qt::CaseInsensitive));
