@@ -77,7 +77,7 @@ def main(installer, archive):
             env={**os.environ, 'ISAAC_CLEAN_RUNTIME': '1'})
 
         # Exercise the actual updater: it must retain Inno's uninstaller and project.
-        prepared = root / 'prepared update'
+        prepared = root / 'isaac-update-test'
         prepared.mkdir()
         with zipfile.ZipFile(archive) as source:
             source.extractall(prepared)
@@ -97,7 +97,7 @@ def main(installer, archive):
         print(f'Updater paths: prepared={prepared}; Windows temp={temp_path.value}; Python temp={tempfile.gettempdir()}', flush=True)
         parent = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
         updater = subprocess.Popen([str(helper), '--install', str(parent.pid), str(prepared), str(app), executable.name],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    env={**os.environ, 'TMP': temp_path.value, 'TEMP': temp_path.value})
         try:
             wait_for(lambda: (prepared / 'armed').exists() or updater.poll() is not None)
@@ -105,8 +105,9 @@ def main(installer, archive):
                     ((prepared / 'error.txt').read_text() if (prepared / 'error.txt').exists() else 'no diagnostic'))
             parent.terminate()
             parent.wait(timeout=10)
-            stdout, stderr = updater.communicate(timeout=120)
-            require(updater.returncode == 0, f'Update failed: {stdout!r} {stderr!r}')
+            updater.wait(timeout=120)
+            require(updater.returncode == 0, 'Update failed: ' +
+                    ((prepared / 'error.txt').read_text() if (prepared / 'error.txt').exists() else 'no diagnostic'))
         finally:
             for process in (parent, updater):
                 if process.poll() is None:

@@ -1,0 +1,24 @@
+name: Focused installer validation
+on:
+  push:
+    branches: [codex/windows-installer]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  installed-app:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_QUICK_BACKEND: software
+      SDL_AUDIODRIVER: dummy
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Reuse compiled installer and portable package
+        shell: pwsh
+        run: gh run download 41403867154 --repo $env:GITHUB_REPOSITORY --name windows-download --dir dist
+      - name: Check installation lifecycle
+        shell: pwsh
+        run: python tests/windows_installer_smoke_test.py (Get-Item dist/*-Setup.exe).FullName (Get-Item dist/*.zip).FullName
