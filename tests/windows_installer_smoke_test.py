@@ -81,9 +81,10 @@ def main(installer, archive):
             cuda_worker.rename(disabled)
             try:
                 missing=subprocess.run([str(executable),'--smoke-test',str(Path(__file__).parent/'fixtures/seek.mp4')],
-                    capture_output=True,timeout=45,env={**os.environ,'ISAAC_REQUIRE_SUBTITLE_RUNTIME':'1'})
+                    capture_output=True,timeout=45,env={**os.environ,'ISAAC_REQUIRE_SUBTITLE_RUNTIME':'1','QT_FORCE_STDERR_LOGGING':'1'})
                 require(missing.returncode!=0 and b'subtitle worker' in missing.stderr.lower(),
-                        'A missing CUDA worker must fail validation even without an NVIDIA driver')
+                        f'A missing CUDA worker must fail validation even without an NVIDIA driver: '
+                        f'exit={missing.returncode}; stdout={missing.stdout!r}; stderr={missing.stderr!r}')
             finally:
                 disabled.rename(cuda_worker)
 
