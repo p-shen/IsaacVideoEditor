@@ -133,7 +133,7 @@ add_executable(subtitle_models_test tests/subtitle_models_test.cpp src/subtitle_
 target_include_directories(subtitle_models_test PRIVATE src)
 target_link_libraries(subtitle_models_test PRIVATE Qt6::Network Qt6::Test)
 add_test(NAME subtitle_models_test COMMAND subtitle_models_test)
-add_executable(subtitle_controller_test tests/subtitle_controller_test.cpp)
+add_executable(subtitle_controller_test tests/subtitle_controller_test.cpp src/theme.cpp assets/assets.qrc)
 target_link_libraries(subtitle_controller_test PRIVATE isaac_ui Qt6::Test)
 add_dependencies(subtitle_controller_test IsaacVideoEditor)
 add_test(NAME subtitle_controller_test COMMAND subtitle_controller_test)

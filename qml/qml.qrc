@@ -59,5 +59,6 @@
     <file>icons/unlink.svg</file>
     <file>icons/check.svg</file>
     <file>icons/more.svg</file>
+    <file>icons/settings.svg</file>
   </qresource>
 </RCC>
