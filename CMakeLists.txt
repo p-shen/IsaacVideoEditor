@@ -17,6 +17,8 @@ add_library(isaac_core
     src/gpu_pipeline.cpp
     src/runtime_paths.cpp
     src/export_job.cpp
+    src/subtitle_job.cpp
+    src/subtitle_job.h
     src/project.cpp
     src/transition_presets.cpp
     src/captions.cpp
@@ -30,6 +32,9 @@ add_library(isaac_core
 )
 target_include_directories(isaac_core PUBLIC src)
 target_link_libraries(isaac_core PUBLIC Qt6::Core Qt6::Gui PkgConfig::MLT)
+if(APPLE)
+    target_link_libraries(isaac_core PRIVATE "-framework CoreFoundation")
+endif()
 if(WIN32)
     target_link_libraries(isaac_core PRIVATE psapi)
 endif()
@@ -41,6 +46,9 @@ add_library(isaac_ui
     src/editor_controller.cpp
     src/composition_controller.cpp
     src/caption_controller.cpp
+    src/subtitle_controller.cpp
+    src/subtitle_models.cpp
+    src/caption_model.cpp
     src/preview.cpp
     src/preview_item.cpp
     src/quick_timeline.cpp
@@ -65,6 +73,37 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GN
 endif()
 add_dependencies(IsaacVideoEditor IsaacVideoEditorUpdater)
 target_link_libraries(IsaacVideoEditor PRIVATE isaac_ui)
+if(WIN32)
+    # MLT and the native audio worker receive UTF-8 filenames through narrow APIs.
+    set(ISAAC_WINDOWS_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/assets/windows-utf8.manifest")
+    if(MSVC)
+        target_link_options(IsaacVideoEditor PRIVATE "/MANIFEST:EMBED" "/MANIFESTINPUT:${ISAAC_WINDOWS_MANIFEST}")
+    else()
+        enable_language(RC)
+        configure_file(assets/windows-manifest.rc.in "${CMAKE_CURRENT_BINARY_DIR}/windows-manifest.rc" @ONLY)
+        target_sources(IsaacVideoEditor PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/windows-manifest.rc")
+    endif()
+endif()
+set(ISAAC_WHISPER_RUNTIME_DIR "" CACHE PATH "Prepared standalone Whisper runtime (packaging/prepare-whisper.py)")
+if(ISAAC_WHISPER_RUNTIME_DIR)
+    if(WIN32)
+        set(ISAAC_WHISPER_CLI whisper-cli.exe)
+    else()
+        set(ISAAC_WHISPER_CLI whisper-cli)
+    endif()
+    if(NOT EXISTS "${ISAAC_WHISPER_RUNTIME_DIR}/${ISAAC_WHISPER_CLI}" OR NOT EXISTS "${ISAAC_WHISPER_RUNTIME_DIR}/runtime.json")
+        message(FATAL_ERROR "Prepare the complete Whisper runtime before setting ISAAC_WHISPER_RUNTIME_DIR")
+    endif()
+    if(APPLE)
+        set(ISAAC_WHISPER_DESTINATION "$<TARGET_FILE_DIR:IsaacVideoEditor>/../Resources/subtitles")
+    else()
+        set(ISAAC_WHISPER_DESTINATION "$<TARGET_FILE_DIR:IsaacVideoEditor>/subtitles")
+    endif()
+    add_custom_command(TARGET IsaacVideoEditor POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${ISAAC_WHISPER_RUNTIME_DIR}" "${ISAAC_WHISPER_DESTINATION}"
+        VERBATIM)
+    set_property(TARGET IsaacVideoEditor APPEND PROPERTY LINK_DEPENDS "${ISAAC_WHISPER_RUNTIME_DIR}/runtime.json")
+endif()
 target_compile_definitions(IsaacVideoEditor PRIVATE ISAAC_APP_VERSION="${ISAAC_APP_VERSION}")
 if(APPLE)
     set_property(TARGET IsaacVideoEditor APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:IsaacVideoEditorUpdater>")
@@ -90,6 +129,19 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
 find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+add_executable(subtitle_models_test tests/subtitle_models_test.cpp src/subtitle_models.cpp)
+target_include_directories(subtitle_models_test PRIVATE src)
+target_link_libraries(subtitle_models_test PRIVATE Qt6::Network Qt6::Test)
+add_test(NAME subtitle_models_test COMMAND subtitle_models_test)
+add_executable(subtitle_controller_test tests/subtitle_controller_test.cpp)
+target_link_libraries(subtitle_controller_test PRIVATE isaac_ui Qt6::Test)
+add_dependencies(subtitle_controller_test IsaacVideoEditor)
+add_test(NAME subtitle_controller_test COMMAND subtitle_controller_test)
+set_tests_properties(subtitle_controller_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SDL_AUDIODRIVER=dummy")
+add_executable(subtitle_job_test tests/subtitle_job_test.cpp)
+target_link_libraries(subtitle_job_test PRIVATE isaac_core Qt6::Widgets Qt6::Test)
+add_test(NAME subtitle_job_test COMMAND subtitle_job_test)
+set_tests_properties(subtitle_job_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SDL_AUDIODRIVER=dummy")
 add_executable(performance_test tests/performance_test.cpp)
 target_link_libraries(performance_test PRIVATE isaac_core Qt6::Test)
 add_test(NAME performance_test COMMAND performance_test)
@@ -173,7 +225,7 @@ add_executable(preview_profile_test tests/preview_profile_test.cpp src/preview.c
 target_link_libraries(preview_profile_test PRIVATE isaac_core Qt6::Gui Qt6::Test)
 add_test(NAME preview_profile_test COMMAND preview_profile_test)
 
-foreach(test_name caption_controller_test caption_test source_browser_test editor_controller_test media_cache_test quick_timeline_test preview_async_test qml_shell_test text_overlay_test recovery_export_test)
+foreach(test_name caption_controller_test caption_model_test caption_test source_browser_test editor_controller_test media_cache_test quick_timeline_test preview_async_test qml_shell_test text_overlay_test recovery_export_test recovery_store_test)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE isaac_ui Qt6::Test)
     add_test(NAME ${test_name} COMMAND ${test_name})
@@ -220,4 +272,8 @@ add_executable(composition_controller_test tests/composition_controller_test.cpp
 target_link_libraries(composition_controller_test PRIVATE isaac_ui Qt6::Test)
 add_test(NAME composition_controller_test COMMAND composition_controller_test)
 set_tests_properties(composition_controller_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;SDL_AUDIODRIVER=dummy")
+
+# Routine tests use software encoders; hardware acceptance remains opt-in.
+get_property(isaac_tests DIRECTORY PROPERTY TESTS)
+set_property(TEST ${isaac_tests} APPEND PROPERTY ENVIRONMENT "ISAAC_DISABLE_HARDWARE_ENCODING=1")
 endif()

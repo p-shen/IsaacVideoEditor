@@ -85,6 +85,66 @@ void beginDrag(Scene &s, const QPoint &from, const QPoint &to, Qt::KeyboardModif
 class QuickTimelineTest : public QObject {
     Q_OBJECT
 private slots:
+    void indexedViewportMatchesVisibleSubsetWithContainingTitle() {
+        Scene s;Project project;project.clips={{"synthetic.mp4",0,1000}};
+        for(int i=0;i<3000;++i){TextOverlay cue;cue.text=QString("Cue %1").arg(i);cue.startFrame=i*20;cue.durationFrames=15;project.captions.append(cue);}
+        TextOverlay title;title.text="Containing title";title.durationFrames=60000;project.textOverlays={title};
+        s.view->setProject(project);s.view->zoomAt(100,s.view->labelWidth()+12);s.view->setContentOffset(10000*s.view->pixelsPerSecond()/60);
+        const auto dense=render(s.view);const int left=s.view->frameAt(s.view->labelWidth()),right=s.view->frameAt(s.view->width());
+        project.captions.erase(std::remove_if(project.captions.begin(),project.captions.end(),[&](const TextOverlay &cue){return cue.startFrame+cue.durationFrames<left-2||cue.startFrame>right+2;}),project.captions.end());
+        s.view->setProject(project);QCOMPARE(render(s.view),dense);
+    }
+    void longCaptionTimelineInteractionsStayResponsive() {
+        Scene s;Project project;
+        for(int i=0;i<500;++i){Clip clip;clip.path="synthetic.mp4";clip.inSeconds=0;clip.outSeconds=3;clip.hardCutBefore=true;project.clips.append(clip);}
+        for(int i=0;i<3000;++i){TextOverlay cue;cue.durationFrames=3;cue.hostId=project.clips[(i*733)%500].id;cue.hostSourceFrame=i%150;project.captions.append(cue);}
+        QElapsedTimer timer;timer.start();
+        s.view->setProject(project);
+        const auto lane=s.view->captionRect(0).top();
+        s.view->zoomIn();s.view->zoomOut();
+        const auto elapsed=timer.elapsed();
+        qInfo()<<"Long caption timeline update/zoom (ms):"<<elapsed;
+        QCOMPARE(s.view->captionRect(0).top(),lane);
+        // Generous guard against the multi-second caption sorts previously run by each interaction.
+        QVERIFY2(elapsed<2000,qPrintable(QString("Long caption timeline update/zoom took %1 ms").arg(elapsed)));
+    }
+    void captionTimingGeometryRefreshesAndCancels() {
+        Scene s;auto project=sequence();
+        TextOverlay cue;cue.startFrame=60;cue.durationFrames=60;
+        project.captions={cue,cue};project.captions[1].startFrame=150;
+        s.view->setProject(project);s.view->setSnapping(false);
+        const auto first=s.view->captionRect(0),second=s.view->captionRect(1);
+        const auto clip=s.view->clipRect(0);const auto height=s.view->implicitHeight();
+        QCOMPARE(first.top(),second.top());
+        const QPoint from=first.center().toPoint();
+        beginDrag(s,from,from+QPoint(qRound(90*s.view->pixelsPerSecond()/60),0));
+        QVERIFY(s.view->captionRect(0).top()!=s.view->captionRect(1).top());
+        QVERIFY(s.view->clipRect(0).top()>clip.top());QVERIFY(s.view->implicitHeight()>height);
+        QTest::keyClick(&s.window,Qt::Key_Escape);
+        QTest::mouseRelease(&s.window,Qt::LeftButton,Qt::NoModifier,from);
+        QCOMPARE(s.view->captionRect(0),first);QCOMPARE(s.view->captionRect(1),second);
+        QCOMPARE(s.view->clipRect(0),clip);QCOMPARE(s.view->implicitHeight(),height);
+        project.captions[0].hostId=project.clips[1].id;
+        project.captions[0].hostSourceFrame=120;
+        s.view->setProject(project);
+        const auto attached=s.view->captionRect(0);
+        QCOMPARE(qRound((attached.left()-s.view->labelWidth()-12)*60/s.view->pixelsPerSecond()),300);
+        QVERIFY(project.reorderClips({1,0,2}));s.view->setProject(project);
+        QCOMPARE(qRound((s.view->captionRect(0).left()-s.view->labelWidth()-12)*60/s.view->pixelsPerSecond()),60);
+        project.captions[0].durationFrames=120;s.view->setProject(project);
+        QVERIFY(s.view->captionRect(0).top()!=s.view->captionRect(1).top());
+    }
+    void attachedTextTracksTransitionPreviewAndCancel() {
+        Scene s;auto project=sequence();project.clips[1].transitionFrames=30;
+        TextOverlay cue;cue.hostId=project.clips[1].id;cue.hostSourceFrame=120;cue.durationFrames=60;
+        project.captions={cue};project.textOverlays={cue};s.view->setProject(project);s.view->setSnapping(false);
+        const auto caption=s.view->captionRect(0),title=s.view->textRect(0);
+        const auto from=s.view->transitionRect(1).center().toPoint();
+        beginDrag(s,from,from+QPoint(25,0));
+        QVERIFY(s.view->captionRect(0).left()!=caption.left());QVERIFY(s.view->textRect(0).left()!=title.left());
+        QTest::keyClick(&s.window,Qt::Key_Escape);QTest::mouseRelease(&s.window,Qt::LeftButton,Qt::NoModifier,from);
+        QCOMPARE(s.view->captionRect(0),caption);QCOMPARE(s.view->textRect(0),title);
+    }
     void playheadMovementReusesTimelineArtwork() {
         Scene s;const auto original=render(s.view);
         QElapsedTimer timer;timer.start();
@@ -116,6 +176,22 @@ private slots:
     void trimCommitsOnceWithBoundsAndExactSourceComparison();
     void frontTrimHandleWinsOverTransition_data();
     void frontTrimHandleWinsOverTransition();
+    void transitionSelectionKeepsClipNameVisible() {
+        for (int fontSize : {13, 24}) {
+            Scene s;
+            auto font=s.view->font();font.setPointSize(fontSize);s.view->setFont(font);
+            auto project=sequence();
+            project.clips[1].transitionType="dissolve";
+            project.clips[1].transitionFrames=90;
+            s.view->setProject(project,{8,8,8});
+            const auto clip=s.view->clipRect(1);
+            const QRect title(qCeil(clip.left()+12),qCeil(clip.top()+2),
+                              100,QFontMetrics(font).height());
+            const auto unselected=render(s.view).copy(title);
+            s.view->setSelectedTransition(1);
+            QCOMPARE(render(s.view).copy(title),unselected);
+        }
+    }
     void transitionResizeRetainsEffectAndCancels() {
         Scene s; auto p=sequence(); p.clips[1].transitionType="wipe-left";p.clips[1].transitionFrames=30;
         s.view->setProject(p,{8,8,8});

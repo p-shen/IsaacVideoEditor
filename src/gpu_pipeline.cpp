@@ -215,7 +215,9 @@ bool renderAudio(const Project &project,const QSize &size,const QString &output,
     QElapsedTimer timer;timer.start();auto timeline=Media::buildTimeline(project,profile,error);if(!timeline||stopped())return false;
     stage(diagnostic,"timeline","mlt",timer.restart());
     const auto path=QFile::encodeName(output);Mlt::Consumer consumer(profile,"avformat",path.constData());
-    consumer.set("f","mp4");consumer.set("acodec","aac");consumer.set("vn",1);consumer.set("video_off",1);
+    const bool pcm=QFileInfo(output).suffix().compare("wav",Qt::CaseInsensitive)==0;
+    consumer.set("f",pcm?"wav":"mp4");consumer.set("acodec",pcm?"pcm_s16le":"aac");consumer.set("vn",1);consumer.set("video_off",1);
+    if(pcm){consumer.set("ar",16000);consumer.set("ac",1);}
     consumer.set("real_time",-1);consumer.set("buffer",1);consumer.set("prefill",1);
     if(!consumer.is_valid()||consumer.connect(*timeline)!=0||consumer.start()!=0){if(error)*error="Could not start the MLT audio renderer.";return false;}
     while(!consumer.is_stopped()){

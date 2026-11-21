@@ -24,6 +24,7 @@ env:
   QT_QPA_PLATFORM: offscreen
   QT_QUICK_BACKEND: software
   SDL_AUDIODRIVER: dummy
+  ISAAC_REQUIRE_SUBTITLE_RUNTIME: '1'
 
 jobs:
   macos:
@@ -39,10 +40,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         run: brew install cmake pkgconf qt mlt ffmpeg
+      - name: Prepare local subtitle engine
+        run: python3 packaging/prepare-whisper.py build-whisper
       - name: Build
         run: |
           cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
             -DISAAC_APP_VERSION="$APP_VERSION" \
+            -DISAAC_WHISPER_RUNTIME_DIR="$PWD/build-whisper" \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)"
           cmake --build build-release --target IsaacVideoEditor --parallel 3
       - name: Package
@@ -110,8 +114,9 @@ jobs:
           done
       - name: Build
         run: |
+          python3 packaging/prepare-whisper.py build-whisper
           cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-            -DISAAC_APP_VERSION="$APP_VERSION"
+            -DISAAC_APP_VERSION="$APP_VERSION" -DISAAC_WHISPER_RUNTIME_DIR="$PWD/build-whisper"
           cmake --build build-release --target IsaacVideoEditor --parallel 4
       - name: Package
         env:
@@ -165,8 +170,10 @@ jobs:
             mingw-w64-ucrt-x86_64-libxml2
       - name: Build
         run: |
+          python3 packaging/prepare-whisper.py build-whisper --platform windows
           cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DISAAC_APP_VERSION="$APP_VERSION" \
+            -DISAAC_WHISPER_RUNTIME_DIR="$PWD/build-whisper" \
             -DBUILD_TESTING=OFF -DCMAKE_PREFIX_PATH=/ucrt64
           cmake --build build-release --target IsaacVideoEditor --parallel 4
       - name: Package

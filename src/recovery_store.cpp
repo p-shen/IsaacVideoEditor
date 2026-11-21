@@ -7,18 +7,18 @@
 #include <QJsonObject>
 #include <QLockFile>
 #include <QSaveFile>
-#include <QTemporaryFile>
 #include <QUuid>
 
 RecoveryStore::RecoveryStore(const QString &directory,QObject *parent):QObject(parent),directory_(directory) {
     snapshotPath_=QDir(directory).filePath(QUuid::createUuid().toString(QUuid::WithoutBraces)+".recovery.json");
     acquireLock();
+    worker_.setMaxThreadCount(1);
     idle_.setSingleShot(true);idle_.setInterval(2000);
     maximum_.setSingleShot(true);maximum_.setInterval(30000);
-    connect(&idle_,&QTimer::timeout,this,[this]{flush();});
-    connect(&maximum_,&QTimer::timeout,this,[this]{flush();});
+    connect(&idle_,&QTimer::timeout,this,&RecoveryStore::startSave);
+    connect(&maximum_,&QTimer::timeout,this,&RecoveryStore::startSave);
 }
-RecoveryStore::~RecoveryStore()=default;
+RecoveryStore::~RecoveryStore(){idle_.stop();maximum_.stop();worker_.waitForDone();}
 bool RecoveryStore::acquireLock(){
     if(lock_)return true;
     if(!QDir().mkpath(directory_))return false;
@@ -26,26 +26,51 @@ bool RecoveryStore::acquireLock(){
     if(!candidate->tryLock())return false;lock_=std::move(candidate);return true;
 }
 void RecoveryStore::setStatus(const QString &value){if(status_==value)return;status_=value;emit statusChanged();}
+quint64 RecoveryStore::invalidate(){QMutexLocker guard(&publicationMutex_);return ++generation_;}
 void RecoveryStore::schedule(const Project &project,const QString &path){
+    ++revision_;
     pending_=project;projectPath_=path;idle_.start();if(!maximum_.isActive())maximum_.start();setStatus("Recovery pending");
 }
-bool RecoveryStore::flush(){
-    if(!pending_)return true;
-    idle_.stop();maximum_.stop();setStatus("Saving recovery…");
-    auto fail=[this](const QString &error){setStatus("Recovery failed: "+error+". Choose Retry recovery.");return false;};
-    if(!acquireLock())return fail("the recovery folder is not writable");
-    QTemporaryFile temporary(QDir(directory_).filePath(".snapshot-XXXXXX"));
-    if(!temporary.open())return fail(temporary.errorString());
-    const auto temp=temporary.fileName();temporary.close();QString error;
-    if(!saveProject(*pending_,temp,&error))return fail(error);
-    QFile input(temp);if(!input.open(QIODevice::ReadOnly))return fail(input.errorString());
-    auto object=QJsonDocument::fromJson(input.readAll()).object();
-    object.insert("_recovery",QJsonObject{{"projectPath",projectPath_},{"time",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}});
+QString RecoveryStore::writeSnapshot(const Project &project,const QString &path,quint64 generation){
+    const auto problem=project.validate();if(!problem.isEmpty())return problem;
+    if(!acquireLock())return "the recovery folder is not writable";
+    auto object=projectJson(project);
+    object.insert("_recovery",QJsonObject{{"projectPath",path},{"time",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}});
     QSaveFile output(snapshotPath_);const auto bytes=QJsonDocument(object).toJson();
-    if(!output.open(QIODevice::WriteOnly)||output.write(bytes)!=bytes.size()||!output.commit())return fail(output.errorString());
+    if(!output.open(QIODevice::WriteOnly)||output.write(bytes)!=bytes.size())return output.errorString();
+    // Clear and explicit saves invalidate staged bytes before their atomic publication.
+    QMutexLocker guard(&publicationMutex_);
+    if(generation!=generation_)return {};
+    return output.commit()?QString{}:output.errorString();
+}
+void RecoveryStore::startSave(){
+    if(active_||!pending_)return;
+    idle_.stop();maximum_.stop();
+    const auto project=*pending_;const auto path=projectPath_;const auto generation=generation_;const auto revision=revision_;const auto job=++job_;
+    active_=true;setStatus("Saving recovery…");
+    worker_.start([this,project,path,generation,revision,job]{
+        const auto error=writeSnapshot(project,path,generation);
+        QMetaObject::invokeMethod(this,[this,generation,revision,job,error]{
+            if(!active_||job!=job_)return;
+            active_=false;
+            if(generation!=generation_||revision!=revision_){if(pending_)startSave();return;}
+            if(!error.isEmpty()){setStatus("Recovery failed: "+error+". Choose Retry recovery.");return;}
+            pending_.reset();setStatus("Recovery saved");
+        },Qt::QueuedConnection);
+    });
+}
+bool RecoveryStore::flush(){
+    idle_.stop();maximum_.stop();const auto generation=invalidate();
+    worker_.waitForDone();active_=false;++job_;
+    if(!pending_)return true;
+    const auto project=*pending_;const auto path=projectPath_;const auto revision=revision_;setStatus("Saving recovery…");
+    const auto error=writeSnapshot(project,path,generation);
+    if(generation!=generation_)return true;
+    if(revision!=revision_){startSave();return error.isEmpty();}
+    if(!error.isEmpty()){setStatus("Recovery failed: "+error+". Choose Retry recovery.");return false;}
     pending_.reset();setStatus("Recovery saved");return true;
 }
-void RecoveryStore::clear(){idle_.stop();maximum_.stop();pending_.reset();if(QFile::exists(snapshotPath_)&&!QFile::remove(snapshotPath_)){setStatus("Recovery failed: could not remove an old snapshot.");return;}setStatus("Recovery ready");}
+void RecoveryStore::clear(){idle_.stop();maximum_.stop();invalidate();pending_.reset();if(QFile::exists(snapshotPath_)&&!QFile::remove(snapshotPath_)){setStatus("Recovery failed: could not remove an old snapshot.");return;}setStatus("Recovery ready");}
 QVariantList RecoveryStore::candidates(const QString &directory){
     QVariantList result;
     for(const auto &file:QDir(directory).entryInfoList({"*.recovery.json"},QDir::Files,QDir::Time)){

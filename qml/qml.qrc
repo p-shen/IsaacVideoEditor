@@ -13,6 +13,7 @@
     <file>CompositionInspector.qml</file>
     <file>TextInspector.qml</file>
     <file>CaptionInspector.qml</file>
+    <file>SubtitleGenerator.qml</file>
     <file>TextAttachment.qml</file>
     <file>Theme.qml</file>
     <file>Button.qml</file>

@@ -21,7 +21,7 @@ ApplicationWindow {
     property int inspectorSection: 0
     property int lastSelectedText: -1
     property int lastSelectedCaption: -1
-    readonly property real upperMinimumHeight: Math.max(editor.captions.length > 0 ? 320 : 210, window.font.pixelSize * 10)
+    readonly property real upperMinimumHeight: Math.max(editor.sourceMode ? viewer.Layout.minimumHeight + viewerHeader.implicitHeight + viewerTransport.implicitHeight + 40 : editor.captionCount > 0 ? 320 : 210, window.font.pixelSize * 10)
     property string lastExportState: ""
     property int lastSelectedSource: -1
     property bool lastSourceMode: false
@@ -66,6 +66,7 @@ ApplicationWindow {
     }
     onActiveFocusItemChanged: Qt.callLater(revealFocusedControl)
     function focusInspector(section, focusControls = true) {
+        if (focusControls && editor.sourceMode) editor.showProject()
         inspectorSection = section
         if (compact) browserSection = 2
         if (wideInspector.item) wideInspector.item.section = section
@@ -100,7 +101,7 @@ ApplicationWindow {
     Action { id: saveAction; text: "Save"; shortcut: StandardKey.Save; onTriggered: editor.save() }
     Action { id: saveAsAction; text: "Save As…"; shortcut: StandardKey.SaveAs; onTriggered: editor.saveAs() }
     Action { id: importAction; text: "Import"; shortcut: "Ctrl+I"; onTriggered: editor.importDialog() }
-    Action { id: exportAction; text: "Export…"; shortcut: "Ctrl+E"; enabled: !editor.exporting && editor.duration > 0; onTriggered: exportOptionsDialog.open() }
+    Action { id: exportAction; text: "Export…"; shortcut: "Ctrl+E"; enabled: !editor.exporting && !editor.generatingSubtitles && editor.duration > 0; onTriggered: exportOptionsDialog.open() }
     Action { id: undoAction; text: editor.undoText ? "Undo " + editor.undoText : "Undo"; shortcut: StandardKey.Undo; enabled: editor.canUndo && !window.textEditing; onTriggered: editor.undo() }
     Action { id: redoAction; text: editor.redoText ? "Redo " + editor.redoText : "Redo"; shortcut: StandardKey.Redo; enabled: editor.canRedo && !window.textEditing; onTriggered: editor.redo() }
     Action { id: splitAction; text: "Split"; shortcut: "Ctrl+B"; enabled: editor.canSplit && !window.textEditing; onTriggered: editor.split() }
@@ -298,7 +299,7 @@ ApplicationWindow {
                 SplitView.fillHeight: true
                 UI.Pane {
                     padding: 0
-                    SplitView.preferredWidth: window.compact ? Math.min(window.width - 260,Math.max(260,window.font.pixelSize * 15)) : 250
+                    SplitView.preferredWidth: window.compact ? (editor.sourceMode ? Math.min(280,window.width * .32) : Math.min(window.width - 260,Math.max(260,window.font.pixelSize * 15))) : 250
                     SplitView.minimumWidth: 210
                     SplitView.maximumWidth: window.compact ? Math.max(440,window.width - 260) : 440
                     ColumnLayout {
@@ -308,7 +309,10 @@ ApplicationWindow {
                             visible: window.compact; Layout.fillWidth: true
                             model: ["Media","Clips","Inspector"]; currentIndex: window.browserSection
                             Accessible.name: "Browser or inspector panel"
-                            onActivated: index => window.browserSection = index
+                            onActivated: index => {
+                                window.browserSection = index
+                                if (index === 2 && editor.sourceMode) editor.showProject()
+                            }
                         }
                         UI.TabBar {
                             visible: !window.compact
@@ -398,6 +402,7 @@ ApplicationWindow {
                     ColumnLayout {
                         anchors.fill: parent; spacing: 10
                         RowLayout {
+                            id: viewerHeader
                             visible: editor.sourceMode || editor.clips.length > 0 || editor.soloLane >= 0
                             Layout.fillWidth: true
                             Label { visible: editor.sourceMode || editor.soloLane >= 0; text: editor.sourceMode ? "Source · " + (editor.currentSource.name || "") : "SOLO PREVIEW"; elide: Text.ElideMiddle; Layout.fillWidth: true; font.weight: Font.DemiBold }
@@ -412,6 +417,7 @@ ApplicationWindow {
                             onTextSelected: window.focusInspector(3,false)
                             onCaptionSelected: window.focusInspector(5,false)
                             Layout.fillWidth: true; Layout.fillHeight: true
+                            Layout.minimumHeight: editor.sourceMode ? 180 : 0
                             Accessible.name: "Video preview"
                             ColumnLayout {
                                 id: emptyImportState
@@ -466,27 +472,30 @@ ApplicationWindow {
                             }
                         }
                         UI.SourceControls { id: sourceControls; controller: editor; visible: editor.sourceMode; Layout.fillWidth: true }
-                        ColumnLayout {
-                            visible: editor.sourceMode || editor.clips.length > 0
-                            Layout.fillWidth: true
-                            spacing: 4
                         Flow {
-                            Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0; spacing: 4
-                            UI.Button { objectName: "playButton"; text: editor.playing ? "Pause" : "Play"; iconName: editor.playing ? "pause" : "play"; iconOnly: true; helpText: text + " preview (Space)"; enabled: editor.sourceMode ? editor.selectedSource >= 0 : editor.duration > 0; Accessible.name: text + " preview"; onClicked: editor.togglePlayback() }
-                            UI.Button { text: editor.sourceMode ? "Project" : "Source"; helpText: editor.sourceMode ? "Show Project viewer" : "Show Source viewer"; enabled: editor.sourceMode || editor.selectedSource >= 0; onClicked: editor.sourceMode ? editor.showProject() : editor.selectSource(editor.selectedSource) }
-                        }
-                            Label { text: editor.sourceMode ? editor.sourceTimeText : editor.timeText; font.family: window.font.family; font.features: ({"tnum": 1}); font.pixelSize: Math.max(11,window.font.pixelSize - 1); Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; Accessible.name: editor.timeText }
+                            id: viewerTransport
+                            visible: editor.sourceMode || editor.clips.length > 0
+                            Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0
+                            spacing: 4
+                            Row {
+                                spacing: 4
+                                UI.Button { objectName: "sourceStepBackButton"; visible: editor.sourceMode; text: "Previous frame"; iconName: "step-back"; iconOnly: true; helpText: "Previous source frame (Left arrow)"; onClicked: editor.stepSource(-1) }
+                                UI.Button { objectName: "playButton"; text: editor.playing ? "Pause" : "Play"; iconName: editor.playing ? "pause" : "play"; iconOnly: true; helpText: editor.generatingSubtitles ? "Finish or cancel subtitle generation to play" : text + " preview (Space)"; enabled: !editor.generatingSubtitles && (editor.sourceMode ? editor.selectedSource >= 0 : editor.duration > 0); Accessible.name: text + " preview"; onClicked: editor.togglePlayback() }
+                                UI.Button { objectName: "sourceStepForwardButton"; visible: editor.sourceMode; text: "Next frame"; iconName: "step-forward"; iconOnly: true; helpText: "Next source frame (Right arrow)"; onClicked: editor.stepSource(1) }
+                                UI.Button { text: editor.sourceMode ? "Project" : "Source"; helpText: editor.sourceMode ? "Show Project viewer" : "Show Source viewer"; enabled: editor.sourceMode || editor.selectedSource >= 0; onClicked: editor.sourceMode ? editor.showProject() : editor.selectSource(editor.selectedSource) }
+                            }
+                            Label { text: editor.sourceMode ? editor.sourceTimeText : editor.timeText; font.family: window.font.family; font.features: ({"tnum": 1}); font.pixelSize: Math.max(11,window.font.pixelSize - 1); width: Math.min(implicitWidth,viewerTransport.width); height: Math.max(34,Math.ceil(window.font.pixelSize * 2),implicitHeight); verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; Accessible.name: text }
                         }
                     }
                 }
                 Loader {
                     id: wideInspector
                     active: !window.compact
-                    visible: active
+                    visible: active && !editor.sourceMode
                     sourceComponent: inspectorComponent
                     SplitView.preferredWidth: 300
-                    SplitView.minimumWidth: active ? 260 : 0
-                    SplitView.maximumWidth: active ? 460 : 0
+                    SplitView.minimumWidth: visible ? 260 : 0
+                    SplitView.maximumWidth: visible ? 460 : 0
                     onLoaded: item.section = window.inspectorSection
                 }
             }

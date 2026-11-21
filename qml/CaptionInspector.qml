@@ -8,14 +8,16 @@ ColumnLayout {
     required property var controller
     property bool editing: false
     property int editingIndex: -1
-    readonly property bool hasCaptions: controller.captions.length > 0
+    property bool choosingWordColor: false
+    readonly property bool wordSelection: editing && content.selectionEnd > content.selectionStart
+    readonly property var wordStyle: {
+        var caption = controller.currentCaption
+        return wordSelection && content.selectionEnd <= (caption.text || "").length ? controller.captionTextStyle(content.selectionStart,content.selectionEnd) : ({})
+    }
+    readonly property bool hasCaptions: controller.captionCount > 0
     readonly property bool hasSelection: controller.selectedCaption >= 0
     spacing: 10
-    readonly property bool timingReviewNeeded: {
-        var cues = controller.captions
-        for (var i = 0; i < cues.length; ++i) if (cues[i].timingNeedsReview) return true
-        return false
-    }
+    readonly property bool timingReviewNeeded: controller.captionTimingNeedsReview
     function seconds(frames) { return (Number(frames || 0) / 60).toFixed(3) }
     function focusFirst() { if (hasCaptions) captionList.forceActiveFocus(); else importCaptions.forceActiveFocus() }
     function beginEditing(index) {
@@ -31,6 +33,17 @@ ColumnLayout {
         editing = false; controller.endTextDrag(cancel); editingIndex = -1
         if (returnFocus) captionList.forceActiveFocus()
     }
+    function checkEditingFocus() {
+        Qt.callLater(function() {
+            if (panel.editing && !panel.choosingWordColor && !content.activeFocus && !wordColor.activeFocus && !wordBold.activeFocus)
+                panel.finishEditing(false,false)
+        })
+    }
+    function formatSelection(fields) {
+        var start = content.selectionStart, end = content.selectionEnd
+        controller.styleCaptionText(start,end,fields,panel.editing)
+        content.forceActiveFocus(); content.select(start,end)
+    }
     Connections {
         target: panel.controller
         function onSelectionChanged() {
@@ -38,6 +51,7 @@ ColumnLayout {
             if (panel.controller.selectedCaption >= 0) captionList.positionViewAtIndex(panel.controller.selectedCaption,ListView.Contain)
         }
     }
+    UI.SubtitleGenerator { controller: panel.controller; Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12 }
     Flow {
         Layout.fillWidth: true; Layout.margins: 12; spacing: 6
         UI.Button {
@@ -68,7 +82,7 @@ ColumnLayout {
         visible: panel.hasCaptions
         Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
         Layout.preferredHeight: Math.min(160,Math.max(100,contentHeight))
-        model: panel.controller.captions
+        model: panel.controller.captionModel
         clip: true; spacing: 4; activeFocusOnTab: true
         currentIndex: panel.controller.selectedCaption
         Accessible.name: "Captions and project intervals in seconds"
@@ -117,18 +131,67 @@ ColumnLayout {
         objectName: "captionContentField"
         visible: panel.editing
         Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12; Layout.minimumHeight: 100
-        textFormat: TextEdit.PlainText; wrapMode: TextEdit.Wrap; selectByMouse: true; padding: 10
+        textFormat: TextEdit.PlainText; wrapMode: TextEdit.Wrap; selectByMouse: true; persistentSelection: true; padding: 10
         color: UI.Theme.text; selectionColor: UI.Theme.accent; selectedTextColor: UI.Theme.accentText
         Accessible.name: "Edit caption text. Enter commits; Shift Enter adds a line; Escape cancels."
+        KeyNavigation.priority: KeyNavigation.BeforeItem
+        KeyNavigation.tab: panel.wordSelection ? wordColor : captionStart
+        KeyNavigation.backtab: captionList
         background: Rectangle { color: UI.Theme.field; radius: UI.Theme.radius; border.color: content.activeFocus ? UI.Theme.accent : UI.Theme.controlBorder; border.width: content.activeFocus ? 2 : 1 }
         onTextChanged: if (panel.editing && panel.editingIndex === panel.controller.selectedCaption) {
             if (text.length > 2000) remove(2000,text.length)
             panel.controller.previewCaptionContent(text)
         }
-        onActiveFocusChanged: if (!activeFocus && panel.editing) panel.finishEditing(false,false)
+        onActiveFocusChanged: if (!activeFocus && panel.editing) panel.checkEditingFocus()
         Keys.onPressed: event => {
             if (event.key === Qt.Key_Escape) { panel.finishEditing(true); event.accepted = true }
             else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) { panel.finishEditing(false); event.accepted = true }
+            else if (event.key === Qt.Key_B && (event.modifiers & (Qt.ControlModifier | Qt.MetaModifier)) && panel.wordSelection) {
+                panel.formatSelection({bold: !panel.wordStyle.bold}); event.accepted = true
+            }
+        }
+    }
+    RowLayout {
+        visible: panel.editing
+        Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 12
+        Label { text: "Selected words"; Layout.fillWidth: true; wrapMode: Text.Wrap }
+        UI.Button {
+            id: wordColor
+            objectName: "captionWordColorButton"
+            text: "Choose selected-word color"; iconOnly: true
+            helpText: panel.wordSelection ? "Color the selected caption text in the video" : "Select caption text above to choose its color"
+            enabled: panel.wordSelection
+            KeyNavigation.priority: KeyNavigation.BeforeItem
+            KeyNavigation.tab: wordBold
+            KeyNavigation.backtab: content
+            contentItem: Rectangle {
+                implicitWidth: 20; implicitHeight: 20; radius: 3
+                color: panel.wordStyle.color || panel.controller.currentCaption.color || "#ffffff"
+                border.color: UI.Theme.controlBorder
+            }
+            onActiveFocusChanged: if (!activeFocus) panel.checkEditingFocus()
+            onClicked: {
+                var start = content.selectionStart, end = content.selectionEnd
+                panel.choosingWordColor = true
+                panel.controller.chooseCaptionTextColor(start,end,panel.editing)
+                panel.choosingWordColor = false
+                content.forceActiveFocus(); content.select(start,end)
+            }
+            Keys.onEscapePressed: panel.finishEditing(true)
+        }
+        UI.Button {
+            id: wordBold
+            objectName: "captionWordBoldButton"
+            text: "Bold selected words"; iconName: "bold"; iconOnly: true; checkable: true
+            helpText: panel.wordSelection ? "Toggle bold for the selected caption text (Command/Ctrl+B)" : "Select caption text above to change bold"
+            enabled: panel.wordSelection
+            KeyNavigation.priority: KeyNavigation.BeforeItem
+            KeyNavigation.tab: captionStart
+            KeyNavigation.backtab: wordColor
+            checked: panel.wordStyle.bold || false
+            onActiveFocusChanged: if (!activeFocus) panel.checkEditingFocus()
+            onClicked: panel.formatSelection({bold: checked})
+            Keys.onEscapePressed: panel.finishEditing(true)
         }
     }
     ColumnLayout {
@@ -140,6 +203,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 Label { text: "Start" }
                 UI.TextField {
+                    id: captionStart
                     objectName: "captionStartField"
                     property int editingIndex: -1
                     Layout.fillWidth: true; Layout.minimumWidth: 0
@@ -208,7 +272,7 @@ ColumnLayout {
         id: appearance
         property int selectedText: panel.controller.selectedCaption
         property var currentText: panel.controller.currentCaption
-        property var textOverlays: panel.controller.captions
+        property var textOverlays: []
         property var fontFamilies: panel.controller.fontFamilies
         property var textPresets: panel.controller.textPresets
         property bool exporting: panel.controller.exporting

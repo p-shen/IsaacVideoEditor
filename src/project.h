@@ -6,6 +6,7 @@
 #include <optional>
 #include <QUuid>
 #include "visual_transform.h"
+class QJsonObject;
 
 struct AudioControls {
     double gainDb = 0;
@@ -48,6 +49,13 @@ struct VisualOverlay {
     bool operator==(const VisualOverlay &o) const;
 };
 
+struct TextSpan {
+    int start=0,length=0;
+    QString color;
+    std::optional<bool> bold;
+    bool operator==(const TextSpan &o) const {return start==o.start&&length==o.length&&color==o.color&&bold==o.bold;}
+};
+
 struct TextOverlay {
     QString text = "New text";
     QString fontFamily = "Arial";
@@ -62,6 +70,7 @@ struct TextOverlay {
     QString hostId;
     int hostSourceFrame = 0;
     bool timingNeedsReview = false;
+    QVector<TextSpan> spans;
     bool operator==(const TextOverlay &other) const;
 };
 
@@ -72,6 +81,11 @@ struct Project {
     QVector<TextOverlay> textOverlays;
     QVector<TextOverlay> captions;
     bool burnCaptions = true;
+    struct TextTiming {
+        QVector<int> titleStarts,captionStarts;
+        int duration=0,extent=0;
+    };
+    TextTiming textTiming() const;
     int attachedFrame(const QString &hostId,int sourceFrame,int fallback) const;
     int textStartFrame(int index,bool caption=false) const;
     int textFrames(int index,bool caption=false) const;
@@ -123,5 +137,6 @@ struct Project {
     QString validate() const;
 };
 
+QJsonObject projectJson(const Project &project);
 bool saveProject(const Project &project, const QString &path, QString *error = nullptr);
 std::optional<Project> loadProject(const QString &path, QString *error = nullptr);

@@ -1,4 +1,5 @@
 #include "text_renderer.h"
+#include "time_interval_index.h"
 #include <QCache>
 #include <QColor>
 #include <QFont>
@@ -15,12 +16,19 @@
 
 namespace {
 constexpr auto stateKey="isaac.text.state";
-struct RenderState { QMutex mutex; QVector<TextOverlay> texts; };
+TimeIntervalIndex textIndex(const QVector<TextOverlay> &texts) {
+    QVector<TimeIntervalIndex::Interval> intervals;intervals.reserve(texts.size());
+    for(const auto &text:texts)intervals.append(text.text.isEmpty()?TimeIntervalIndex::Interval{}:TimeIntervalIndex::Interval{text.startFrame,qint64(text.startFrame)+text.durationFrames});
+    return TimeIntervalIndex(intervals);
+}
+struct RenderState {QMutex mutex;QVector<TextOverlay> texts;TimeIntervalIndex index;};
+struct RenderFrame {int position=0;QVector<TextOverlay> texts;};
 struct Word { int start,length; };
 struct Layout {
     QTextLayout text;
     QVector<Word> words;
     QVector<int> graphemeEnds;
+    QVector<TextSpan> spans;
     QRectF rect;
     qreal padding=0,scale=1;
     Layout(const TextOverlay &t,const QSize &canvas) {
@@ -30,6 +38,13 @@ struct Layout {
         QFont font(t.fontFamily);font.setPixelSize(t.fontSize);font.setBold(t.bold);font.setItalic(t.italic);
         QString content=t.uppercase?t.text.toUpper():t.text;content.replace('\n',QChar::LineSeparator);
         text.setText(content);text.setFont(font);text.setCacheEnabled(true);
+        QList<QTextLayout::FormatRange> formats;
+        for(auto span:t.spans){
+            if(t.uppercase){const int end=t.text.left(span.start+span.length).toUpper().size();span.start=t.text.left(span.start).toUpper().size();span.length=end-span.start;}
+            spans.append(span);
+            if(span.bold.has_value()){QTextCharFormat format;format.setFontWeight(*span.bold?QFont::Bold:QFont::Normal);formats.append({span.start,span.length,format});}
+        }
+        text.setFormats(formats);
         static const QRegularExpression wordPattern("\\S+",QRegularExpression::UseUnicodePropertiesOption);
         auto matches=wordPattern.globalMatch(content);
         while(matches.hasNext()){const auto match=matches.next();words.append({int(match.capturedStart()),int(match.capturedLength())});}
@@ -56,19 +71,21 @@ struct LayoutKey {
     int fontSize;
     bool bold,italic,uppercase;
     double x,y;
+    QVector<TextSpan> spans;
     bool operator==(const LayoutKey &o) const {
-        return text==o.text && fontFamily==o.fontFamily && style==o.style && canvas==o.canvas && fontSize==o.fontSize && bold==o.bold && italic==o.italic && uppercase==o.uppercase && x==o.x && y==o.y;
+        return text==o.text && fontFamily==o.fontFamily && style==o.style && canvas==o.canvas && fontSize==o.fontSize && bold==o.bold && italic==o.italic && uppercase==o.uppercase && x==o.x && y==o.y && spans==o.spans;
     }
 };
 size_t qHash(const LayoutKey &key,size_t seed=0) {
-    return qHashMulti(seed,key.text,key.fontFamily,key.style,key.canvas,key.fontSize,key.bold,key.italic,key.uppercase,key.x,key.y);
+    seed=qHashMulti(seed,key.text,key.fontFamily,key.style,key.canvas,key.fontSize,key.bold,key.italic,key.uppercase,key.x,key.y);
+    for(const auto &span:key.spans)seed=qHashMulti(seed,span.start,span.length,span.color,span.bold.has_value(),span.bold.value_or(false));return seed;
 }
 struct LayoutCache {
     // QTextLayout owns glyph/line storage; conservatively charge 256 bytes per character,
     // plus 64 KiB per entry so at most 128 recent layouts survive each thread's 8 MiB budget.
     QCache<LayoutKey,Layout> layouts{8*1024*1024};
     Layout &get(const TextOverlay &text,const QSize &canvas,std::unique_ptr<Layout> &transient) {
-        const LayoutKey key{text.text,text.fontFamily,text.style,canvas,text.fontSize,text.bold,text.italic,text.uppercase,text.x,text.y};
+        const LayoutKey key{text.text,text.fontFamily,text.style,canvas,text.fontSize,text.bold,text.italic,text.uppercase,text.x,text.y,text.spans};
         if(auto *layout=layouts.object(key))return *layout;
         transient=std::make_unique<Layout>(text,canvas);
         const qint64 cost=64*1024+256*qint64(text.text.size()+text.fontFamily.size());
@@ -87,34 +104,44 @@ QList<QRectF> wordRects(const Layout &layout,const Word &word) {
     }
     return result;
 }
-void drawText(QPainter &p,const Layout &layout,const QPointF &origin,const QColor &color,const QColor &outline,qreal width,int visibleEnd,const Word *emphasis=nullptr,const QColor &accent={}) {
+void drawText(QPainter &p,const Layout &layout,const QPointF &origin,const QColor &color,const QColor &outline,qreal width,int visibleEnd,const Word *emphasis=nullptr,const QColor &accent={},bool inlineColors=false) {
     QTextCharFormat format;format.setForeground(color);
     if(width>0)format.setTextOutline(QPen(outline,width,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
     // Qt's selection drawing uses the painter pen outside the selected range.
     p.setPen(Qt::transparent);
-    layout.text.draw(&p,origin,{{0,visibleEnd,format}});
+    QList<QTextLayout::FormatRange> ranges;int start=0;
+    if(inlineColors)for(const auto &span:layout.spans){
+        if(span.color.isEmpty()||span.start>=visibleEnd)continue;
+        if(span.start>start)ranges.append({start,span.start-start,format});
+        auto selected=format;selected.setForeground(QColor(span.color));const int end=std::min(visibleEnd,span.start+span.length);
+        ranges.append({span.start,end-span.start,selected});start=end;
+    }
+    if(start<visibleEnd)ranges.append({start,visibleEnd-start,format});
+    layout.text.draw(&p,origin,ranges);
     if(emphasis&&emphasis->start<visibleEnd){
         auto highlighted=format;highlighted.setForeground(accent);
         layout.text.draw(&p,origin,{{emphasis->start,std::min(emphasis->length,visibleEnd-emphasis->start),highlighted}});
     }
 }
 int getImage(mlt_frame frame,uint8_t **pixels,mlt_image_format *format,int *width,int *height,int) {
-    const int position=mlt_frame_pop_service_int(frame);
-    auto *state=static_cast<RenderState*>(mlt_frame_pop_service(frame));
+    auto *snapshot=static_cast<RenderFrame*>(mlt_frame_pop_service(frame));
     *format=mlt_image_rgba;
     const int error=mlt_frame_get_image(frame,pixels,format,width,height,1);
     if(error || !*pixels || *format!=mlt_image_rgba)return error?error:1;
-    QVector<TextOverlay> texts;{QMutexLocker lock(&state->mutex);texts=state->texts;}
     QImage image(*pixels,*width,*height,*width*4,QImage::Format_RGBA8888);
-    TextRendering::paint(image,texts,position);
+    TextRendering::paint(image,snapshot->texts,snapshot->position);
     return 0;
 }
 mlt_frame process(mlt_filter filter,mlt_frame frame) {
     auto *state=static_cast<RenderState*>(mlt_properties_get_data(MLT_FILTER_PROPERTIES(filter),stateKey,nullptr));
     const int position=mlt_filter_get_position(filter,frame);
-    bool active=false;
-    {QMutexLocker lock(&state->mutex);for(const auto &t:state->texts)active |= !t.text.isEmpty() && position>=t.startFrame && position<t.startFrame+t.durationFrames;}
-    if(active){mlt_frame_push_service(frame,state);mlt_frame_push_service_int(frame,position);mlt_frame_push_get_image(frame,getImage);}
+    RenderFrame snapshot;snapshot.position=position;
+    {QMutexLocker lock(&state->mutex);const auto active=state->index.at(position);snapshot.texts.reserve(active.size());for(int index:active)snapshot.texts.append(state->texts[index]);}
+    if(!snapshot.texts.isEmpty()){
+        auto *data=new RenderFrame(std::move(snapshot));
+        mlt_properties_set_data(MLT_FRAME_PROPERTIES(frame),"isaac.text.frame",data,0,[](void *p){delete static_cast<RenderFrame*>(p);},nullptr);
+        mlt_frame_push_service(frame,data);mlt_frame_push_get_image(frame,getImage);
+    }
     return frame;
 }
 }
@@ -137,7 +164,9 @@ void paint(QImage &image,const QVector<TextOverlay> &texts,int frame) {
         if(wordPop&&!layoutPtr->words.isEmpty()){
             const int wordCount=layoutPtr->words.size();
             const int index=std::min(wordCount-1,int(qint64(elapsed)*wordCount/t.durationFrames));
-            const auto word=layoutPtr->words[index];auto cue=t;cue.text=layoutPtr->text.text().mid(word.start,word.length);
+            const auto word=layoutPtr->words[index];auto cue=t;cue.text=layoutPtr->text.text().mid(word.start,word.length);cue.uppercase=false;cue.spans.clear();
+            for(const auto &span:layoutPtr->spans){const int start=std::max(span.start,word.start),end=std::min(span.start+span.length,word.start+word.length);
+                if(start<end)cue.spans.append({start-word.start,end-start,span.color,span.bold});}
             layoutPtr=&cache.get(cue,image.size(),wordTransient);
             const double wordFrames=t.durationFrames/double(wordCount);
             entry=std::min(1.0,(elapsed-index*wordFrames)/std::max(1.0,std::min(10.0,wordFrames/2)));
@@ -171,7 +200,7 @@ void paint(QImage &image,const QVector<TextOverlay> &texts,int frame) {
             for(auto rect:wordRects(layout,*emphasis))p.drawRoundedRect(rect.translated(origin).adjusted(-6,0,6,0),8,8);
         }
         const bool legacy=t.style=="clean"||t.style=="playful"||t.style=="box";
-        if(legacy&&t.animation!="typewriter"&&t.animation!="karaoke"){
+        if(legacy&&t.spans.isEmpty()&&t.animation!="typewriter"&&t.animation!="karaoke"){
             if(t.shadow){p.setPen(QColor(0,0,0,210));layout.text.draw(&p,origin+QPointF(2,3));}
             p.setPen(QColor(t.color));layout.text.draw(&p,origin);
         }else{
@@ -180,14 +209,14 @@ void paint(QImage &image,const QVector<TextOverlay> &texts,int frame) {
             const qreal stroke=outlined?std::max(2.0,t.fontSize*.065):0;
             if(t.shadow)drawText(p,layout,origin+QPointF(t.style=="comic-sticker"?6:2,t.style=="comic-sticker"?7:3),QColor(0,0,0,210),QColor(0,0,0,210),stroke,visibleEnd);
             if(t.style=="neon-glow")for(int width:{18,12,6}){QColor glow(t.color);glow.setAlpha(35);drawText(p,layout,origin,glow,glow,width,visibleEnd);}
-            drawText(p,layout,origin,QColor(t.color),outline,stroke,visibleEnd,emphasis,accent);
+            drawText(p,layout,origin,QColor(t.color),outline,stroke,visibleEnd,emphasis,accent,true);
         }
         p.restore();
     }
 }
 bool attach(Mlt::Tractor &timeline,const QVector<TextOverlay> &texts) {
     auto filter=mlt_filter_new();if(!filter)return false;
-    auto *state=new RenderState;state->texts=texts;
+    auto *state=new RenderState;state->texts=texts;state->texts.detach();state->index=textIndex(texts);
     mlt_properties_set_data(MLT_FILTER_PROPERTIES(filter),stateKey,state,0,[](void *p){delete static_cast<RenderState*>(p);},nullptr);
     filter->process=process;
     const bool attached=mlt_service_attach(timeline.get_service(),filter)==0;
@@ -197,6 +226,14 @@ bool attach(Mlt::Tractor &timeline,const QVector<TextOverlay> &texts) {
 }
 void update(Mlt::Tractor &timeline,const QVector<TextOverlay> &texts) {
     auto *state=static_cast<RenderState*>(mlt_properties_get_data(timeline.get_properties(),stateKey,nullptr));
-    if(state){QMutexLocker lock(&state->mutex);state->texts=texts;}
+    if(state){auto index=textIndex(texts);auto owned=texts;owned.detach();QMutexLocker lock(&state->mutex);state->texts=std::move(owned);state->index=std::move(index);}
+}
+bool updateOne(Mlt::Tractor &timeline,int renderIndex,const TextOverlay &text) {
+    auto *state=static_cast<RenderState*>(mlt_properties_get_data(timeline.get_properties(),stateKey,nullptr));
+    if(!state)return false;
+    QMutexLocker lock(&state->mutex);if(renderIndex<0||renderIndex>=state->texts.size())return false;
+    const auto &previous=state->texts[renderIndex];
+    const bool timingChanged=previous.startFrame!=text.startFrame||previous.durationFrames!=text.durationFrames||previous.text.isEmpty()!=text.text.isEmpty();
+    state->texts[renderIndex]=text;if(timingChanged)state->index=textIndex(state->texts);return true;
 }
 }

@@ -2,6 +2,7 @@
 #include "captions.h"
 #include "mlt_engine.h"
 #include "preview.h"
+#include "text_style.h"
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
@@ -14,6 +15,50 @@ class CaptionControllerTest : public QObject {
         auto path=dir.filePath("captions.srt");QFile f(path);if(!f.open(QIODevice::WriteOnly))return {};f.write(text);return path;
     }
 private slots:
+    void typingCoalescesPreviewAndCancelDropsPendingText() {
+        QTemporaryDir dir;EditorController editor;QVERIFY(editor.importFiles({footage()}));editor.addCaption();
+        auto *preview=editor.findChild<Preview*>();QVERIFY(preview);
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.loading()&&!preview->isSeeking()&&!editor.frame().isNull(),10000);
+        QVERIFY(editor.saveTo(dir.filePath("saved.isaac.json")));
+        editor.beginCaptionEdit(0);QTRY_VERIFY(!preview->isSeeking());
+        QSignalSpy seeking(preview,&Preview::seekingChanged);
+        for(int i=0;i<50;++i)editor.previewCaptionContent(QString("Typed %1").arg(i));
+        QCOMPARE(seeking.size(),0);QCOMPARE(editor.captions()[0].toMap()["text"].toString(),QString("Typed 49"));
+        editor.endTextDrag(true);QTRY_VERIFY_WITH_TIMEOUT(!preview->isSeeking(),5000);QTest::qWait(40);
+        QCOMPARE(editor.project().captions[0].text,QString("New caption"));QCOMPARE(editor.captions()[0].toMap()["text"].toString(),QString("New caption"));QVERIFY(!editor.dirty());
+        editor.beginCaptionEdit(0);editor.previewCaptionContent("Final typed state");editor.endTextDrag(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!preview->isSeeking(),5000);QCOMPARE(editor.project().captions[0].text,QString("Final typed state"));
+        editor.undo();QCOMPARE(editor.project().captions[0].text,QString("New caption"));editor.redo();QCOMPARE(editor.project().captions[0].text,QString("Final typed state"));
+    }
+    void captionSummariesUseResolvedTimingAndKeepDesiredDuration() {
+        Project project;project.clips={{"a.mp4",0,2},{"b.mp4",1,4}};project.crossfadeFrames=30;
+        TextOverlay attached;attached.hostId=project.clips[1].id;attached.hostSourceFrame=120;attached.durationFrames=180;
+        TextOverlay detached;detached.startFrame=300;detached.durationFrames=120;project.captions={attached,detached};
+        const auto timing=project.textTiming();
+        const auto a=timedTextInfo(project,0,true,&timing),b=timedTextInfo(project,1,true,&timing);
+        QCOMPARE(a["startFrame"].toInt(),150);QCOMPARE(a["durationFrames"].toInt(),180);QCOMPARE(a["effectiveFrames"].toInt(),120);QVERIFY(a["clamped"].toBool());
+        QCOMPARE(b["startFrame"].toInt(),300);QCOMPARE(b["durationFrames"].toInt(),120);QCOMPARE(b["effectiveFrames"].toInt(),0);QVERIFY(b["clamped"].toBool());
+        QCOMPARE(a,timedTextInfo(project,0,true));QCOMPARE(b,timedTextInfo(project,1,true));
+    }
+    void selectedWordFormattingSharesContentGestureAndUndo() {
+        QTemporaryDir dir;EditorController e;e.addCaption();e.beginCaptionEdit(0);e.previewCaptionContent(QString::fromUtf8("Hello 中文 🔥"));
+        e.styleCaptionText(6,8,{{"color","#ff00ff"},{"bold",false}});
+        QCOMPARE(e.project().captions[0].spans.size(),1);QVERIFY(e.dirty());
+        QCOMPARE(e.captionTextStyle(6,8)["color"].toString(),"#ff00ff");QVERIFY(!e.captionTextStyle(6,8)["bold"].toBool());
+        e.endTextDrag(true);QCOMPARE(e.project().captions[0].text,"New caption");QVERIFY(e.project().captions[0].spans.isEmpty());
+        e.beginCaptionEdit(0);e.previewCaptionContent(QString::fromUtf8("Hello 中文 🔥"));e.styleCaptionText(6,8,{{"color","#ff00ff"},{"bold",false}});e.endTextDrag(false);
+        const auto styled=e.project().captions[0];QVERIFY(e.saveTo(dir.filePath("styled.isaac.json")));
+        e.undo();QCOMPARE(e.project().captions[0].text,"New caption");QVERIFY(e.project().captions[0].spans.isEmpty());e.redo();QCOMPARE(e.project().captions[0],styled);
+        e.beginCaptionEdit(0);e.styleCaptionText(9,10,{{"bold",true}});QCOMPARE(e.project().captions[0],styled);e.endTextDrag(true);
+        e.beginCaptionEdit(0);e.previewCaptionContent(QString::fromUtf8("Hi Hello 中文 🔥"));e.endTextDrag(false);QCOMPARE(e.project().captions[0].spans[0].start,9);
+        QVERIFY(e.exportSrt(dir.filePath("plain.srt")));QFile file(dir.filePath("plain.srt"));QVERIFY(file.open(QIODevice::ReadOnly));const auto cues=Subtitles::parseSrt(file.readAll());QVERIFY(cues);QCOMPARE(cues->first().text,e.project().captions[0].text);QVERIFY(cues->first().spans.isEmpty());
+    }
+    void formattingAfterFocusedSaveRemainsCancelableAndOneUndo() {
+        QTemporaryDir dir;EditorController e;e.addCaption();e.beginCaptionEdit(0);QVERIFY(e.saveTo(dir.filePath("focused.isaac.json")));const auto saved=e.project().captions;
+        e.styleCaptionText(0,3,{{"bold",false}},true);e.endTextDrag(true);QCOMPARE(e.project().captions,saved);QVERIFY(!e.dirty());
+        e.styleCaptionText(0,3,{{"color","#ff00ff"}},true);e.previewCaptionContent("New caption changed");e.endTextDrag(false);
+        QVERIFY(!e.project().captions[0].spans.isEmpty());e.undo();QCOMPARE(e.project().captions,saved);QVERIFY(!e.dirty());
+    }
     void presetsApplyToCaptionSelectionAndUndoTogether() {
         QTemporaryDir dir;EditorController e;QVERIFY(e.importFiles({footage()}));QVERIFY(e.importSrt(srt(dir)));
         e.selectCaption(0);e.selectCaption(1,Qt::ControlModifier);e.styleCaptions({{"preset","comic-sticker"}});
@@ -60,6 +105,7 @@ private slots:
     }
     void backgroundExportCapturesCaptionBurnRevision() {
         QTemporaryDir dir;EditorController e;QVERIFY(e.importFiles({footage()}));e.addCaption();e.beginCaptionEdit(0);e.previewCaptionContent("FROZEN");e.endTextDrag(false);e.styleCaptions({{"color","#ff00ff"},{"fontSize",150},{"shadow",false}});
+        e.styleCaptions({{"color","#ffffff"}});e.styleCaptionText(0,3,{{"color","#ff00ff"},{"bold",false}});
         const auto path=dir.filePath("frozen.mp4");QVERIFY(e.exportTo(path));e.setBurnCaptions(false);e.styleCaptions({{"color","#0000ff"}});QTRY_VERIFY_WITH_TIMEOUT(!e.exporting(),10000);QCOMPARE(e.exportState(),QString("Completed"));
         Project output;output.clips={{path,0,2}};Mlt::Profile profile;Media::configureOutputProfile(profile,640,360);auto timeline=Media::buildTimeline(output,profile);QVERIFY(timeline);timeline->seek(30);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());QVERIFY(frame);auto format=mlt_image_rgba;uint8_t *pixels=nullptr;int width=640,height=360;QVERIFY(!mlt_frame_get_image(frame->get_frame(),&pixels,&format,&width,&height,0));QVERIFY(pixels);
         QImage image(pixels,width,height,width*4,QImage::Format_RGBA8888);int magenta=0;for(int y=0;y<height;++y)for(int x=0;x<width;++x){const auto c=image.pixelColor(x,y);magenta+=c.red()>160&&c.blue()>150&&c.green()<110;}QVERIFY(magenta>30);
@@ -85,9 +131,9 @@ private slots:
         }
     }
     void draftCaptionsStayOutOfRecovery() {
-        QTemporaryDir dir;EditorController e;e.enableRecovery(dir.filePath("recovery"));QVERIFY(e.importFiles({footage()}));e.addCaption();e.beginCaptionEdit(0);e.previewCaptionContent("UNCOMMITTED");
+        QTemporaryDir dir;EditorController e;e.enableRecovery(dir.filePath("recovery"));QVERIFY(e.importFiles({footage()}));e.addCaption();e.beginCaptionEdit(0);e.previewCaptionContent("UNCOMMITTED");e.styleCaptionText(0,3,{{"color","#ff00ff"}});
         QDir recovery(dir.filePath("recovery"));QTRY_VERIFY_WITH_TIMEOUT(!recovery.entryList({"*.recovery.json"},QDir::Files).isEmpty(),3000);
-        const auto saved=loadProject(recovery.filePath(recovery.entryList({"*.recovery.json"},QDir::Files).first()));QVERIFY(saved);QCOMPARE(saved->captions[0].text,QString("New caption"));e.endTextDrag(true);
+        const auto saved=loadProject(recovery.filePath(recovery.entryList({"*.recovery.json"},QDir::Files).first()));QVERIFY(saved);QCOMPARE(saved->captions[0].text,QString("New caption"));QVERIFY(saved->captions[0].spans.isEmpty());e.endTextDrag(true);
     }
 };
 QTEST_MAIN(CaptionControllerTest)

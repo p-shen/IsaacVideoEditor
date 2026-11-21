@@ -54,6 +54,10 @@ fi
 bash "$repo/packaging/copy-mlt-modules.sh" "$mlt_plugins" "$appdir/usr/lib/mlt-7/" so
 cp -aL "$mlt_data/." "$appdir/usr/share/mlt-7/"
 cp "$build_dir/IsaacVideoEditor" "$build_dir/IsaacVideoEditorUpdater" "$appdir/usr/bin/"
+if [[ -d "$build_dir/subtitles" ]]; then
+    [[ -f "$build_dir/subtitles/runtime.json" && -x "$build_dir/subtitles/whisper-cli" ]] || fail "Incomplete Whisper runtime; run packaging/prepare-whisper.py"
+    cp -aL "$build_dir/subtitles" "$appdir/usr/bin/"
+fi
 cp "$(command -v ffmpeg)" "$(command -v ffprobe)" "$appdir/usr/bin/"
 cp "$repo/LICENSE" "$appdir/usr/share/licenses/IsaacVideoEditor/LICENSE"
 cat > "$appdir/usr/share/applications/IsaacVideoEditor.desktop" <<'DESKTOP'

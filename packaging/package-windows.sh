@@ -42,6 +42,10 @@ fi
 bash "$repo/packaging/copy-mlt-modules.sh" "$mlt_plugins" "$stage/lib/mlt-7/" dll
 cp -aL "$mlt_data/." "$stage/share/mlt-7/"
 cp "$build_dir/IsaacVideoEditor.exe" "$build_dir/IsaacVideoEditorUpdater.exe" "$prefix/bin/ffmpeg.exe" "$prefix/bin/ffprobe.exe" "$stage/"
+if [[ -d "$build_dir/subtitles" ]]; then
+    [[ -f "$build_dir/subtitles/runtime.json" && -f "$build_dir/subtitles/whisper-cli.exe" && -f "$build_dir/subtitles/cpu/whisper-cli.exe" ]] || fail "Incomplete Whisper runtime; run packaging/prepare-whisper.py"
+    cp -aL "$build_dir/subtitles" "$stage/"
+fi
 cp "$repo/LICENSE" "$stage/licenses/IsaacVideoEditor.txt"
 windeployqt --release --compiler-runtime --svg --include-plugins qoffscreen,qsvg --qmldir "$repo/qml" --dir "$stage" "$stage/IsaacVideoEditor.exe"
 for plugin in platforms/qoffscreen.dll imageformats/qsvg.dll; do

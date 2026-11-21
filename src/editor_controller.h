@@ -1,6 +1,7 @@
 #pragma once
 #include "project.h"
 #include "performance.h"
+#include "caption_model.h"
 #include <QObject>
 #include <QImage>
 #include <QVariantList>
@@ -19,6 +20,8 @@ class Preview;
 class PreviewCache;
 class MediaCache;
 class ExportJob;
+class SubtitleJob;
+class SubtitleModels;
 class RecoveryStore;
 
 class EditorController final : public QObject {
@@ -38,10 +41,13 @@ class EditorController final : public QObject {
     Q_PROPERTY(bool visualPreviewActive READ visualPreviewActive NOTIFY compositionChanged)
     Q_PROPERTY(QVariantList clips READ clips NOTIFY projectChanged)
     Q_PROPERTY(QVariantList captions READ captions NOTIFY projectChanged)
+    Q_PROPERTY(QAbstractItemModel* captionModel READ captionModel CONSTANT)
+    Q_PROPERTY(int captionCount READ captionCount NOTIFY captionSummariesChanged)
+    Q_PROPERTY(bool captionTimingNeedsReview READ captionTimingNeedsReview NOTIFY captionSummariesChanged)
     Q_PROPERTY(QVariantList selectedCaptions READ selectedCaptions NOTIFY selectionChanged)
     Q_PROPERTY(int selectedCaption READ selectedCaption NOTIFY selectionChanged)
     Q_PROPERTY(QVariantMap currentCaption READ currentCaption NOTIFY selectionChanged)
-    Q_PROPERTY(QStringList captionWarnings READ captionWarnings NOTIFY projectChanged)
+    Q_PROPERTY(QStringList captionWarnings READ captionWarnings NOTIFY captionSummariesChanged)
     Q_PROPERTY(bool burnCaptions READ burnCaptions WRITE setBurnCaptions NOTIFY projectChanged)
     Q_PROPERTY(bool textGuides READ textGuides WRITE setTextGuides NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList textOverlays READ textOverlays NOTIFY projectChanged)
@@ -50,7 +56,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(QStringList fontFamilies READ fontFamilies CONSTANT)
     Q_PROPERTY(QVariantList textPresets READ textPresets CONSTANT)
     Q_PROPERTY(QVariantList selectedIndices READ selectedIndices NOTIFY selectionChanged)
-    Q_PROPERTY(QVariantMap currentClip READ currentClip NOTIFY selectionChanged)
+    Q_PROPERTY(QVariantMap currentClip READ currentClip NOTIFY clipDetailsChanged)
     Q_PROPERTY(int selectedClip READ selectedClip NOTIFY selectionChanged)
     Q_PROPERTY(int duration READ duration NOTIFY projectChanged)
     Q_PROPERTY(int position READ position NOTIFY positionChanged)
@@ -69,6 +75,17 @@ class EditorController final : public QObject {
     Q_PROPERTY(QString notice READ notice NOTIFY stateChanged)
     Q_PROPERTY(bool noticeCanUndo READ noticeCanUndo NOTIFY stateChanged)
     Q_PROPERTY(bool exporting READ exporting NOTIFY stateChanged)
+    Q_PROPERTY(QObject* subtitleModels READ subtitleModels CONSTANT)
+    Q_PROPERTY(bool generatingSubtitles READ generatingSubtitles NOTIFY subtitleChanged)
+    Q_PROPERTY(QString subtitleState READ subtitleState NOTIFY subtitleChanged)
+    Q_PROPERTY(int subtitleProgress READ subtitleProgress NOTIFY subtitleChanged)
+    Q_PROPERTY(QString subtitleDevice READ subtitleDevice NOTIFY subtitleChanged)
+    Q_PROPERTY(QString subtitleModel READ subtitleModel NOTIFY subtitleChanged)
+    Q_PROPERTY(QString subtitleDestination READ subtitleDestination NOTIFY subtitleChanged)
+    Q_PROPERTY(QStringList subtitleWarnings READ subtitleWarnings NOTIFY subtitleChanged)
+    Q_PROPERTY(bool canImportGeneratedSubtitles READ canImportGeneratedSubtitles NOTIFY subtitleChanged)
+    Q_PROPERTY(bool subtitleEngineAvailable READ subtitleEngineAvailable NOTIFY subtitleChanged)
+    Q_PROPERTY(bool subtitleCpuOnly READ subtitleCpuOnly WRITE setSubtitleCpuOnly NOTIFY subtitleChanged)
     Q_PROPERTY(QString exportLog READ exportLog NOTIFY stateChanged)
     Q_PROPERTY(int exportProgress READ exportProgress NOTIFY stateChanged)
     Q_PROPERTY(QString voicePath READ voicePath NOTIFY projectChanged)
@@ -98,7 +115,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(int cacheLimitGiB READ cacheLimitGiB NOTIFY stateChanged)
     Q_PROPERTY(int previewQuality READ previewQuality NOTIFY stateChanged)
 public:
-    explicit EditorController(QObject *parent=nullptr,const Performance::Budget &budget=Performance::budget());
+    explicit EditorController(QObject *parent=nullptr,const Performance::Budget &budget=Performance::budget(),SubtitleModels *subtitleModels=nullptr);
     ~EditorController() override;
     const Project &project() const { return project_; }
     QVector<double> sourceDurations() const;
@@ -163,6 +180,9 @@ public:
     Q_INVOKABLE void editKeyframe(const QString &property,const QString &action,int targetSourceFrame=-1);
     QVariantList clips() const;
     QVariantList captions() const;
+    QAbstractItemModel *captionModel() const {return captionModel_;}
+    int captionCount() const {return captionModel_->rowCount();}
+    bool captionTimingNeedsReview() const {return captionModel_->timingNeedsReview();}
     QVariantList selectedCaptions() const {return captionSelection_;}
     int selectedCaption() const {return selectedCaption_;}
     QVariantMap currentCaption() const;
@@ -184,6 +204,9 @@ public:
     Q_INVOKABLE void setCaptionTiming(int index,int start,int frames);
     Q_INVOKABLE void styleCaptions(const QVariantMap &fields,bool all=false);
     Q_INVOKABLE void chooseCaptionColor();
+    Q_INVOKABLE void styleCaptionText(int start,int end,const QVariantMap &fields,bool editing=false);
+    Q_INVOKABLE QVariantMap captionTextStyle(int start,int end) const;
+    Q_INVOKABLE void chooseCaptionTextColor(int start,int end,bool editing=false);
     Q_INVOKABLE void setBurnCaptions(bool enabled);
     Q_INVOKABLE void reviewCaptions();
     Q_INVOKABLE void attachTimedText(bool caption,int hostIndex);
@@ -224,6 +247,25 @@ public:
     QString notice() const { return notice_; }
     bool noticeCanUndo() const { return noticeCanUndo_ && undo_.canUndo(); }
     bool exporting() const { return !exportJob_.isNull(); }
+    QObject *subtitleModels() const;
+    bool generatingSubtitles() const {return !subtitleJob_.isNull();}
+    QString subtitleState() const {return subtitleState_;}
+    int subtitleProgress() const {return subtitleProgress_;}
+    QString subtitleDevice() const {return subtitleDevice_;}
+    QString subtitleModel() const {return subtitleModel_;}
+    QString subtitleDestination() const {return subtitleDestination_;}
+    QStringList subtitleWarnings() const {return subtitleWarnings_;}
+    bool canImportGeneratedSubtitles() const;
+    bool subtitleEngineAvailable() const;
+    bool subtitleCpuOnly() const {return subtitleCpuOnly_;}
+    void setSubtitleCpuOnly(bool cpu);
+    Q_INVOKABLE void generateSrtDialog();
+    Q_INVOKABLE bool generateSrtTo(const QString &path);
+    Q_INVOKABLE void cancelSubtitleGeneration();
+    Q_INVOKABLE bool importGeneratedSubtitles(bool confirmedAppend=false);
+    Q_INVOKABLE void confirmImportGeneratedSubtitles();
+    Q_INVOKABLE void revealGeneratedSubtitles();
+    Q_INVOKABLE void openSubtitleLog();
     QString exportLog() const { return exportLog_; }
     int exportProgress() const { return exportProgress_; }
     QString voicePath() const { return project_.voicePath; }
@@ -331,6 +373,9 @@ public:
     Q_INVOKABLE void dismissNotice();
     Q_INVOKABLE void retryPreviews();
 signals:
+    void subtitleChanged();
+    void captionSummariesChanged();
+    void clipDetailsChanged();
     void compositionChanged();
     void transformChanged();
     void projectChanged();
@@ -394,6 +439,9 @@ private:
     bool textGuides_=true;
     TextOverlay *selectedTimedText(Project &project) const;
     void updateTextPreview();
+    void flushTextPreview();
+    CaptionModel *captionModel_=nullptr;
+    QTimer textPreviewTimer_;
     std::optional<State> textDragBefore_;
     QVariantList selection_;
     int primary_=-1,anchor_=-1,position_=0;
@@ -421,6 +469,13 @@ private:
     QHash<int,QString> overlayProxyPaths_;
     int proxyPriorityStart_=-1,proxyPriorityEnd_=-1;
     QPointer<ExportJob> exportJob_;
+    SubtitleModels *subtitleModels_=nullptr;
+    QPointer<SubtitleJob> subtitleJob_,subtitleResultJob_;
+    QString subtitleState_,subtitleDevice_,subtitleModel_,subtitleDestination_,subtitleLog_;
+    QStringList subtitleWarnings_;
+    quint64 subtitleRevision_=0;
+    int subtitleProgress_=-1;
+    bool subtitleCpuOnly_=false,subtitleImported_=false;
     RecoveryStore *recovery_=nullptr;
     QVariantList recoveryCandidates_,relinkProposals_;
     QString exportState_,exportDestination_,exportRevision_,exportDetails_,exportLog_;

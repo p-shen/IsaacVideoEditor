@@ -975,9 +975,14 @@ void PreviewCacheTest::hardwareFailureRetriesSoftwareOnce() {
     script.write("#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in h264_*) echo hardware >> \"" + log.toUtf8() + "\"; echo 'hardware initialization failed' >&2; exit 1;; esac\ndone\necho software >> \"" + log.toUtf8() + "\"\nexec \"" + realFfmpeg.toUtf8() + "\" \"$@\"\n");
     script.close();
     QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-    const auto previousPath = qgetenv("PATH");
-    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    const auto previousPath = qgetenv("PATH"), previousHardware = qgetenv("ISAAC_DISABLE_HARDWARE_ENCODING");
+    const auto restore = qScopeGuard([&] {
+        qputenv("PATH", previousPath);
+        if (previousHardware.isNull()) qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");
+        else qputenv("ISAAC_DISABLE_HARDWARE_ENCODING", previousHardware);
+    });
     qputenv("PATH", directory.path().toUtf8());
+    qputenv("ISAAC_DISABLE_HARDWARE_ENCODING", "0"); // Only the fake encoder sees the hardware request.
     const auto fixture = QFINDTESTDATA("fixtures/rotation.mp4");
     const auto second = directory.filePath("second.mp4");
     QVERIFY(QFile::copy(fixture, second));
@@ -1083,9 +1088,14 @@ void PreviewCacheTest::hardwareCrashAndBadSourcePreserveReadyCopy() {
     script.write("#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in h264_*) hardware=yes;; esac; output=\"$arg\"; done\necho attempt >> \"" + log.toUtf8() + "\"\nprintf incomplete > \"$output\"\nif [ \"$hardware\" = yes ]; then kill -KILL $$; fi\nexit 1\n");
     script.close();
     QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-    const auto previousPath = qgetenv("PATH");
-    const auto restore = qScopeGuard([&] { qputenv("PATH", previousPath); });
+    const auto previousPath = qgetenv("PATH"), previousHardware = qgetenv("ISAAC_DISABLE_HARDWARE_ENCODING");
+    const auto restore = qScopeGuard([&] {
+        qputenv("PATH", previousPath);
+        if (previousHardware.isNull()) qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");
+        else qputenv("ISAAC_DISABLE_HARDWARE_ENCODING", previousHardware);
+    });
     qputenv("PATH", directory.path().toUtf8());
+    qputenv("ISAAC_DISABLE_HARDWARE_ENCODING", "0"); // Only the fake encoder sees the hardware request.
     const auto bad = directory.filePath("bad.mp4");
     QFile invalid(bad);
     QVERIFY(invalid.open(QIODevice::WriteOnly));

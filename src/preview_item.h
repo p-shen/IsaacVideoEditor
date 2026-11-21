@@ -2,6 +2,7 @@
 #include <QQuickPaintedItem>
 #include <QQuickItem>
 #include <QImage>
+#include <QColor>
 #include <QPointer>
 #include <atomic>
 #include "editor_controller.h"
@@ -80,4 +81,35 @@ private:
     int rotation_=0;
     bool priority_=false;
     QImage image_;
+};
+
+class CachedWaveform : public QQuickPaintedItem {
+    Q_OBJECT
+    Q_PROPERTY(MediaCache* cache READ cache WRITE setCache NOTIFY changed)
+    Q_PROPERTY(QString source READ source WRITE setSource NOTIFY changed)
+    Q_PROPERTY(double duration READ duration WRITE setDuration NOTIFY changed)
+    Q_PROPERTY(QColor color READ color WRITE setColor NOTIFY changed)
+    Q_PROPERTY(QString state READ state NOTIFY stateChanged)
+public:
+    explicit CachedWaveform(QQuickItem *parent=nullptr);
+    MediaCache *cache() const { return cache_; }
+    QString source() const { return source_; }
+    double duration() const { return duration_; }
+    QColor color() const { return color_; }
+    QString state() const { return state_; }
+    void setCache(MediaCache *cache);
+    void setSource(const QString &source);
+    void setDuration(double seconds);
+    void setColor(const QColor &color);
+    void paint(QPainter *painter) override;
+signals:
+    void changed();
+    void stateChanged();
+private:
+    void refresh();
+    QPointer<MediaCache> cache_;
+    QString source_, state_;
+    QVector<float> peaks_;
+    double duration_=0;
+    QColor color_=Qt::black;
 };

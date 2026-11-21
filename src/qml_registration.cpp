@@ -14,6 +14,7 @@ void registerEditorQmlTypes() {
     if(registered) return; registered=true;
     qmlRegisterType<VideoPreview>("Isaac",1,0,"VideoPreview");
     qmlRegisterType<CachedFrame>("Isaac",1,0,"CachedFrame");
+    qmlRegisterType<CachedWaveform>("Isaac",1,0,"CachedWaveform");
     qmlRegisterType<QuickTimeline>("Isaac",1,0,"QuickTimeline");
     qmlRegisterType<UpdateChecker>("Isaac",1,0,"UpdateChecker");
     qmlRegisterUncreatableType<EditorController>("Isaac",1,0,"EditorController","Created by the application");

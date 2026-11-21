@@ -8,6 +8,10 @@ This release follows the [editing interaction design](superpowers/specs/2026-10-
 
 Select a source to enter **Source** viewer mode. Its cursor and marked range are separate from the Project playhead. **I** marks the first frame; **O** includes the current frame by placing the exclusive end one frame later. Numeric In/Out fields show seconds to three decimal places and accept decimal seconds, rounded to the nearest frame. **Clear Range** selects the whole source again. **Append** adds the range at the end. **Insert** adds it at the committed Project playhead, splitting footage there when allowed. An insertion inside a crossfade is rejected with guidance.
 
+The position control beneath the Source viewer displays the original audio waveform, the marked range, and the current frame. Click or drag across it to seek; arrow keys step one frame and Escape cancels a scrub. Peaks load in the background at a fixed amplitude scale. An unavailable waveform is labeled separately from silent audio.
+
+Source mode gives the preview the project inspector's space. The **In** and **Out** buttons mark the current frame beside their numeric fields; the reset icon clears the range. **Append** and **Insert** share the trim toolbar, and frame stepping sits beside playback and the time display. The toolbar wraps in narrow windows. Returning to Project restores the inspector; explicitly opening project editing controls also returns to Project.
+
 Drag from Media onto the main timeline to insert its marked range. A drop into Media imports only. The timeline shows the proposed insertion and duration before release. One source can supply many independently trimmed instances. Source ranges, cursor positions and Media contents survive saving.
 
 ## Mix audio directly

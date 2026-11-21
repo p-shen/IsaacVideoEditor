@@ -2,6 +2,8 @@
 #include "mlt_engine.h"
 
 #include <QElapsedTimer>
+#include <QEventLoop>
+#include <QPointer>
 #include <QSemaphore>
 #include <QSignalSpy>
 #include <QThread>
@@ -69,6 +71,17 @@ class PreviewAsyncTest : public QObject {
 private slots:
     void initTestCase() { qputenv("SDL_AUDIODRIVER", "dummy"); Media::initializeMlt(); }
     void requestReturnsWhileDecoderIsBlocked();
+    void seekReturnsWhilePlayingDecoderIsBlocked();
+    void asyncTransportPreservesPendingEditAndPosition();
+    void asyncTransportReturnsWhilePlayingDecoderIsBlocked();
+    void asyncHandoffRetainsProducerAndProfile();
+    void supersededHandoffRetainsBorrowedProducer();
+    void cancelQueuedSeekStopsNativePlayback();
+    void synchronousPlayFinishesQueuedTransport();
+    void keyedEditsRetainFullEditAndCoalesceEachText();
+    void failedHandoffClearsQueuedPlaybackAndSeeking();
+    void supersededDecodeFailureDoesNotPoisonLatestFrame();
+    void reentrantFrameHandoffCannotPauseReplacement();
     void burstPublishesOnlyNewestFrame();
     void hoverPreservesCommittedPosition();
     void canceledDecodeNeverPublishes();
@@ -91,6 +104,291 @@ private slots:
     void explicitQualityAllows4kWithoutInitialDecode();
     void speculativeFailureDoesNotPoisonCurrentFrame();
 };
+
+void PreviewAsyncTest::seekReturnsWhilePlayingDecoderIsBlocked()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Mlt::Producer source(profile, "color", "red"); source.set_in_and_out(0, 599);
+    Preview preview(profile); QVERIFY(preview.setProducer(&source));
+    DecodeGate gate(source);
+    preview.play(); QVERIFY(gate.entered.tryAcquire(1, 3000));
+    // Bound failure time without allowing a synchronous stop to pass unnoticed.
+    auto unblock = std::async(std::launch::async, [&] {
+        QThread::msleep(400); gate.release.release();
+    });
+    QElapsedTimer elapsed; elapsed.start();
+    preview.requestSeek(120);
+    const auto requestMs = elapsed.elapsed();
+    bool heartbeat = false;
+    QTimer::singleShot(0, &preview, [&] { heartbeat = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeat, 200);
+    unblock.get();
+    QVERIFY2(requestMs < 150, "Interactive seeking waited for the playing decoder to stop");
+    QTRY_VERIFY_WITH_TIMEOUT(!preview.isSeeking(), 3000);
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::asyncTransportPreservesPendingEditAndPosition()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Mlt::Producer red(profile, "color", "red"), blue(profile, "color", "blue");
+    Mlt::Playlist source(profile); source.append(red, 0, 599);
+    Preview preview(profile); QVERIFY(preview.setProducer(&source));
+    DecodeGate gate(source);
+    QSignalSpy frames(&preview, &Preview::frameReady), settled(&preview, &Preview::seekSettled);
+    preview.requestSeek(10); QVERIFY(gate.entered.tryAcquire(1, 3000));
+    preview.requestSeek(90, true, [&] { source.clear(); source.append(blue, 0, 599); });
+    QElapsedTimer elapsed; elapsed.start();
+    preview.requestPause(false);
+    preview.requestPlay();
+    const auto requestMs = elapsed.elapsed();
+    bool heartbeat = false;
+    QTimer::singleShot(0, &preview, [&] { heartbeat = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeat, 1000);
+    QVERIFY2(requestMs < 150, "Transport waited for the blocked still decoder");
+    QCOMPARE(preview.position(), 90);
+    QCOMPARE(frames.count(), 0);
+    QVERIFY(preview.isPlaying());
+    gate.release.release();
+    QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 3000);
+    const auto color = qvariant_cast<QImage>(frames.first()[0]).pixelColor(20, 20);
+    QVERIFY(color.blue() > 200 && color.red() < 20);
+    QCOMPARE(settled.count(), 0);
+    QVERIFY(preview.position() >= 90);
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::asyncTransportReturnsWhilePlayingDecoderIsBlocked()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Mlt::Producer source(profile, "color", "red"); source.set_in_and_out(0, 599);
+    Preview preview(profile); QVERIFY(preview.setProducer(&source));
+    DecodeGate gate(source);
+    QSignalSpy frames(&preview, &Preview::frameReady);
+    preview.play(); QVERIFY(gate.entered.tryAcquire(1, 3000));
+    auto unblock = std::async(std::launch::async, [&] {
+        QThread::msleep(400); gate.release.release();
+    });
+    QElapsedTimer elapsed; elapsed.start();
+    preview.requestPause(false); preview.requestPlay();
+    const auto requestMs = elapsed.elapsed();
+    bool heartbeat = false;
+    QTimer::singleShot(0, &preview, [&] { heartbeat = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeat, 200);
+    unblock.get();
+    QVERIFY2(requestMs < 150, "Transport waited for the playing decoder to stop");
+    QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 3000);
+    QVERIFY(preview.isPlaying());
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::asyncHandoffRetainsProducerAndProfile()
+{
+    struct Owner {
+        Mlt::Profile profile;
+        std::unique_ptr<Mlt::Producer> source;
+        std::unique_ptr<DecodeGate> gate;
+    };
+    Mlt::Profile initial; configure(initial);
+    Preview preview(initial);
+    auto owner = std::make_shared<Owner>(); configure(owner->profile, 64, 64);
+    owner->source = std::make_unique<Mlt::Producer>(owner->profile, "color", "red");
+    owner->source->set_in_and_out(0, 119);
+    QVERIFY(preview.setProducer(owner->source.get()));
+    owner->gate = std::make_unique<DecodeGate>(*owner->source);
+    auto *gate = owner->gate.get();
+    std::weak_ptr<Owner> lifetime = owner;
+    preview.play(); QVERIFY(gate->entered.tryAcquire(1, 3000));
+    bool acknowledged = false;
+    QElapsedTimer elapsed; elapsed.start();
+    preview.requestProducer(nullptr, owner, [&](bool connected) { acknowledged = connected; });
+    const auto requestMs = elapsed.elapsed();
+    owner.reset();
+    bool heartbeat = false;
+    QTimer::singleShot(0, &preview, [&] { heartbeat = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeat, 1000);
+    QVERIFY2(requestMs < 150, "Producer handoff waited for the blocked decoder");
+    QVERIFY(!acknowledged);
+    QVERIFY(!lifetime.expired());
+    gate->release.release();
+    QTRY_VERIFY_WITH_TIMEOUT(acknowledged, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(lifetime.expired(), 3000);
+    QVERIFY(!preview.isSeeking()); QVERIFY(!preview.isPlaying());
+}
+
+void PreviewAsyncTest::supersededHandoffRetainsBorrowedProducer()
+{
+    struct Owner {
+        Mlt::Profile profile;
+        std::unique_ptr<Mlt::Producer> source;
+        std::unique_ptr<DecodeGate> gate;
+    };
+    Mlt::Profile initial; configure(initial);
+    Preview preview(initial);
+    auto old = std::make_shared<Owner>(); configure(old->profile, 64, 64);
+    old->source = std::make_unique<Mlt::Producer>(old->profile, "color", "red");
+    old->source->set_in_and_out(0, 119);
+    QVERIFY(preview.setProducer(old->source.get()));
+    old->gate = std::make_unique<DecodeGate>(*old->source); auto *gate = old->gate.get();
+    std::weak_ptr<Owner> oldLifetime = old;
+    preview.requestSeek(40); QVERIFY(gate->entered.tryAcquire(1, 3000));
+    int canceled = 0;
+    preview.requestProducer(nullptr, old, [&](bool connected) { if (!connected) ++canceled; });
+    old.reset();
+    auto next = std::make_shared<Owner>(); configure(next->profile, 160, 90);
+    next->source = std::make_unique<Mlt::Producer>(next->profile, "color", "blue");
+    next->source->set_in_and_out(0, 119);
+    std::weak_ptr<Owner> nextLifetime = next;
+    bool connected = false;
+    preview.requestProducer(next->source.get(), next, [&](bool success) { connected = success; });
+    next.reset();
+    QSignalSpy frames(&preview, &Preview::frameReady), settled(&preview, &Preview::seekSettled);
+    preview.requestSeek(75);
+    QTRY_COMPARE_WITH_TIMEOUT(canceled, 1, 1000);
+    QVERIFY(!oldLifetime.expired()); QVERIFY(!nextLifetime.expired());
+    QCOMPARE(frames.count(), 0);
+    gate->release.release();
+    QTRY_VERIFY_WITH_TIMEOUT(connected, 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(settled.count(), 1, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(oldLifetime.expired(), 3000);
+    QCOMPARE(preview.position(), 75);
+    QCOMPARE(qvariant_cast<QImage>(frames.last()[0]).size(), QSize(160, 90));
+    const auto color = qvariant_cast<QImage>(frames.last()[0]).pixelColor(20, 20);
+    QVERIFY(color.blue() > 200 && color.red() < 20);
+    preview.requestProducer(nullptr);
+    QTRY_VERIFY_WITH_TIMEOUT(nextLifetime.expired(), 3000);
+}
+
+void PreviewAsyncTest::cancelQueuedSeekStopsNativePlayback()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Mlt::Producer source(profile, "color", "red"); source.set_in_and_out(0, 599);
+    Preview preview(profile); QVERIFY(preview.setProducer(&source));
+    DecodeGate gate(source); gate.armed = false;
+    preview.play();
+    QTRY_VERIFY_WITH_TIMEOUT(gate.calls.load() > 2, 3000);
+    // The latest canceled request can be removed before the worker sees it.
+    preview.requestSeek(120); preview.cancelPendingSeek();
+    QTest::qWait(200);
+    const int stoppedCalls = gate.calls.load();
+    QTest::qWait(150);
+    QCOMPARE(gate.calls.load(), stoppedCalls);
+    QVERIFY(!preview.isPlaying());
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::synchronousPlayFinishesQueuedTransport()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Mlt::Producer source(profile, "color", "red"); source.set_in_and_out(0, 599);
+    Preview preview(profile); QVERIFY(preview.setProducer(&source));
+    QSignalSpy frames(&preview, &Preview::frameReady);
+    preview.requestPlay();
+    preview.play();
+    QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 1500);
+    QVERIFY(preview.isPlaying());
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::keyedEditsRetainFullEditAndCoalesceEachText()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Mlt::Producer source(profile, "color", "red"); source.set_in_and_out(0, 119);
+    Preview preview(profile); QVERIFY(preview.setProducer(&source));
+    DecodeGate gate(source);
+    preview.requestSeek(10); QVERIFY(gate.entered.tryAcquire(1, 3000));
+    QString state;
+    preview.requestSeek(20, true, [&] { state = "full"; });
+    preview.requestSeek(30, true, [&] { state += ":old-A"; }, 0);
+    preview.requestSeek(40, true, [&] { state += ":B"; }, 1);
+    preview.requestSeek(50, true, [&] { state += ":A"; }, 0);
+    QSignalSpy settled(&preview, &Preview::seekSettled);
+    gate.release.release();
+    QTRY_COMPARE_WITH_TIMEOUT(settled.count(), 1, 3000);
+    QCOMPARE(settled.first()[0].toInt(), 50);
+    QCOMPARE(state, QString("full:A:B"));
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::failedHandoffClearsQueuedPlaybackAndSeeking()
+{
+    Mlt::Profile profile; configure(profile, 64, 64);
+    Preview preview(profile);
+    Mlt::Producer invalid(profile, "isaac-test-invalid-service", "missing");
+    QVERIFY(!invalid.is_valid());
+    QSignalSpy errors(&preview, &Preview::errorOccurred), frames(&preview, &Preview::frameReady);
+    bool settled = false;
+    preview.requestProducer(&invalid, {}, [&](bool connected) { settled = !connected; });
+    preview.requestSeek(10);
+    preview.requestPlay();
+    QTRY_VERIFY_WITH_TIMEOUT(settled, 3000);
+    QVERIFY(!preview.isPlaying()); QVERIFY(!preview.isSeeking());
+    QCOMPARE(errors.count(), 1); QCOMPARE(frames.count(), 0);
+}
+
+void PreviewAsyncTest::supersededDecodeFailureDoesNotPoisonLatestFrame()
+{
+    QTemporaryDir dir; const auto path = dir.filePath("broken.png");
+    QImage still(8, 8, QImage::Format_RGB32); still.fill(Qt::yellow); QVERIFY(still.save(path));
+    QFile broken(path); QVERIFY(broken.open(QIODevice::ReadWrite)); QVERIFY(broken.resize(33)); broken.close();
+    Project project; project.clips = {{QFINDTESTDATA("fixtures/seek.mp4"), 0, 2}};
+    VisualOverlay overlay; overlay.path = path; overlay.startFrame = 10; overlay.durationFrames = 20;
+    project.visualOverlays.append(overlay);
+    Mlt::Profile profile; configure(profile, 64, 64);
+    auto timeline = Media::buildTimeline(project, profile); QVERIFY(timeline);
+    Preview preview(profile); QVERIFY(preview.setProducer(timeline.get(), false));
+    DecodeGate gate(*timeline);
+    QSignalSpy errors(&preview, &Preview::errorOccurred), settled(&preview, &Preview::seekSettled);
+    preview.requestSeek(10); QVERIFY(gate.entered.tryAcquire(1, 3000));
+    preview.requestSeek(0); gate.release.release();
+    QTRY_VERIFY_WITH_TIMEOUT(!preview.isSeeking(), 3000);
+    QCOMPARE(errors.count(), 0);
+    QCOMPARE(settled.count(), 1); QCOMPARE(settled.first()[0].toInt(), 0);
+    preview.setProducer(nullptr);
+}
+
+void PreviewAsyncTest::reentrantFrameHandoffCannotPauseReplacement()
+{
+    struct Owner { Mlt::Profile profile; std::unique_ptr<Mlt::Producer> source; };
+    Mlt::Profile initial; configure(initial, 64, 64);
+    Preview preview(initial);
+    auto old = std::make_shared<Owner>(); configure(old->profile, 64, 64);
+    old->source = std::make_unique<Mlt::Producer>(old->profile, "color", "red");
+    old->source->set_in_and_out(0, 599);
+    std::weak_ptr<Owner> oldLifetime = old;
+    bool initialConnected = false;
+    preview.requestProducer(old->source.get(), old, [&](bool connected) { initialConnected = connected; });
+    QTRY_VERIFY_WITH_TIMEOUT(initialConnected, 3000);
+    auto next = std::make_shared<Owner>(); configure(next->profile, 64, 64);
+    next->source = std::make_unique<Mlt::Producer>(next->profile, "color", "blue");
+    next->source->set_in_and_out(0, 0);
+    std::weak_ptr<Owner> nextLifetime = next;
+    bool switched = false, acknowledged = false;
+    QSignalSpy frames(&preview, &Preview::frameReady);
+    connect(&preview, &Preview::frameReady, &preview, [&] {
+        if (switched) return;
+        switched = true;
+        QEventLoop waiting;
+        QPointer<QEventLoop> loop = &waiting;
+        preview.requestProducer(next->source.get(), next, [&, loop](bool connected) {
+            acknowledged = connected;
+            old.reset();
+            preview.requestPlay();
+            if (loop) loop->quit();
+        });
+        next.reset();
+        QTimer::singleShot(3000, &waiting, &QEventLoop::quit);
+        waiting.exec();
+    });
+    preview.requestPlay();
+    QTRY_VERIFY_WITH_TIMEOUT(acknowledged, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(frames.count() >= 2, 3000);
+    QVERIFY(oldLifetime.expired()); QVERIFY(!nextLifetime.expired());
+    const auto color = qvariant_cast<QImage>(frames.last()[0]).pixelColor(20, 20);
+    QVERIFY(color.blue() > 200 && color.red() < 20);
+    preview.setProducer(nullptr);
+    QVERIFY(nextLifetime.expired());
+}
 
 void PreviewAsyncTest::preloadsNearbyFramesWithoutPublishingThem() {
     Mlt::Profile profile;configure(profile,64,64);Mlt::Producer source(profile,"color","red");source.set_in_and_out(0,119);
@@ -229,7 +527,9 @@ void PreviewAsyncTest::canceledPendingEditNeverRuns() {
     Mlt::Profile profile;configure(profile);Mlt::Producer source(profile,"color","red");source.set_in_and_out(0,119);
     Preview preview(profile);QVERIFY(preview.setProducer(&source));DecodeGate gate(source);std::atomic<int> edits{0};
     preview.requestSeek(10);QVERIFY(gate.entered.tryAcquire(1,3000));
-    preview.requestSeek(20,true,[&]{++edits;});preview.cancelPendingSeek();gate.release.release();
+    preview.requestSeek(20,true,[&]{++edits;});
+    preview.requestSeek(30,true,[&]{edits+=10;},0);
+    preview.cancelPendingSeek();gate.release.release();
     preview.setProducer(nullptr);QCOMPARE(edits.load(),0);
 }
 

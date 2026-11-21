@@ -79,8 +79,11 @@ int runPerformanceReport(const QString &projectPath,const QString &reportPath){
     editor.seek(0);if(!waitUntil([&]{return !preview->isSeeking()&&!editor.loading();}))return 2;
     const auto playbackBefore=preview->diagnostics();const auto uploadsBefore=viewer->textureUploads();QStringList playbackErrors;
     const auto errorConnection=QObject::connect(preview,&Preview::errorOccurred,&editor,[&](const QString &message){playbackErrors.append(message);});
-    editor.togglePlayback();const bool playbackStarted=preview->isPlaying();clock.restart();
-    while(clock.elapsed()<1500&&preview->isPlaying()){QCoreApplication::processEvents(QEventLoop::AllEvents,5);QThread::msleep(1);}
+    editor.togglePlayback();bool playbackStarted=false;clock.restart();
+    while(clock.elapsed()<1500&&preview->isPlaying()){
+        QCoreApplication::processEvents(QEventLoop::AllEvents,5);QThread::msleep(1);
+        playbackStarted|=preview->diagnostics()["deliveredFrames"].toULongLong()>playbackBefore["deliveredFrames"].toULongLong();
+    }
     const auto playbackMs=clock.elapsed();
     if(editor.playing())editor.togglePlayback();
     QObject::disconnect(errorConnection);const auto playbackAfter=preview->diagnostics();

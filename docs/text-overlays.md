@@ -14,7 +14,7 @@ Use the time ruler/playhead to preview the edit. Ordinary timeline arrow keys se
 
 Text defaults to absolute Project time when video is trimmed or reordered. Open **Attachment** for explicit Attach to clip and Detach controls; see [Captions and SRT](captions.md) for their shared source-frame rules. Rendering stops at the video end while saved overlays remain available when an edit is extended or undone. Size and position scale with the video canvas. The same compositor draws preview frames and exported MP4 frames, including shadow, background and fades. Selection borders are editing controls and are not exported.
 
-New saves use version 8. Versions 1–7 remain loadable with their original appearance. Text content, style, animation, position, order and timing remain part of persistence and Undo/Redo. Older app versions cannot open version 8 projects. Captions have their own data, panel and output controls; importing captions never changes these manual titles. SRT exports preserve caption words and timing; visual presets and animations are included in the rendered video.
+New saves without selected-word formatting use version 8; projects with selected-word formatting use version 9. Versions 1–8 remain loadable with their original appearance. Text content, style, animation, position, order and timing remain part of persistence and Undo/Redo. Older app versions cannot open version 9 projects. Captions have their own data, panel and output controls; importing captions never changes these manual titles. SRT exports preserve caption words and timing; visual presets and animations are included in the rendered video.
 
 ## Verification
 

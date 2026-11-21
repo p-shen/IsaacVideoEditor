@@ -1,5 +1,7 @@
 #include "editor_controller.h"
 #include "export_job.h"
+#include "subtitle_job.h"
+#include "subtitle_models.h"
 #include "recovery_store.h"
 #include "media_cache.h"
 #include "mlt_engine.h"
@@ -144,6 +146,10 @@ void EditorController::searchRelinkFolder(const QString &folder){
     emit stateChanged();
 }
 bool EditorController::requestClose(){
+    if(generatingSubtitles()){
+        if(QMessageBox::question(nullptr,"Subtitles are being generated","Cancel subtitle generation and close the editor? Existing output files will be preserved.",QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return false;
+        cancelSubtitleGeneration();if(subtitleJob_)subtitleJob_->stopAndWait();
+    }
     if(exporting()){
         if(QMessageBox::question(nullptr,"Export is running","Cancel this export and close the editor? Existing output files will be preserved.",QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return false;
         cancelExport();if(exportJob_)exportJob_->stopAndWait();
@@ -161,7 +167,7 @@ bool EditorController::exportTo(const QString &path,bool optimizeForIphone){
     return startExport(project_,path,title()+(dirty()?" · unsaved revision":" · saved revision")+QString(" · %1 frames").arg(duration()),optimizeForIphone);
 }
 bool EditorController::startExport(const Project &snapshot,const QString &path,const QString &revision,bool optimizeForIphone){
-    if(exporting()||snapshot.clips.isEmpty()||path.isEmpty())return false;
+    if(exporting()||generatingSubtitles()||snapshot.clips.isEmpty()||path.isEmpty())return false;
     const auto normalized=[](const QString &p){const QFileInfo f(p);return f.exists()?f.canonicalFilePath():f.absoluteFilePath();};
     const auto output=normalized(path);QStringList sources={snapshot.voicePath,snapshot.musicPath};for(const auto &c:snapshot.clips)sources.append(c.path);for(const auto &asset:snapshot.assets)sources.append(asset.path);
     for(const auto &overlay:snapshot.visualOverlays)sources.append(overlay.path);
@@ -171,8 +177,8 @@ bool EditorController::startExport(const Project &snapshot,const QString &path,c
     if(!size){exportState_="Failed";report(error);return false;}
     exportDetails_=QString("%1×%2 · 60 fps · H.264 / AAC · original media").arg(size->width).arg(size->height);
     if(optimizeForIphone)exportDetails_+=" · optimized for iPhone";
-    scrubbing_=skim_=resumeAfterScrub_=resumeWhenSettled_=playWhenPrepared_=sourcePlayWhenPrepared_=false;preview_->pause(false);proxyCache_->setPaused(!performanceBudget_.prepareDuringExport);
-    sourcePreview_->pause(false);mediaCache_->setInteractive(!performanceBudget_.prepareDuringExport);
+    scrubbing_=skim_=resumeAfterScrub_=resumeWhenSettled_=playWhenPrepared_=sourcePlayWhenPrepared_=false;preview_->requestPause(false);proxyCache_->setPaused(!performanceBudget_.prepareDuringExport);
+    sourcePreview_->requestPause(false);mediaCache_->setInteractive(!performanceBudget_.prepareDuringExport);
     auto *job=new ExportJob(exportWorkerExecutable(),this);exportJob_=job;
     const auto details=exportDetails_;
     connect(job,&ExportJob::progressChanged,this,[this](int percent){exportProgress_=percent;emit stateChanged();});

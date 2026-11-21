@@ -1,5 +1,6 @@
 #include "editor_controller.h"
 #include "export_job.h"
+#include "subtitle_job.h"
 #include "qml_registration.h"
 #include "mlt_engine.h"
 #include "theme.h"
@@ -12,6 +13,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QEventLoop>
 #include <QIcon>
 #include <QImageReader>
@@ -38,6 +41,20 @@ int packageSmokeTest(const QString &fixture) {
         return 2;
     }
     const auto runtime = bundledRuntimePaths(QCoreApplication::applicationDirPath());
+    const QDir subtitles(subtitleRuntimeDirectory());
+    if(subtitles.exists()){
+        QFile metadata(subtitles.filePath("runtime.json"));
+        if(!metadata.open(QIODevice::ReadOnly)||QJsonDocument::fromJson(metadata.readAll()).object()["engine"].toString()!="whisper.cpp"){qCritical()<<"Invalid bundled subtitle runtime";return 2;}
+#ifdef Q_OS_WIN
+        const QStringList workers{subtitles.filePath("whisper-cli.exe"),subtitles.filePath("cpu/whisper-cli.exe")};
+#else
+        const QStringList workers{subtitles.filePath("whisper-cli")};
+#endif
+        for(const auto &worker:workers){QProcess process;process.setWorkingDirectory(subtitles.path());process.start(worker,{"-h"});
+            if(!process.waitForFinished(30000)||process.exitStatus()!=QProcess::NormalExit||process.exitCode()!=0){process.kill();process.waitForFinished(1000);qCritical()<<"Cannot load bundled subtitle worker"<<worker<<process.readAllStandardError();return 2;}
+        }
+        qInfo()<<"Bundled subtitle runtime check passed; GPU/model inference requires separate acceptance";
+    }else if(qEnvironmentVariableIntValue("ISAAC_REQUIRE_SUBTITLE_RUNTIME")==1){qCritical()<<"The required bundled subtitle runtime is missing";return 2;}
     for (const auto &tool : {"ffmpeg", "ffprobe"}) {
         const auto executable = QStandardPaths::findExecutable(tool);
         if (executable.isEmpty() || (!runtime.executables.isEmpty() &&
@@ -126,7 +143,8 @@ int packageSmokeTest(const QString &fixture) {
 
 int main(int argc,char *argv[]) {
     const bool exportWorker=argc>1&&QByteArray(argv[1])=="--export-worker";
-    if(exportWorker)qputenv("QT_QPA_PLATFORM","offscreen");
+    const bool subtitleWorker=argc>1&&QByteArray(argv[1])=="--subtitle-audio-worker";
+    if(exportWorker||subtitleWorker)qputenv("QT_QPA_PLATFORM","offscreen");
     const bool performanceReport=argc>1&&QByteArray(argv[1])=="--performance-report";
     const bool benchmarkExport=argc>1&&QByteArray(argv[1])=="--benchmark-export";
     bool visibleBenchmark=false;for(int i=1;i<argc;++i)visibleBenchmark|=QByteArray(argv[i])=="--visible";
@@ -154,6 +172,7 @@ int main(int argc,char *argv[]) {
         applyAppTheme(app);
         Media::initializeMlt();const int result=runExportWorker(app.arguments());Mlt::Factory::close();return result;
     }
+    if(subtitleWorker){Media::initializeMlt();const int result=runSubtitleAudioWorker(app.arguments());Mlt::Factory::close();return result;}
     QQuickStyle::setStyle("Basic");
     applyAppTheme(app);
     app.setWindowIcon(QIcon(":/isaac-logo.png"));

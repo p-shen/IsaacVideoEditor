@@ -70,7 +70,7 @@ void EditorController::applyComposition(const Project &p,const QString &label){
     }
     else commit(p,selection_,primary_,label);
 }
-void EditorController::beginVisualGesture(int overlay){showProject();if(audioPreview_)endAudioGesture(false);if(visualBefore_)return;if(textDragBefore_)endTextDrag(false);const auto before=state();if(overlay>=0)selectVisualOverlay(overlay);preview_->pause(false);endSkim();visualNoticeBefore_=notice_;visualBefore_=before;}
+void EditorController::beginVisualGesture(int overlay){showProject();if(audioPreview_)endAudioGesture(false);if(visualBefore_)return;if(textDragBefore_)endTextDrag(false);const auto before=state();if(overlay>=0)selectVisualOverlay(overlay);preview_->requestPause(false);endSkim();visualNoticeBefore_=notice_;visualBefore_=before;}
 void EditorController::endVisualGesture(bool cancel){
     if(!visualBefore_)return;const State after=state(),before=*visualBefore_;visualBefore_.reset();
     if(cancel){notice_=visualNoticeBefore_;apply(before,position_,true);return;}

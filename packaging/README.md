@@ -12,6 +12,10 @@ Run only the command for the host platform. macOS uses Homebrew and `macdeployqt
 
 ## Runtime layout
 
+Release builds also prepare the pinned local subtitle engine with `python3 packaging/prepare-whisper.py build-whisper` and configure `ISAAC_WHISPER_RUNTIME_DIR` to that absolute folder. Mac/Linux compile a standalone v1.9.5 worker; Windows uses the official b5454 CUDA 12.4 archive plus an isolated CPU worker. Download digests are fixed in the preparation script. Windows preparation needs the Windows SDK manifest tool and Visual Studio 2022 CRT redistributables; the worker's UTF-8 manifest preserves non-ASCII filenames on Windows 10 version 1903+ and Windows 11. Native libraries and license notices remain inside the private runtime directory (`Contents/Resources/subtitles` on Mac, `subtitles` beside the executable on Windows/Linux). Model weights are not part of the package.
+
+Windows dependency collection validates worker DLLs beside each worker, keeping their runtime separate from the editor's UCRT64/Qt DLLs. On Mac, the existing dependency relocation and signing scan includes the worker. `runtime.json` records preparation provenance; final package relocation/signing may change executable bytes. Physical NVIDIA acceptance remains separate from packaging on a runner without an NVIDIA GPU.
+
 | Platform | Executables | MLT modules | MLT data |
 | --- | --- | --- | --- |
 | macOS app | `Contents/MacOS` | `Contents/PlugIns/mlt-7` | `Contents/Resources/mlt-7` |

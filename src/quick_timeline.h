@@ -2,6 +2,7 @@
 
 #include "project.h"
 #include "media_cache.h"
+#include "time_interval_index.h"
 
 #include <QFont>
 #include <QHash>
@@ -151,6 +152,11 @@ private:
     struct FilmTile { QRectF rect; QImage image; bool missing = false; };
     const Project &displayProject() const;
     const Project::TimelineData &timingFor(const Project &) const;
+    const Project::TextTiming &textTimingFor(const Project &) const;
+    struct ItemIndexes {TimeIntervalIndex clips,titles,captions;};
+    static ItemIndexes itemIndexes(const Project &,const Project::TimelineData &,const Project::TextTiming &);
+    const ItemIndexes &indexesFor(const Project &) const;
+    QVector<int> visibleItems(const TimeIntervalIndex &,double margin=2) const;
     int rulerHeight() const;
     int videoHeight() const;
     int audioHeight() const;
@@ -199,6 +205,10 @@ private:
     Project preview_;
     Project::TimelineData projectTiming_;
     mutable Project::TimelineData previewTiming_,temporaryTiming_;
+    Project::TextTiming projectTextTiming_;
+    mutable Project::TextTiming previewTextTiming_,temporaryTextTiming_;
+    ItemIndexes projectIndexes_;
+    mutable ItemIndexes previewIndexes_;
     mutable bool previewTimingDirty_=true;
     QVector<double> sourceDurations_;
     double voiceDurationSeconds_ = 0, musicDurationSeconds_ = 0;
@@ -224,6 +234,7 @@ private:
     int selectedCaption_=-1,titleLaneCount_=0,captionLaneCount_=0;
     QVariantList captionSelection_;
     QVector<int> titleLanes_,captionLanes_;
+    QVector<int> titleStarts_,captionStarts_,titleFrames_,captionFrames_;
     bool gestureCaption_=false;
     int scrubStart_ = 0;
     int moveBoundary_ = -1;

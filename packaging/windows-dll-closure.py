@@ -31,6 +31,9 @@ def collect(stage, prefix, objdump):
                 raise RuntimeError(f"Unsupported dependency {name} imported by {binary}")
             if key.startswith(("api-ms-win-", "ext-ms-win-")):
                 continue
+            # Standalone workers keep their own native runtime beside the executable.
+            if any(p.name.lower() == key for p in binary.parent.iterdir() if p.is_file()):
+                continue
             if key in deployed:
                 continue
             if key in available:

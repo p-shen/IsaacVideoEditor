@@ -38,6 +38,26 @@ RawFrame rawFrame(const Project &project,int at,mlt_image_format requested){
 class CompositionTest:public QObject {
  Q_OBJECT
 private slots:
+ void activeOverlayIndexPreservesStackingTimingAndLiveEdits(){
+  QTemporaryDir dir;Project p;const auto footage=QFINDTESTDATA("fixtures/rotation.mp4");p.clips={{footage,0,1},{footage,0,1}};
+  for(auto &clip:p.clips)clip.transform.opacity.value=0;
+  const QVector<QPair<int,int>> intervals{{25,20},{0,100},{5,20},{20,10},{80,20},{10,35}};
+  const QVector<int> lanes{1,0,1,2,2,0};QVector<QImage> images;
+  for(int i=0;i<intervals.size();++i){QImage image(32,24,QImage::Format_RGBA8888);image.fill(QColor::fromHsv(i*55,220,240));images.append(image);
+   VisualOverlay overlay;overlay.path=dir.filePath(QString::number(i)+".png");QVERIFY(image.save(overlay.path));overlay.startFrame=intervals[i].first;overlay.durationFrames=intervals[i].second;overlay.lane=lanes[i];
+   overlay.transform.scale.value=.4+i*.04;overlay.transform.opacity.value=.45+i*.05;overlay.transform.x.value=.3+i*.08;p.visualOverlays.append(overlay);
+  }
+  Mlt::Profile profile;Media::configureOutputProfile(profile,160,90);auto timeline=Media::buildTimeline(p,profile);QVERIFY(timeline);
+  const auto verify=[&](int at){QImage expected(160,90,QImage::Format_RGBA8888);expected.fill(Qt::black);
+   for(int lane=0;lane<3;++lane)if(p.visualLaneVisible[lane])for(int i=0;i<p.visualOverlays.size();++i){const auto &overlay=p.visualOverlays[i];
+    if(overlay.lane==lane&&at>=overlay.startFrame&&at<overlay.startFrame+overlay.durationFrames)VisualRendering::paint(expected,images[i],overlay.transform,at-overlay.startFrame);
+   }
+   QCOMPARE(timelineFrame(*timeline,at),expected);
+  };
+  for(int at:{45,0,99,5,25,24,44,100,10,29,30,119})verify(at);
+  p.visualOverlays[1].startFrame=35;p.visualOverlays[1].durationFrames=5;p.visualOverlays[0].transform.opacity.value=.2;p.visualLaneVisible[2]=false;
+  VisualRendering::update(*timeline,p);for(int at:{39,5,40,35,99,20})verify(at);
+ }
  void inactiveAndHiddenOverlaysPreservePlainVideoYuv_data(){
   QTest::addColumn<QString>("colorspace");QTest::addColumn<QString>("range");
   QTest::newRow("709-limited")<<QString("bt709")<<QString("tv");

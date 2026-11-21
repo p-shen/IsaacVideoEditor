@@ -11,9 +11,13 @@
 #include <QQmlContext>
 #include <QMessageBox>
 #include <QQuickWindow>
+#include <QQuickPaintedItem>
+#include <QPainter>
+#include <QProcess>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QColorDialog>
 #include <QMimeData>
 #include <QScopeGuard>
 #include <QStyleHints>
@@ -176,6 +180,47 @@ private slots:
         editor.setBurnCaptions(false);editor.seek(75);QTest::qWait(200);QVERIFY(window->grabWindow().save(directory+"/captions-burn-off.png"));editor.setBurnCaptions(true);
         window->resize(760,560);auto font=qApp->font();font.setPointSize(24);window->setProperty("font",font);QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,5),Q_ARG(QVariant,false));QTest::qWait(200);QVERIFY(window->grabWindow().save(directory+"/captions-narrow-large.png"));
         QVERIFY(editor.saveTo(directory+"/caption-demo.isaac.json"));QVERIFY(editor.exportSrt(directory+"/caption-demo.srt"));QString error;QVERIFY2(Media::exportMp4(editor.project(),directory+"/caption-demo.mp4",{},&error),qPrintable(error));
+    }
+    void captionWordFormattingKeepsSelectionAndGestureCancellation() {
+        const bool nonNativeDialogs=qApp->testAttribute(Qt::AA_DontUseNativeDialogs);
+        qApp->setAttribute(Qt::AA_DontUseNativeDialogs);
+        const auto restoreDialogs=qScopeGuard([&]{qApp->setAttribute(Qt::AA_DontUseNativeDialogs,nonNativeDialogs);});
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        QVERIFY(QTest::qWaitForWindowActive(window,5000));
+        QVERIFY(editor.importFiles({fixture()}));editor.addCaption();
+        auto *list=window->findChild<QQuickItem*>("captionList");QVERIFY(list);QTRY_VERIFY(list->isVisible());
+        QQuickItem *row=nullptr;QTRY_VERIFY(row=qvariant_cast<QQuickItem*>(list->property("currentItem")));row->forceActiveFocus();QTest::keyClick(window,Qt::Key_Return);
+        auto *field=window->findChild<QQuickItem*>("captionContentField");QVERIFY(field);QTRY_VERIFY(field->hasActiveFocus());
+        auto *bold=window->findChild<QQuickItem*>("captionWordBoldButton");QVERIFY(bold);QVERIFY(bold->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(field,"select",Q_ARG(int,0),Q_ARG(int,3)));
+        QTest::keyClick(window,Qt::Key_B,Qt::ControlModifier);QVERIFY(!editor.project().captions[0].spans.isEmpty());
+        QVERIFY(!editor.project().captions[0].spans[0].bold.value());
+        QTRY_COMPARE(bold->property("checked").toBool(),false);
+        auto *color=window->findChild<QQuickItem*>("captionWordColorButton");QVERIFY(color);
+        QTest::keyClick(window,Qt::Key_Tab);QTRY_VERIFY(color->hasActiveFocus());
+        QTest::keyClick(window,Qt::Key_Backtab);QTRY_VERIFY(field->hasActiveFocus());QCOMPARE(field->property("selectedText").toString(),"New");
+        QTest::keyClick(window,Qt::Key_Tab);QTRY_VERIFY(color->hasActiveFocus());
+        QTest::keyClick(window,Qt::Key_Tab);QTRY_VERIFY(bold->hasActiveFocus());QVERIFY(field->isVisible());QCOMPARE(field->property("selectedText").toString(),"New");
+        QCOMPARE(editor.project().captions[0].text,"New caption");
+        QTest::keyClick(window,Qt::Key_Space);QTRY_VERIFY(field->hasActiveFocus());QVERIFY(editor.project().captions[0].spans[0].bold.value());
+        QTest::keyClick(window,Qt::Key_Tab);QTRY_VERIFY(color->hasActiveFocus());
+        QTimer dialogTimer;dialogTimer.setInterval(10);bool acceptColor=true;
+        connect(&dialogTimer,&QTimer::timeout,&dialogTimer,[&]{for(auto *widget:QApplication::topLevelWidgets())if(auto *dialog=qobject_cast<QColorDialog*>(widget)){dialogTimer.stop();if(acceptColor){dialog->setCurrentColor(QColor("#ff00ff"));dialog->accept();}else dialog->reject();}});
+        dialogTimer.start();
+        QTest::keyClick(window,Qt::Key_Space);QTRY_VERIFY(field->hasActiveFocus());QCOMPARE(editor.project().captions[0].spans[0].color,"#ff00ff");
+        color->forceActiveFocus();acceptColor=false;dialogTimer.start();
+        QTest::keyClick(window,Qt::Key_Space);QTRY_VERIFY(field->hasActiveFocus());QCOMPARE(field->property("selectedText").toString(),"New");
+        QCOMPARE(editor.project().captions[0].spans[0].color,"#ff00ff");
+        const auto screenshots=qEnvironmentVariable("ISAAC_CAPTION_WORD_SCREENSHOTS");
+        if(!screenshots.isEmpty()){QDir().mkpath(screenshots);QTest::qWait(200);QVERIFY(window->grabWindow().save(screenshots+"/selected-words.png"));}
+        QTest::keyClick(window,Qt::Key_Escape);QVERIFY(editor.project().captions[0].spans.isEmpty());
+        row=qvariant_cast<QQuickItem*>(list->property("currentItem"));row->forceActiveFocus();QTest::keyClick(window,Qt::Key_Return);QTRY_VERIFY(field->hasActiveFocus());
+        QTest::keyClick(window,Qt::Key_B,Qt::ControlModifier);QTest::keyClick(window,Qt::Key_Return);QVERIFY(!editor.project().captions[0].spans.isEmpty());
+        editor.undo();QVERIFY(editor.project().captions[0].spans.isEmpty());editor.redo();QVERIFY(!editor.project().captions[0].spans.isEmpty());
+        row=qvariant_cast<QQuickItem*>(list->property("currentItem"));row->forceActiveFocus();QTest::keyClick(window,Qt::Key_Return);QTRY_VERIFY(field->hasActiveFocus());
+        QTemporaryDir dir;QVERIFY(editor.saveTo(dir.filePath("focused.isaac.json")));const auto saved=editor.project().captions;
+        QTest::keyClick(window,Qt::Key_B,Qt::ControlModifier);QTest::keyClick(window,Qt::Key_Escape);QCOMPARE(editor.project().captions,saved);QVERIFY(!editor.dirty());
+        QCOMPARE(warnings.size(),0);
     }
     void captionRowsUseDedicatedEditingAndPlaybackFocus() {
         EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);QVERIFY(editor.importFiles({fixture()}));editor.addCaption();editor.seek(60);
@@ -878,6 +923,54 @@ private slots:
         editor.clearSourceRange();editor.seekSource(0);editor.markSourceOut();QCOMPARE(out->property("text").toString(),QString("0.017"));QVERIFY(out->property("acceptableInput").toBool());
         QCOMPARE(warnings.count(),0);
     }
+    void sourceWaveformShowsAudioAndTracksRange() {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto path=directory.filePath("waveform.mkv");
+        QProcess encode;
+        encode.start("/opt/homebrew/bin/ffmpeg", {"-v","error","-i",fixture(),"-f","lavfi","-i",
+            "aevalsrc=if(lt(t\\,1)\\,0.8*sin(2*PI*100*t)\\,0):s=2000:d=2",
+            "-map","0:v:0","-map","1:a:0","-c:v","copy","-c:a","pcm_s16le",path});
+        QVERIFY(encode.waitForFinished(10000)); QCOMPARE(encode.exitCode(),0);
+        EditorController editor; QQmlApplicationEngine engine; QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        auto *window=load(engine,editor); QVERIFY(window); QVERIFY(editor.importMedia({path}));
+        auto *wave=window->findChild<QQuickPaintedItem*>("sourceWaveform"); QVERIFY(wave);
+        QTRY_COMPARE_WITH_TIMEOUT(wave->property("state").toString(),QString("ready"),10000);
+        QVERIFY(wave->isVisible()); QVERIFY(wave->height()>=40);
+        QImage image(wave->size().toSize(),QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent);
+        { QPainter painter(&image); wave->paint(&painter); }
+        QVERIFY(image.pixelColor(image.width()/4,image.height()/2-10).alpha()>0);
+        QCOMPARE(image.pixelColor(image.width()*3/4,image.height()/2-10).alpha(),0);
+        QVERIFY(image.pixelColor(image.width()*3/4,image.height()/2).alpha()>0);
+        editor.setSourceRange(30,90); editor.seekSource(60);
+        auto *range=window->findChild<QQuickItem*>("sourceWaveformRange"); QVERIFY(range);
+        auto *cursor=window->findChild<QQuickItem*>("sourceWaveformCursor"); QVERIFY(cursor);
+        QTRY_VERIFY(std::abs(range->x()/wave->width()-30.0/119)<.005);
+        QVERIFY(std::abs(range->width()/wave->width()-60.0/119)<.005);
+        QTRY_VERIFY(std::abs(cursor->mapToItem(wave,{cursor->width()/2,0}).x()/wave->width()-60.0/119)<.005);
+        auto *slider=window->findChild<QQuickItem*>("sourcePositionSlider"); QVERIFY(slider);
+        slider->forceActiveFocus(); QTest::keyClick(window,Qt::Key_Right); QCOMPARE(editor.sourcePosition(),61);
+        QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,wave->mapToScene({wave->width()/4,wave->height()/2}).toPoint());
+        QCOMPARE(editor.sourcePosition(),30);
+        const auto captures=qEnvironmentVariable("ISAAC_SOURCE_SCREENSHOTS");
+        if(!captures.isEmpty()) QDir().mkpath(captures);
+        for(bool dark:{true,false}) {
+            setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+            QTest::qWait(80);
+            if(!captures.isEmpty()) QVERIFY(window->grabWindow().save(captures+(dark?"/waveform-dark.png":"/waveform-light.png")));
+        }
+        window->resize(760,560); auto font=qApp->font(); font.setPointSize(24); window->setProperty("font",font); QTest::qWait(80);
+        QVERIFY(wave->width()>100); QVERIFY(wave->height()>=40);
+        auto *viewer=window->findChild<QQuickItem*>("viewer"); QVERIFY(viewer); QVERIFY(viewer->height()>80);
+        if(!captures.isEmpty()) QVERIFY(window->grabWindow().save(captures+"/waveform-large-text.png"));
+        QVERIFY(editor.importMedia({fixture()}));
+        QTRY_COMPARE_WITH_TIMEOUT(wave->property("state").toString(),QString("unavailable"),10000);
+        image.fill(Qt::transparent); { QPainter painter(&image); wave->paint(&painter); }
+        QCOMPARE(image.pixelColor(image.width()/4,image.height()/2-10).alpha(),0);
+        auto *status=window->findChild<QQuickItem*>("sourceWaveformStatus"); QVERIFY(status); QVERIFY(status->isVisible());
+        QVERIFY(!status->property("text").toString().isEmpty());
+        editor.showProject(); QVERIFY(!wave->isVisible());
+        QCOMPARE(warnings.count(),0);
+    }
     void sourceRangeButtonsKeyboardAndTimelineDrop() {
         EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
         QVERIFY(editor.importMedia({fixture()}));
@@ -885,6 +978,7 @@ private slots:
         editor.seekSource(12);QTest::keyClick(window,Qt::Key_I);editor.seekSource(29);QTest::keyClick(window,Qt::Key_O);
         QCOMPARE(editor.currentSource()["rangeFrames"].toInt(),18);
         auto *append=window->findChild<QQuickItem*>("appendSourceButton");QVERIFY(append);
+        QVERIFY(!window->grabWindow().isNull());
         QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,append->mapToScene({append->width()/2,append->height()/2}).toPoint());
         QCOMPARE(editor.duration(),18);QVERIFY(editor.sourceMode());
         auto *timeline=window->findChild<QuickTimeline*>("timeline");QVERIFY(timeline);
@@ -915,6 +1009,55 @@ private slots:
         QVERIFY(append->isVisible());auto *viewer=window->findChild<QQuickItem*>("viewer");QVERIFY(viewer);QVERIFY(viewer->height()>80);
         auto *timeline=window->findChild<QuickTimeline*>("timeline");QVERIFY(timeline);QVERIFY(timeline->height()>=timeline->implicitHeight());
         if(!directory.isEmpty())QVERIFY(window->grabWindow().save(directory+"/source-large-text.png"));
+    }
+    void sourceEditingLayoutKeepsPreviewAndTrimControlsUsable() {
+        EditorController editor; QQmlApplicationEngine engine; QSignalSpy warnings(&engine,&QQmlEngine::warnings);
+        auto *window=load(engine,editor); QVERIFY(window); QVERIFY(editor.importFiles({fixture(),fixture(),fixture()}));
+        editor.selectSource(0); QTest::qWait(80);
+        auto *viewer=window->findChild<QQuickItem*>("viewer"); QVERIFY(viewer);
+        QTRY_VERIFY2(viewer->width()>900,qPrintable(QString("Source preview should use the project inspector's space: viewer %1 x %2, window %3 x %4").arg(viewer->width()).arg(viewer->height()).arg(window->width()).arg(window->height())));
+        QTRY_VERIFY2(viewer->height()>=280,"Source controls should leave enough height to judge the video");
+        auto *wave=window->findChild<QQuickItem*>("sourceWaveform"); QVERIFY(wave);
+        auto *in=window->findChild<QQuickItem*>("sourceInField"); QVERIFY(in);
+        auto *out=window->findChild<QQuickItem*>("sourceOutField"); QVERIFY(out);
+        auto *append=window->findChild<QQuickItem*>("appendSourceButton"); QVERIFY(append);
+        const auto captures=qEnvironmentVariable("ISAAC_SOURCE_SCREENSHOTS");
+        if(!captures.isEmpty()) QDir().mkpath(captures);
+        const auto capture=[&](const QString &name){
+            return captures.isEmpty()||window->grabWindow().save(captures+"/"+name+".png");
+        };
+        for(bool dark:{true,false}) {
+            setAppColorScheme(*qobject_cast<QApplication*>(qApp),dark?Qt::ColorScheme::Dark:Qt::ColorScheme::Light);
+            QTest::qWait(80); QVERIFY(capture(dark?"source-layout-dark":"source-layout-light"));
+        }
+        window->resize(760,560); QTest::qWait(80);
+        const auto contained=[&](QQuickItem *item){
+            return QRectF(0,0,window->width(),window->height()).adjusted(-1,-1,1,1).contains(item->mapRectToScene(item->boundingRect()));
+        };
+        QVERIFY(contained(wave)); QVERIFY(contained(in)); QVERIFY(contained(out)); QVERIFY(contained(append));
+        auto *stepBack=window->findChild<QQuickItem*>("sourceStepBackButton"); QVERIFY(stepBack);
+        auto *transport=stepBack->parentItem()->parentItem();
+        QVERIFY2(transport->parentItem()->boundingRect().adjusted(-1,-1,1,1).contains(transport->mapRectToItem(transport->parentItem(),transport->boundingRect())),"Playback controls must fit inside the Source preview panel");
+        QVERIFY(capture("source-layout-compact"));
+        auto font=qApp->font(); font.setPointSize(24); window->setProperty("font",font); QTest::qWait(80);
+        for(auto *item:window->findChildren<QQuickItem*>()) {
+            const auto text=item->property("text").toString();
+            if(text=="Remove source"||text=="Import and append…")
+                QVERIFY2(item->width()<=item->parentItem()->width()+1,"Media action buttons must fit the narrower Source sidebar");
+        }
+        for(auto *control:{in,out,append}) {
+            control->forceActiveFocus(Qt::TabFocusReason); QTRY_VERIFY(contained(control));
+        }
+        QVERIFY(capture("source-layout-large-text"));
+        QVERIFY(QMetaObject::invokeMethod(window,"focusInspector",Q_ARG(QVariant,1),Q_ARG(QVariant,true)));
+        QTRY_VERIFY(!editor.sourceMode());
+        window->resize(1320,860); window->setProperty("font",qApp->font()); QTest::qWait(80);
+        QVERIFY(viewer->width()<900);
+        window->resize(760,560); editor.selectSource(0); QTest::qWait(80);
+        auto *selector=window->findChild<QQuickItem*>("compactBrowserSelector"); QVERIFY(selector);
+        QVERIFY(QMetaObject::invokeMethod(selector,"activated",Q_ARG(int,2)));
+        QTRY_VERIFY(!editor.sourceMode());
+        QCOMPARE(warnings.count(),0);
     }
     void largeTextAndShortWindowKeepAllLanesReachable() {
         EditorController editor; QQmlApplicationEngine engine;

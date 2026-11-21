@@ -53,19 +53,17 @@ void drawMediaStatus(QPainter &p, const QRectF &rect, bool warning) {
     } else p.drawArc(bounds.adjusted(1,1,-1,-1),30*16,270*16);
     p.restore();
 }
-QVector<int> textLanes(const Project &project,bool caption) {
-    const auto &list=caption?project.captions:project.textOverlays;
-    QVector<int> order,lanes(list.size());for(int i=0;i<list.size();++i)order.append(i);
-    std::stable_sort(order.begin(),order.end(),[&](int a,int b){return project.textStartFrame(a,caption)<project.textStartFrame(b,caption);});
+QVector<int> textLanes(const QVector<int> &starts,const QVector<int> &frames) {
+    QVector<int> order,lanes(starts.size());for(int i=0;i<starts.size();++i)order.append(i);
+    std::stable_sort(order.begin(),order.end(),[&](int a,int b){return starts[a]<starts[b];});
     using End=std::pair<int,int>;std::priority_queue<End,std::vector<End>,std::greater<End>> busy;
     std::priority_queue<int,std::vector<int>,std::greater<int>> free;int count=0;
-    for(int i:order){const int start=project.textStartFrame(i,caption);
+    for(int i:order){const int start=starts[i];
         while(!busy.empty()&&busy.top().first<=start){free.push(busy.top().second);busy.pop();}
         int lane;if(free.empty())lane=count++;else{lane=free.top();free.pop();}
-        lanes[i]=lane;busy.push({start+list[i].durationFrames,lane});
+        lanes[i]=lane;busy.push({start+frames[i],lane});
     }return lanes;
 }
-int extent(const Project &p){int frames=p.durationFrames();for(int i=0;i<p.captions.size();++i)frames=std::max(frames,p.textStartFrame(i,true)+p.captions[i].durationFrames);return frames;}
 
 }
 
@@ -89,8 +87,30 @@ const Project &QuickTimeline::displayProject() const {
 }
 const Project::TimelineData &QuickTimeline::timingFor(const Project &project) const {
     if(&project==&project_)return projectTiming_;
-    if(&project==&preview_){if(previewTimingDirty_){previewTiming_=preview_.timelineData();previewTimingDirty_=false;}return previewTiming_;}
+    if(&project==&preview_){if(previewTimingDirty_){previewTiming_=preview_.timelineData();previewTextTiming_=preview_.textTiming();previewIndexes_=itemIndexes(preview_,previewTiming_,previewTextTiming_);previewTimingDirty_=false;}return previewTiming_;}
     temporaryTiming_=project.timelineData();return temporaryTiming_;
+}
+const Project::TextTiming &QuickTimeline::textTimingFor(const Project &project) const {
+    if(&project==&project_)return projectTextTiming_;
+    if(&project==&preview_){timingFor(preview_);return previewTextTiming_;}
+    temporaryTextTiming_=project.textTiming();return temporaryTextTiming_;
+}
+QuickTimeline::ItemIndexes QuickTimeline::itemIndexes(const Project &project,const Project::TimelineData &timeline,const Project::TextTiming &texts) {
+    ItemIndexes result;QVector<TimeIntervalIndex::Interval> intervals;intervals.reserve(project.clips.size());
+    for(int i=0;i<project.clips.size();++i)intervals.append({timeline.starts[i],qint64(timeline.starts[i])+timeline.frames[i]});
+    result.clips.reset(intervals);
+    for(bool caption:{false,true}){intervals.clear();const auto &list=caption?project.captions:project.textOverlays;const auto &starts=caption?texts.captionStarts:texts.titleStarts;
+        for(int i=0;i<list.size();++i)intervals.append({starts[i],qint64(starts[i])+list[i].durationFrames});
+        (caption?result.captions:result.titles).reset(intervals);
+    }
+    return result;
+}
+const QuickTimeline::ItemIndexes &QuickTimeline::indexesFor(const Project &project) const {
+    if(&project==&preview_){timingFor(preview_);return previewIndexes_;}
+    return projectIndexes_;
+}
+QVector<int> QuickTimeline::visibleItems(const TimeIntervalIndex &index,double margin) const {
+    return index.query(qint64(std::floor(unclampedFrameAt(labelWidth()-margin))),qint64(std::ceil(unclampedFrameAt(width()+margin)))+1);
 }
 QVariantList QuickTimeline::visualOverlayPreview() const {
     auto p=displayProject();p.normalizeVisuals();QVariantList result;
@@ -102,9 +122,15 @@ int QuickTimeline::rulerHeight() const { return std::max(32, QFontMetrics(font_)
 int QuickTimeline::videoHeight() const { return std::max(100, QFontMetrics(font_).height() * 3 + 36); }
 int QuickTimeline::audioHeight() const { return std::max(54, QFontMetrics(font_).height() + 32); }
 void QuickTimeline::updateTextLanes(){
-    titleLanes_=textLanes(displayProject(),false);captionLanes_=textLanes(displayProject(),true);
-    titleLaneCount_=titleLanes_.isEmpty()?0:*std::max_element(titleLanes_.begin(),titleLanes_.end())+1;
-    captionLaneCount_=captionLanes_.isEmpty()?0:*std::max_element(captionLanes_.begin(),captionLanes_.end())+1;
+    const auto &project=displayProject();const auto &timing=textTimingFor(project);
+    const auto update=[](const QVector<TextOverlay> &texts,const QVector<int> &starts,QVector<int> &oldStarts,QVector<int> &oldFrames,QVector<int> &lanes,int &count){
+        QVector<int> frames;frames.reserve(texts.size());for(const auto &text:texts)frames.append(text.durationFrames);
+        if(starts==oldStarts&&frames==oldFrames)return;
+        oldStarts=starts;oldFrames=std::move(frames);lanes=textLanes(oldStarts,oldFrames);
+        count=lanes.isEmpty()?0:*std::max_element(lanes.begin(),lanes.end())+1;
+    };
+    update(project.textOverlays,timing.titleStarts,titleStarts_,titleFrames_,titleLanes_,titleLaneCount_);
+    update(project.captions,timing.captionStarts,captionStarts_,captionFrames_,captionLanes_,captionLaneCount_);
 }
 int QuickTimeline::titleHeight() const {return titleLaneCount_*audioHeight();}
 int QuickTimeline::captionHeight() const {return captionLaneCount_*audioHeight();}
@@ -126,19 +152,21 @@ QRectF QuickTimeline::clipRect(int index) const { return rectForClip(displayProj
 QRectF QuickTimeline::textRect(int index) const {
     const auto &p=displayProject();if(index<0||index>=p.textOverlays.size())return {};
     const auto &t=p.textOverlays[index];if(index>=titleLanes_.size())return {};
-    return {xForFrame(p.textStartFrame(index)),qreal(rulerHeight()+titleLanes_[index]*audioHeight()+5),std::max(1.0,t.durationFrames*pixelsPerSecond_/60),qreal(audioHeight()-10)};
+    return {xForFrame(textTimingFor(p).titleStarts[index]),qreal(rulerHeight()+titleLanes_[index]*audioHeight()+5),std::max(1.0,t.durationFrames*pixelsPerSecond_/60),qreal(audioHeight()-10)};
 }
 QRectF QuickTimeline::captionRect(int index) const {
     const auto &p=displayProject();if(index<0||index>=p.captions.size()||index>=captionLanes_.size())return {};
-    return {xForFrame(p.textStartFrame(index,true)),qreal(rulerHeight()+titleHeight()+captionLanes_[index]*audioHeight()+5),std::max(1.0,p.captions[index].durationFrames*pixelsPerSecond_/60),qreal(audioHeight()-10)};
+    return {xForFrame(textTimingFor(p).captionStarts[index]),qreal(rulerHeight()+titleHeight()+captionLanes_[index]*audioHeight()+5),std::max(1.0,p.captions[index].durationFrames*pixelsPerSecond_/60),qreal(audioHeight()-10)};
 }
 int QuickTimeline::captionAt(const QPointF &point) const {
     if(point.x()<labelWidth())return -1;
-    for(int i=project_.captions.size()-1;i>=0;--i)if(captionRect(i).contains(point))return i;return -1;
+    const auto candidates=projectIndexes_.captions.query(qint64(std::floor(unclampedFrameAt(point.x()-2))),qint64(std::ceil(unclampedFrameAt(point.x()+2)))+1);
+    for(auto i=candidates.crbegin();i!=candidates.crend();++i)if(captionRect(*i).contains(point))return *i;return -1;
 }
 int QuickTimeline::textAt(const QPointF &point) const {
     if(point.x()<labelWidth())return -1;
-    for(int i=project_.textOverlays.size()-1;i>=0;--i)if(textRect(i).contains(point))return i;
+    const auto candidates=projectIndexes_.titles.query(qint64(std::floor(unclampedFrameAt(point.x()-2))),qint64(std::ceil(unclampedFrameAt(point.x()+2)))+1);
+    for(auto i=candidates.crbegin();i!=candidates.crend();++i)if(textRect(*i).contains(point))return *i;
     return -1;
 }
 void QuickTimeline::setSelectedText(int index){if(index==selectedText_)return;selectedText_=index;emit textSelectionChanged();emit mediaStatusChanged();invalidateContents();}
@@ -155,10 +183,13 @@ bool QuickTimeline::audioGesture() const {return gesture_==Gesture::AudioMove||g
 QRectF QuickTimeline::transitionRect(int index) const {
     const auto &p=displayProject();if(index<=0||index>=p.clips.size())return {};
     const double width=std::max(14.0,timingFor(p).transitions.value(index)*pixelsPerSecond_/60);
-    return {xForFrame(timingFor(p).starts.value(index)),qreal(rulerHeight()+textHeight()+7),width,qreal(std::max(20,QFontMetrics(font_).height()+4))};
+    const auto clip=rectForClip(p,index);
+    // Keep the title and the clip's center clear for reading and dragging.
+    return {clip.left(),clip.center().y()+4,width,qreal(std::max(20,QFontMetrics(font_).height()+4))};
 }
 int QuickTimeline::transitionAt(const QPointF &point) const {
-    for (int i=1;i<project_.clips.size();++i) if (transitionRect(i).contains(point)) {
+    const auto candidates=projectIndexes_.clips.query(qint64(std::floor(unclampedFrameAt(point.x()-20))),qint64(std::ceil(unclampedFrameAt(point.x()+20)))+1);
+    for (int i:candidates) if (i>0&&transitionRect(i).contains(point)) {
         if (edgeAt(i, point.x()) == Gesture::TrimStart) return -1;
         return i;
     }
@@ -169,7 +200,8 @@ int QuickTimeline::clipAt(const QPointF &point) const {
     if (point.x() < labelWidth()) return -1;
     int edge = -1;
     double nearest = 10;
-    for (int i = 0; i < project_.clips.size(); ++i) {
+    const auto candidates=projectIndexes_.clips.query(qint64(std::floor(unclampedFrameAt(point.x()-2))),qint64(std::ceil(unclampedFrameAt(point.x()+2)))+1);
+    for (int i:candidates) {
         const auto rect = rectForClip(project_, i);
         if (!rect.contains(point) || edgeAt(i, point.x()) == Gesture::Body) continue;
         const double distance = std::min(std::abs(point.x() - rect.left()), std::abs(point.x() - rect.right()));
@@ -180,8 +212,8 @@ int QuickTimeline::clipAt(const QPointF &point) const {
         const int index = v.toInt();
         if (rectForClip(project_, index).contains(point)) return index;
     }
-    for (int i = int(project_.clips.size()) - 1; i >= 0; --i)
-        if (rectForClip(project_, i).contains(point)) return i;
+    for (auto i=candidates.crbegin();i!=candidates.crend();++i)
+        if (rectForClip(project_, *i).contains(point)) return *i;
     return -1;
 }
 QuickTimeline::Gesture QuickTimeline::edgeAt(int index, double x) const {
@@ -197,8 +229,7 @@ void QuickTimeline::setProject(const Project &p, const QVector<double> &duration
     if (gesture_ != Gesture::None) finishGesture(true);
     endSkim();
     musicDurationSeconds_=std::isfinite(musicDuration)?std::max(0.0,musicDuration):0;
-    project_ = p;projectTiming_=project_.timelineData();
-    updateTextLanes();
+    project_ = p;projectTiming_=project_.timelineData();projectTextTiming_=project_.textTiming();projectIndexes_=itemIndexes(project_,projectTiming_,projectTextTiming_);
     setHoveredMedia(-1);
     setImplicitHeight(rulerHeight()+textHeight()+videoHeight()+2*audioHeight());
     sourceDurations_ = durations;
@@ -285,10 +316,10 @@ void QuickTimeline::setContentOffset(double offset) {
 void QuickTimeline::updateViewport(bool fit) {
     updateTextLanes();setImplicitHeight(rulerHeight()+textHeight()+videoHeight()+2*audioHeight());
     const double available = std::max(1.0, width() - labelWidth() - 36);
-    if (fit) pixelsPerSecond_ = available / (extent(project_)==0 ? 10.0 : std::max(1.0 / 60, extent(project_) / 60.0));
+    if (fit) pixelsPerSecond_ = available / (projectTextTiming_.extent==0 ? 10.0 : std::max(1.0 / 60, projectTextTiming_.extent / 60.0));
     // Keep the pre-gesture extent while ripple shortening, or scroll clamping feeds back into the trim delta.
-    const int frames = gesture_ == Gesture::None || gesture_ == Gesture::Body ? extent(displayProject())
-        : std::max(extent(project_), extent(displayProject()));
+    const int frames = gesture_ == Gesture::None || gesture_ == Gesture::Body ? textTimingFor(displayProject()).extent
+        : std::max(projectTextTiming_.extent, textTimingFor(displayProject()).extent);
     const double content = frames * pixelsPerSecond_ / 60;
     maximumOffset_ = std::max(0.0, content - available);
     contentOffset_ = qBound(0.0, contentOffset_, maximumOffset_);
@@ -366,7 +397,7 @@ void QuickTimeline::refreshMedia() {
         waveformStates_.insert(path, mediaCache_->waveformState(path));
     };
     const double labelHeight = QFontMetrics(font_).height() + 6;
-    for (int i = 0; i < p.clips.size(); ++i) {
+    for (int i:visibleItems(indexesFor(p).clips,96)) {
         const auto r = rectForClip(p, i);
         if (r.right() < visibleLeft || r.left() > visibleRight) continue;
         const Clip &clip = p.clips[i];
@@ -661,7 +692,7 @@ void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
     const auto &textList=gestureCaption_?project_.captions:project_.textOverlays;
     if(dragging_&&textGesture()&&gestureTextIndex_>=0&&gestureTextIndex_<textList.size()){
         preview_=project_;previewTimingDirty_=true;const auto &original=textList[gestureTextIndex_];auto &text=(gestureCaption_?preview_.captions:preview_.textOverlays)[gestureTextIndex_];
-        const int start=project_.textStartFrame(gestureTextIndex_,gestureCaption_);
+        const int start=(gestureCaption_?projectTextTiming_.captionStarts:projectTextTiming_.titleStarts)[gestureTextIndex_];
         const int delta=qRound((lastPoint_.x()-pressPoint_.x()+contentOffset_-pressOffset_)*60/pixelsPerSecond_);
         const int end=start+original.durationFrames;
         int value=gesture_==Gesture::TextEnd?end+delta:start+delta;
@@ -673,7 +704,7 @@ void QuickTimeline::updateGesture(Qt::KeyboardModifiers modifiers) {
         if(snapping_&&!modifiers.testFlag(Qt::AltModifier)){
             QVector<int> targets{0,position_,projectTiming_.duration};
             for(int i=0;i<project_.clips.size();++i){const int clipStart=projectTiming_.starts.value(i);targets<<clipStart<<clipStart+project_.clipFrames(project_.clips[i]);}
-            for(bool caption:{false,true}){const auto &list=caption?project_.captions:project_.textOverlays;for(int i=0;i<list.size();++i)if(caption!=gestureCaption_||i!=gestureTextIndex_){const int at=project_.textStartFrame(i,caption);targets<<at<<at+list[i].durationFrames;}}
+            for(bool caption:{false,true}){const auto &list=caption?project_.captions:project_.textOverlays;const auto &starts=caption?projectTextTiming_.captionStarts:projectTextTiming_.titleStarts;for(int i=0;i<list.size();++i)if(caption!=gestureCaption_||i!=gestureTextIndex_){const int at=starts[i];targets<<at<<at+list[i].durationFrames;}}
             double distance=9;for(int target:targets){const double d=std::abs(target-value)*pixelsPerSecond_/60;if(target>=minimum&&target<=maximum&&d<=8&&d<distance){distance=d;snapTimeline_=target;}}
             if(snapTimeline_>=0)value=snapTimeline_;
         }
@@ -836,13 +867,13 @@ void QuickTimeline::keyPressEvent(QKeyEvent *event) {
         return;
     }
     if(gesture_==Gesture::None&&selectedCaption_>=0&&selectedCaption_<project_.captions.size()&&event->modifiers().testFlag(Qt::AltModifier)&&(event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)){
-        const auto &t=project_.captions[selectedCaption_];const int delta=event->key()==Qt::Key_Left?-1:1;int start=project_.textStartFrame(selectedCaption_,true),frames=t.durationFrames;
+        const auto &t=project_.captions[selectedCaption_];const int delta=event->key()==Qt::Key_Left?-1:1;int start=projectTextTiming_.captionStarts[selectedCaption_],frames=t.durationFrames;
         if(event->modifiers().testFlag(Qt::ShiftModifier))frames=qBound(1,frames+delta,86400*60-start);else start=qBound(0,start+delta,86400*60-frames);
         emit captionTimingRequested(selectedCaption_,start,frames);event->accept();return;
     }
     if(gesture_==Gesture::None&&selectedText_>=0&&selectedText_<project_.textOverlays.size()&&event->modifiers().testFlag(Qt::AltModifier)&&(event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)){
         const auto &text=project_.textOverlays[selectedText_];const int delta=event->key()==Qt::Key_Left?-1:1;
-        int start=project_.textStartFrame(selectedText_),frames=text.durationFrames;
+        int start=projectTextTiming_.titleStarts[selectedText_],frames=text.durationFrames;
         if(event->modifiers().testFlag(Qt::ShiftModifier))frames=qBound(1,frames+delta,std::max(1,projectTiming_.duration-start));
         else start=qBound(0,start+delta,std::max(0,projectTiming_.duration-frames));
         emit textTimingRequested(selectedText_,start,frames);event->accept();return;
@@ -1000,13 +1031,13 @@ void QuickTimeline::paintContents(QPainter *painter) {
         p.setPen(muted);
         p.drawText(r.adjusted(12, 0, -12, 0), Qt::AlignCenter | Qt::TextWordWrap, "Drop clips");
     }
-    for(bool caption:{false,true}){const auto &list=caption?project.captions:project.textOverlays;for(int i=0;i<list.size();++i){
+    for(bool caption:{false,true}){const auto &list=caption?project.captions:project.textOverlays;for(int i:visibleItems(caption?indexesFor(project).captions:indexesFor(project).titles)){
         const auto rect=caption?captionRect(i):textRect(i);const auto &t=list[i];if(rect.right()<labels||rect.left()>width())continue;
         const bool selected=caption?captionSelection_.contains(i):i==selectedText_;p.setPen(QPen(selected?accent:divider,selected?2:1));p.setBrush(blend(base,accent,selected?.24:.12));p.drawRoundedRect(rect.adjusted(1,1,-1,-1),4,4);
         p.save();p.setClipRect(rect.adjusted(10,2,-10,-2),Qt::IntersectClip);p.setPen(text);
         const QString name=t.text.section('\n',0,0).isEmpty()?QString(caption?"Caption %1":"Text %1").arg(i+1):t.text.section('\n',0,0);
         p.drawText(rect.adjusted(12,2,-12,-rect.height()/2),Qt::AlignVCenter,fm.elidedText(name,Qt::ElideRight,std::max(0,int(rect.width()-24))));
-        const int at=project.textStartFrame(i,caption);const QString status=QString("%1 – %2%3%4").arg(timecode(at),timecode(at+t.durationFrames),t.hostId.isEmpty()?"":" · attached",caption&&at+t.durationFrames>timingFor(project).duration?" · clamped":"");
+        const int at=(caption?textTimingFor(project).captionStarts:textTimingFor(project).titleStarts)[i];const QString status=QString("%1 – %2%3%4").arg(timecode(at),timecode(at+t.durationFrames),t.hostId.isEmpty()?"":" · attached",caption&&at+t.durationFrames>timingFor(project).duration?" · clamped":"");
         p.drawText(rect.adjusted(12,rect.height()/2,-12,-2),Qt::AlignVCenter,status);p.restore();
         if(selected){p.setPen(QPen(accent,2));for(double x:{rect.left()+4,rect.right()-4})p.drawLine(QPointF(x,rect.center().y()-8),QPointF(x,rect.center().y()+8));}
     }}
@@ -1047,7 +1078,7 @@ void QuickTimeline::paintContents(QPainter *painter) {
             }
         }
     };
-    for (int i = 0; i < project.clips.size(); ++i) {
+    for (int i:visibleItems(indexesFor(project).clips)) {
         const QRectF r = rectForClip(project, i);
         if (r.right() < labels || r.left() > width()) continue;
         const Clip &clip = project.clips[i];
@@ -1095,7 +1126,7 @@ void QuickTimeline::paintContents(QPainter *painter) {
         p.setPen(muted);
         p.drawText(QRectF(origin() + 10, ruler + 42, std::max(1.0, width() - origin() - 20), 22), Qt::AlignVCenter, "Media previews unavailable");
     }
-    for(int i=1;i<project.clips.size();++i){
+    for(int i:visibleItems(indexesFor(project).clips,20)){if(i==0)continue;
         const auto r=transitionRect(i);if(r.right()<labels||r.left()>width())continue;
         p.setBrush(blend(base,accent,selectedTransition_==i?.5:.24));p.setPen(QPen(accent,selectedTransition_==i?2:1));p.drawRoundedRect(r,3,3);
         p.setPen(text);p.drawText(r.adjusted(2,0,-2,0),Qt::AlignCenter,timingFor(project).transitions.value(i)>0?QString("%1f").arg(timingFor(project).transitions.value(i)):"|");

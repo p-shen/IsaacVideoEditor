@@ -1,4 +1,5 @@
 #include "encoding.h"
+#include <QScopeGuard>
 #include <QtTest>
 
 class EncodingTest : public QObject {
@@ -17,6 +18,8 @@ private slots:
         QCOMPARE(Media::h264EncoderLabel(encoder),label);
     }
     void choosesPlatformCandidate() {
+        const auto previous=qgetenv("ISAAC_DISABLE_HARDWARE_ENCODING");qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");
+        const auto restore=qScopeGuard([&]{if(previous.isNull())qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");else qputenv("ISAAC_DISABLE_HARDWARE_ENCODING",previous);});
 #ifdef Q_OS_MACOS
         QCOMPARE(Media::hardwareH264Encoder(),QString("h264_videotoolbox"));
 #elif defined(Q_OS_WIN) || defined(Q_OS_LINUX)
@@ -24,6 +27,20 @@ private slots:
 #else
         QVERIFY(Media::hardwareH264Encoder().isEmpty());
 #endif
+    }
+    void hardwareEncodingCanBeDisabled_data() {
+        QTest::addColumn<QByteArray>("value");QTest::addColumn<bool>("disabled");
+        QTest::newRow("disabled")<<QByteArray("1")<<true;
+        QTest::newRow("enabled")<<QByteArray("0")<<false;
+        QTest::newRow("unset")<<QByteArray{}<<false;
+    }
+    void hardwareEncodingCanBeDisabled() {
+        QFETCH(QByteArray,value);QFETCH(bool,disabled);
+        const auto previous=qgetenv("ISAAC_DISABLE_HARDWARE_ENCODING");qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");
+        const auto restore=qScopeGuard([&]{if(previous.isNull())qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");else qputenv("ISAAC_DISABLE_HARDWARE_ENCODING",previous);});
+        const auto candidate=Media::hardwareH264Encoder();
+        if(!value.isNull())qputenv("ISAAC_DISABLE_HARDWARE_ENCODING",value);
+        QCOMPARE(Media::hardwareH264Encoder(),disabled?QString{}:candidate);
     }
 };
 QTEST_GUILESS_MAIN(EncodingTest)

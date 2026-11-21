@@ -48,10 +48,25 @@ int Project::textFrames(int index,bool caption) const {
     const auto &list=caption?captions:textOverlays;if(index<0||index>=list.size())return 0;
     return std::clamp(durationFrames()-textStartFrame(index,caption),0,list[index].durationFrames);
 }
+Project::TextTiming Project::textTiming() const {
+    const auto timeline=timelineData();TextTiming timing;timing.duration=timing.extent=timeline.duration;
+    QHash<QString,int> hosts;hosts.reserve(clips.size());
+    for(int i=0;i<clips.size();++i)if(!hosts.contains(clips[i].id))hosts.insert(clips[i].id,i);
+    for(bool caption:{false,true}){const auto &list=caption?captions:textOverlays;auto &starts=caption?timing.captionStarts:timing.titleStarts;starts.reserve(list.size());
+        for(const auto &t:list){int start=t.startFrame;
+            const auto host=hosts.constFind(t.hostId);
+            if(!t.hostId.isEmpty()&&host!=hosts.cend()){const int index=host.value();const auto &c=clips[index];
+                const int first=qRound(c.inSeconds*fps)+c.sourceFrameOffset,last=qRound(c.outSeconds*fps)+c.sourceFrameOffset-1;
+                start=timeline.starts[index]+std::clamp(t.hostSourceFrame,first,last)-first;}
+            starts.append(start);if(caption)timing.extent=std::max(timing.extent,start+t.durationFrames);
+        }
+    }
+    return timing;
+}
 QVector<TextOverlay> Project::renderedTexts() const {
-    QVector<TextOverlay> result;
-    for(bool caption:{false,true}){if(caption&&!burnCaptions)continue;const auto &list=caption?captions:textOverlays;
-        for(int i=0;i<list.size();++i){auto t=list[i];t.startFrame=textStartFrame(i,caption);if(caption||!t.hostId.isEmpty())t.durationFrames=textFrames(i,caption);result.append(t);}}
+    const auto timing=textTiming();QVector<TextOverlay> result;result.reserve(textOverlays.size()+(burnCaptions?captions.size():0));
+    for(bool caption:{false,true}){if(caption&&!burnCaptions)continue;const auto &list=caption?captions:textOverlays;const auto &starts=caption?timing.captionStarts:timing.titleStarts;
+        for(int i=0;i<list.size();++i){auto t=list[i];t.startFrame=starts[i];if(caption||!t.hostId.isEmpty())t.durationFrames=std::clamp(timing.duration-t.startFrame,0,t.durationFrames);result.append(t);}}
     return result;
 }
 bool Project::attachText(int index,bool caption,int hostIndex) {

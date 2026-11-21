@@ -190,3 +190,53 @@ void CachedFrame::setPriority(bool p) { if(priority_==p) return; priority_=p; em
 void CachedFrame::setSourceRotation(int r) { if(rotation_==r) return; rotation_=r; emit changed(); refresh(); }
 void CachedFrame::refresh() { const bool wasReady=ready(); image_=cache_&&!source_.isEmpty()?cache_->thumbnail(source_,seconds_,rotation_,priority_):QImage(); if(wasReady!=ready()) emit readyChanged(); update(); }
 void CachedFrame::paint(QPainter *p) { drawFit(p,image_,boundingRect()); }
+
+CachedWaveform::CachedWaveform(QQuickItem *parent):QQuickPaintedItem(parent) {
+    setAcceptedMouseButtons(Qt::NoButton);
+}
+void CachedWaveform::setCache(MediaCache *cache) {
+    if(cache_==cache) return;
+    if(cache_) disconnect(cache_,nullptr,this,nullptr);
+    cache_=cache;
+    if(cache) {
+        connect(cache,&MediaCache::changed,this,&CachedWaveform::refresh);
+        connect(cache,&QObject::destroyed,this,[this]{ cache_=nullptr; refresh(); emit changed(); });
+    }
+    emit changed(); refresh();
+}
+void CachedWaveform::setSource(const QString &source) {
+    if(source_==source) return;
+    source_=source; emit changed(); refresh();
+}
+void CachedWaveform::setDuration(double seconds) {
+    if(!std::isfinite(seconds)) seconds=0;
+    seconds=std::max(0.0,seconds);
+    if(qFuzzyCompare(duration_+1,seconds+1)) return;
+    duration_=seconds; emit changed(); update();
+}
+void CachedWaveform::setColor(const QColor &color) {
+    if(color_==color) return;
+    color_=color; emit changed(); update();
+}
+void CachedWaveform::refresh() {
+    // Cache requests stay on the GUI thread; paint only reads the completed peaks.
+    peaks_=cache_&&!source_.isEmpty()?cache_->waveform(source_):QVector<float>();
+    const auto state=cache_&&!source_.isEmpty()?cache_->waveformState(source_):QString();
+    if(state_!=state) { state_=state; emit stateChanged(); }
+    update();
+}
+void CachedWaveform::paint(QPainter *p) {
+    if(peaks_.isEmpty()||duration_<=0||width()<=0||height()<=0) return;
+    p->setPen(QPen(color_,1));
+    const double center=std::floor(height()/2), half=std::max(0.0,center-2);
+    // MediaCache stores one fixed-amplitude peak per 50 ms of original audio.
+    const double binsPerPixel=duration_*20/width();
+    for(int x=0;x<int(std::ceil(width()));++x) {
+        const int first=int(std::floor(x*binsPerPixel));
+        const int last=std::min(int(peaks_.size()),std::max(first+1,int(std::ceil((x+1)*binsPerPixel))));
+        float peak=0;
+        for(int bin=first;bin<last;++bin) peak=std::max(peak,peaks_[bin]);
+        const double amplitude=std::clamp(double(peak),0.0,1.0)*half;
+        p->drawLine(QPointF(x,center-amplitude),QPointF(x,center+amplitude));
+    }
+}

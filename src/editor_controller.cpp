@@ -1,5 +1,7 @@
 #include "editor_controller.h"
 #include "export_job.h"
+#include "subtitle_job.h"
+#include "subtitle_models.h"
 #include "text_style.h"
 #include "transition_presets.h"
 #include "media_cache.h"
@@ -76,10 +78,21 @@ QVariantList validIndices(const QVariantList &input,int count) {
 }
 }
 
-EditorController::EditorController(QObject *parent,const Performance::Budget &budget):QObject(parent),performanceBudget_(budget) {
+EditorController::EditorController(QObject *parent,const Performance::Budget &budget,SubtitleModels *subtitleModels):QObject(parent),performanceBudget_(budget) {
+    subtitleModels_=subtitleModels?subtitleModels:new SubtitleModels(this);
+    subtitleCpuOnly_=QSettings().value("subtitles/cpuOnly",false).toBool();
+    captionModel_=new CaptionModel(this);
+    connect(captionModel_,&CaptionModel::summariesChanged,this,&EditorController::captionSummariesChanged);
+    connect(this,&EditorController::projectChanged,this,[this]{captionModel_->synchronize(project_);});
+    textPreviewTimer_.setSingleShot(true);textPreviewTimer_.setInterval(16);
+    connect(&textPreviewTimer_,&QTimer::timeout,this,&EditorController::flushTextPreview);
     automaticPreviewSize_={budget.previewWidth,budget.previewHeight};
     preparationPool_.setMaxThreadCount(1);sourcePool_.setMaxThreadCount(1);importPool_.setMaxThreadCount(1);
     connect(this,&EditorController::projectChanged,this,[this]{timelineData_=project_.timelineData();++projectRevision_;emit splitAvailabilityChanged();if(preparing_&&!sameProject(visibleProject(),preparationSnapshot_))rebuild();});
+    connect(this,&EditorController::projectChanged,this,&EditorController::subtitleChanged);
+    connect(this,&EditorController::projectChanged,this,&EditorController::clipDetailsChanged);
+    connect(this,&EditorController::selectionChanged,this,&EditorController::clipDetailsChanged);
+    connect(this,&EditorController::sourceMetadataChanged,this,&EditorController::clipDetailsChanged);
     connect(this,&EditorController::selectionChanged,this,&EditorController::splitAvailabilityChanged);
     connect(this,&EditorController::positionChanged,this,&EditorController::splitAvailabilityChanged);
     connect(this,&EditorController::sourceChanged,this,&EditorController::sourcePositionChanged);
@@ -109,7 +122,7 @@ EditorController::EditorController(QObject *parent,const Performance::Budget &bu
         }
         sourcePlayWhenPrepared_=false;report(message);
     });
-    connect(sourcePreview_.get(),&Preview::seekSettled,this,[this](int,bool committed){if(sourcePlayWhenPrepared_&&sourceMode_&&committed){sourcePlayWhenPrepared_=false;sourcePreview_->play();}});
+    connect(sourcePreview_.get(),&Preview::seekSettled,this,[this](int,bool committed){if(generatingSubtitles())sourcePlayWhenPrepared_=false;if(sourcePlayWhenPrepared_&&sourceMode_&&committed){sourcePlayWhenPrepared_=false;sourcePreview_->requestPlay();}});
     connect(preview_.get(),&Preview::audioPeak,this,[this](double peak){
         if(!std::isfinite(peak)||peak<0)return;
         masterPeak_=peak>0?std::max(-60.0,20*std::log10(peak)):-60;masterClipped_|=peak>=1;emit audioLevelsChanged();
@@ -130,7 +143,7 @@ EditorController::EditorController(QObject *parent,const Performance::Budget &bu
         for(int i=0;i<project_.clips.size();++i)if(proxyPaths_.value(i,project_.clips[i].path)!=project_.clips[i].path){copies=true;proxyCache_->discard(project_.clips[i].path);proxyPaths_[i]=project_.clips[i].path;}
         for(int i=0;i<project_.visualOverlays.size();++i)if(overlayProxyPaths_.value(i,project_.visualOverlays[i].path)!=project_.visualOverlays[i].path){copies=true;proxyCache_->discard(project_.visualOverlays[i].path);overlayProxyPaths_[i]=project_.visualOverlays[i].path;}
         if(copies){playWhenPrepared_|=resumeWhenSettled_;resumeWhenSettled_=false;rebuild();return;}
-        resumeWhenSettled_=false;mediaCache_->setInteractive(playing()||scrubbing_||skim_||exporting());report(message);
+        resumeWhenSettled_=false;mediaCache_->setInteractive(playing()||scrubbing_||skim_||exporting()||generatingSubtitles());report(message);
     });
     loadingTimer_.setSingleShot(true); loadingTimer_.setInterval(200);
     connect(&loadingTimer_,&QTimer::timeout,this,[this]{ if(preview_->isSeeking()) { loading_=true; emit stateChanged(); } });
@@ -138,13 +151,13 @@ EditorController::EditorController(QObject *parent,const Performance::Budget &bu
         if(active) { if(!loadingTimer_.isActive()) loadingTimer_.start(); }
         else {
             loadingTimer_.stop(); loading_=false;
-            mediaCache_->setInteractive(playing()||scrubbing_||skim_||exporting());
+            mediaCache_->setInteractive(playing()||scrubbing_||skim_||exporting()||generatingSubtitles());
             QTimer::singleShot(0,this,&EditorController::refreshPendingProxy);
             emit stateChanged();
         }
     });
     connect(preview_.get(),&Preview::seekSettled,this,[this](int frame,bool committed){
-        if(resumeWhenSettled_&&committed&&frame==position_) { resumeWhenSettled_=false; preview_->play(); }
+        if(resumeWhenSettled_&&committed&&frame==position_) { resumeWhenSettled_=false; preview_->requestPlay(); }
         mediaCache_->setInteractive(playing()||scrubbing_||skim_);
     });
     connect(proxyCache_,&PreviewCache::statusChanged,this,[this](const QString &message){if(message=="Lighter preview ready"&&previewStatus_=="Smooth preview")return;previewStatus_=message;emit stateChanged();});
@@ -167,7 +180,7 @@ EditorController::EditorController(QObject *parent,const Performance::Budget &bu
            !sourcePreview_->isPlaying()&&!sourcePreview_->isSeeking()&&
            !proxyCache_->readyCopy(source,0,project_.assets[selectedSource_].durationFrames).path.isEmpty())rebuildSource();
         if(!needsRefresh) return;
-        if(exporting()||preview_->isSeeking()||scrubbing_||skim_||visualBefore_) { proxyPending_=true; return; }
+        if(exporting()||generatingSubtitles()||preview_->isSeeking()||scrubbing_||skim_||visualBefore_) { proxyPending_=true; return; }
         rebuild();
     });
     const int quality=QSettings().value("preview/quality",0).toInt();
@@ -179,11 +192,13 @@ EditorController::~EditorController() {
     preparationPool_.waitForDone();sourcePool_.waitForDone();importPool_.waitForDone();
     disconnect(proxyCache_,nullptr,this,nullptr);
     if(exportJob_) {disconnect(exportJob_,nullptr,this,nullptr);exportJob_->stopAndWait();}
+    if(subtitleJob_){disconnect(subtitleJob_,nullptr,this,nullptr);subtitleJob_->stopAndWait();}
     sourcePreview_->setProducer(nullptr);sourceProducer_.reset();sourceProxyLease_.reset();
     preview_->setProducer(nullptr); timeline_.reset();timelineProxyLeases_.clear(); undo_.clear();
 }
 EditorController::State EditorController::state() const { return {project_,selection_,primary_,selectedText_,selectedOverlay_,selectedCaption_,captionSelection_}; }
 void EditorController::apply(const State &s,int position,bool forceRebuild) {
+    textPreviewTimer_.stop();
     finishSourceScrub(true);
     audioPreview_.reset();
     const bool textOnly=!forceRebuild&&!preparing_&&timeline_&&sameMedia(project_,s.project);
@@ -191,7 +206,7 @@ void EditorController::apply(const State &s,int position,bool forceRebuild) {
     resumeWhenSettled_=false; scrubbing_=skim_=false;
     project_=s.project;timelineData_=project_.timelineData();
     selectedSource_=-1; for(int i=0;i<project_.assets.size();++i)if(project_.assets[i].path==sourcePath)selectedSource_=i;
-    if(selectedSource_<0 && sourceMode_){sourceMode_=false;++sourceRevision_;sourcePreparing_=false;sourcePreview_->setProducer(nullptr,false);sourceProducer_.reset();sourceProxyLease_.reset();}
+    if(selectedSource_<0 && sourceMode_){sourceMode_=false;++sourceRevision_;sourcePreparing_=false;rebuildSource();}
     selection_=validIndices(s.selection,project_.clips.size());
     selectedOverlay_=s.overlay>=0&&s.overlay<project_.visualOverlays.size()?s.overlay:-1;
     selectedText_=s.text>=0&&s.text<project_.textOverlays.size()?s.text:-1;
@@ -201,7 +216,7 @@ void EditorController::apply(const State &s,int position,bool forceRebuild) {
     primary_=selection_.contains(s.primary)?s.primary:(selection_.isEmpty()?-1:selection_.last().toInt());
     if(transitionIndex_>=project_.clips.size())transitionIndex_=-1;
     anchor_=primary_; position_=qBound(0,position,std::max(0,duration()-1));
-    if(textOnly){preview_->pause(false);preview_->requestSeek(position_,true,[timeline=timeline_.get(),texts=project_.renderedTexts()]{TextRendering::update(*timeline,texts);});}else rebuild();
+    if(textOnly){preview_->requestPause(false);preview_->requestSeek(position_,true,[timeline=timeline_.get(),texts=project_.renderedTexts()]{TextRendering::update(*timeline,texts);});}else rebuild();
     if(sourceMode_)rebuildSource();
     emit projectChanged(); emit selectionChanged(); emit positionChanged(); emit stateChanged(); emit sourceChanged();
 }
@@ -265,7 +280,8 @@ QVariantList EditorController::clips() const {
 }
 QVariantMap EditorController::currentClip() const { return primary_>=0&&primary_<project_.clips.size()?clips()[primary_].toMap():QVariantMap{}; }
 QVariantList EditorController::textOverlays() const {
-    QVariantList result;for(int i=0;i<project_.textOverlays.size();++i)result.append(timedTextInfo(project_,i));return result;
+    const auto timing=project_.textTiming();
+    QVariantList result;for(int i=0;i<project_.textOverlays.size();++i)result.append(timedTextInfo(project_,i,false,&timing));return result;
 }
 QVariantMap EditorController::currentText() const {return selectedText_>=0&&selectedText_<project_.textOverlays.size()?textOverlays()[selectedText_].toMap():QVariantMap{};}
 QStringList EditorController::fontFamilies() const {static const auto families=QFontDatabase::families();return families;}
@@ -304,7 +320,7 @@ void EditorController::setTextTiming(int index,int start,int frames) {cancelPend
     if(index<0||index>=project_.textOverlays.size()||start<0||frames<1||start>duration()-frames)return;
     auto next=project_;if(!next.setTextTiming(index,false,start,frames))return;
     if(textDragBefore_){
-        project_=next;if(timeline_){preview_->requestSeek(position_,true,[timeline=timeline_.get(),texts=project_.renderedTexts()]{TextRendering::update(*timeline,texts);});}else if(preparing_)rebuild();emit projectChanged();emit stateChanged();
+        project_=next;updateTextPreview();emit projectChanged();
     }else commit(next,{},-1,"Change text timing",false,index);
 }
 void EditorController::chooseTextColor(){
@@ -315,22 +331,22 @@ void EditorController::chooseTextColor(){
 void EditorController::previewTextContent(const QString &text){
     if(!textDragBefore_&&selectedText_>=0)beginTextDrag();
     if(!textDragBefore_||selectedText_<0||selectedText_>=project_.textOverlays.size()||text.size()>2000)return;
-    project_.textOverlays[selectedText_].text=text;
-    if(timeline_){preview_->requestSeek(position_,true,[timeline=timeline_.get(),texts=project_.renderedTexts()]{TextRendering::update(*timeline,texts);});}else if(preparing_)rebuild();emit projectChanged();emit stateChanged();
+    replaceTextContent(project_.textOverlays[selectedText_],text);
+    updateTextPreview();emit projectChanged();
 }
 void EditorController::beginTextDrag(int index){cancelPendingVisual();
     if(textDragBefore_||index>=project_.textOverlays.size())return;
     const auto before=state();
     if(index>=0)selectText(index);
     if(selectedText_<0)return;
-    preview_->pause(false);playWhenPrepared_=false;resumeWhenSettled_=false;endSkim();textDragBefore_=before;
+    preview_->requestPause(false);playWhenPrepared_=false;resumeWhenSettled_=false;endSkim();textDragBefore_=before;
 }
 void EditorController::dragTextTo(double x,double y){
     if(!textDragBefore_||!std::isfinite(x)||!std::isfinite(y))return;
     auto *selected=selectedTimedText(project_);if(!selected)return;auto &t=*selected;t.x=qBound(0.0,x,1.0);t.y=qBound(0.0,y,1.0);
     const QSize canvas=frame_.isNull()?QSize(960,540):frame_.size();const auto rect=TextRendering::bounds(t,canvas);
     t.x=rect.center().x()/canvas.width();t.y=rect.center().y()/canvas.height();
-    if(timeline_){preview_->requestSeek(position_,true,[timeline=timeline_.get(),texts=project_.renderedTexts()]{TextRendering::update(*timeline,texts);});}else if(preparing_)rebuild();
+    updateTextPreview();
     emit projectChanged();emit selectionChanged();
 }
 void EditorController::endTextDrag(bool cancel){
@@ -340,7 +356,7 @@ void EditorController::endTextDrag(bool cancel){
     if(sameProject(before.project,after.project)){emit stateChanged();return;}
     const bool caption=after.caption>=0;const int index=caption?after.caption:after.text;
     const auto &oldTexts=caption?before.project.captions:before.project.textOverlays;const auto &newTexts=caption?after.project.captions:after.project.textOverlays;
-    const bool edited=index>=0&&index<oldTexts.size()&&index<newTexts.size()&&oldTexts[index].text!=newTexts[index].text;
+    const bool edited=index>=0&&index<oldTexts.size()&&index<newTexts.size()&&(oldTexts[index].text!=newTexts[index].text||oldTexts[index].spans!=newTexts[index].spans);
     const QString label=caption?(edited?"Edit caption":"Move or trim caption"):(edited?"Edit text":"Move text");
     project_=before.project;selection_=before.selection;primary_=before.primary;selectedText_=before.text;selectedOverlay_=before.overlay;selectedCaption_=before.caption;captionSelection_=before.captions;
     commit(after.project,after.selection,after.primary,label,false,after.text,after.overlay,after.caption,after.captions);
@@ -497,7 +513,7 @@ void EditorController::beginScrub() {
     showProject();
     if(scrubbing_) return;
     scrubPosition_=position_; resumeAfterScrub_=playing()||resumeWhenSettled_;playWhenPrepared_=false; resumeWhenSettled_=false; scrubbing_=true; skim_=false;
-    preview_->pause(false); mediaCache_->setInteractive(true);
+    preview_->requestPause(false); mediaCache_->setInteractive(true);
 }
 void EditorController::finishScrub(bool cancel) {
     if(!scrubbing_) return; scrubbing_=false;
@@ -511,10 +527,12 @@ void EditorController::skim(int frame) {
 }
 void EditorController::endSkim() { if(!skim_) return; skim_=false; preview_->requestSeek(position_); }
 void EditorController::togglePlayback() {
-    if(sourceMode_){if(sourcePreparing_){sourcePlayWhenPrepared_=!sourcePlayWhenPrepared_;emit stateChanged();return;}if(sourcePreview_->isPlaying()){sourcePreview_->pause(false);sourcePreview_->requestSeek(sourcePosition());}else sourcePreview_->play();return;}
+    if(generatingSubtitles())return;
+    if(textPreviewTimer_.isActive()){textPreviewTimer_.stop();flushTextPreview();}
+    if(sourceMode_){if(sourcePreparing_){sourcePlayWhenPrepared_=!sourcePlayWhenPrepared_;emit stateChanged();return;}if(sourcePreview_->isPlaying()){sourcePreview_->requestPause(false);sourcePreview_->requestSeek(sourcePosition());}else sourcePreview_->requestPlay();return;}
     if(preparing_){playWhenPrepared_=!playWhenPrepared_;emit stateChanged();return;}
     if(!timeline_) return; if(scrubbing_) finishScrub(true); endSkim(); resumeWhenSettled_=false;
-    if(playing()){preview_->pause(false);preview_->requestSeek(position_);}else preview_->play();
+    if(playing()){preview_->requestPause(false);preview_->requestSeek(position_);}else preview_->requestPlay();
 }
 void EditorController::undo() { if(visualBefore_)endVisualGesture(true);if(audioPreview_)endAudioGesture(true);if(textDragBefore_)endTextDrag(true);undo_.undo();scheduleRecovery(); }
 void EditorController::redo() { if(visualBefore_)endVisualGesture(true);if(audioPreview_)endAudioGesture(true);if(textDragBefore_)endTextDrag(true);undo_.redo();scheduleRecovery(); }
@@ -700,7 +718,7 @@ void EditorController::rebuild() {
     const quint64 revision=++preparationRevision_;
     preparationPool_.clear();
     playWhenPrepared_|=preview_->isPlaying();
-    preview_->setProducer(nullptr,false);
+    textPreviewTimer_.stop();
     struct Prepared {
         QVector<std::shared_ptr<void>> leases;
         std::unique_ptr<Mlt::Profile> profile;
@@ -724,6 +742,7 @@ void EditorController::rebuild() {
     if(!renderProject.musicPath.isEmpty())retained.insert(renderProject.musicPath);
     mediaCache_->retainSources(retained.values());
     if(renderProject.clips.isEmpty()) {
+        preview_->requestProducer(nullptr,retired);
         preparing_=false;playWhenPrepared_=false;
         frame_=QImage();position_=0;previewStatus_="No media";format_="Auto resolution · 60 fps";
         proxyPaths_.clear();overlayProxyPaths_.clear();proxyCache_->setRequests({});
@@ -747,7 +766,9 @@ void EditorController::rebuild() {
     const auto budget=performanceBudget_;
     ++preparationJobs_;preparationClock_.start();
     preparing_=true;previewStatus_="Preparing preview…";emit stateChanged();
-    preparationPool_.start(QRunnable::create([this,prepared,retired,renderProject,view=std::move(view),data,desiredPosition,soloLane,soloClip,budget,revision]() mutable {
+    preview_->requestProducer(nullptr,retired,[this,prepared,retired,renderProject,view=std::move(view),data,desiredPosition,soloLane,soloClip,budget,revision](bool detached) mutable {
+        if(!detached||revision!=preparationRevision_.load())return;
+        preparationPool_.start(QRunnable::create([this,prepared,retired,renderProject,view=std::move(view),data,desiredPosition,soloLane,soloClip,budget,revision]() mutable {
         const auto canceled=[this,revision]{return revision!=preparationRevision_.load();};
         if(canceled())return;
         for(const auto &clip:renderProject.clips)prepared->identities[clip.path]=SourceTiming::fingerprint(clip.path);
@@ -798,15 +819,18 @@ void EditorController::rebuild() {
         QMetaObject::invokeMethod(this,[this,prepared,renderProject,revision]{
             if(revision!=preparationRevision_.load())return;
             for(auto it=prepared->identities.cbegin();it!=prepared->identities.cend();++it)if(SourceTiming::fingerprint(it.key())!=it.value()){rebuild();return;}
-            QScopedValueRollback<bool> guard(rebuilding_,true);preparing_=false;preparationMs_=preparationClock_.elapsed();metadataMs_=prepared->metadataMs;timelineBuildMs_=prepared->buildMs;
-            if(!prepared->timeline){playWhenPrepared_=false;report(prepared->error.isEmpty()?"Could not preview this project.":prepared->error);return;}
+            QScopedValueRollback<bool> guard(rebuilding_,true);preparationMs_=preparationClock_.elapsed();metadataMs_=prepared->metadataMs;timelineBuildMs_=prepared->buildMs;
+            if(!prepared->timeline){preparing_=false;playWhenPrepared_=false;report(prepared->error.isEmpty()?"Could not preview this project.":prepared->error);return;}
             preparedProfile_=std::move(prepared->profile);timeline_=std::move(prepared->timeline);timelineProxyLeases_=std::move(prepared->leases);
             proxyPaths_=prepared->clips;overlayProxyPaths_=prepared->overlays;
             if(prepared->fallback){
                 for(int i=0;i<renderProject.clips.size();++i){const auto &clip=renderProject.clips[i];if(proxyPaths_[i]!=clip.path)proxyCache_->discard(clip.path);proxyPaths_[i]=clip.path;}
                 for(int i=0;i<renderProject.visualOverlays.size();++i){const auto &overlay=renderProject.visualOverlays[i];if(overlayProxyPaths_[i]!=overlay.path)proxyCache_->discard(overlay.path);overlayProxyPaths_[i]=overlay.path;}
             }
-            if(!preview_->setProducer(timeline_.get(),false)){
+            preview_->requestProducer(timeline_.get(),{},[this,prepared,renderProject,revision](bool connected){
+            if(revision!=preparationRevision_.load())return;
+            preparing_=false;
+            if(!connected){
                 playWhenPrepared_=false;
                 if(prepared->proxies&&!prepared->fallback){for(const auto &clip:renderProject.clips)proxyCache_->discard(clip.path);for(const auto &overlay:renderProject.visualOverlays)proxyCache_->discard(overlay.path);rebuild();}
                 else report("Could not connect the project preview.");
@@ -819,13 +843,15 @@ void EditorController::rebuild() {
             previewStatus_=prepared->fallback?"Using original media":prepared->requests.isEmpty()?"Original media":allReady?"Smooth preview":proxyCache_->isBusy()?"Preparing smooth preview…":"Using original media";
             const int settled=qBound(0,position_,std::max(0,duration()-1));
             if(position_!=settled){position_=settled;emit positionChanged();}
-            resumeWhenSettled_=playWhenPrepared_&&!sourceMode_&&!exporting();playWhenPrepared_=false;
-            if(!sourceMode_)preview_->requestSeek(settled);mediaCache_->setInteractive(false);emit sourceMetadataChanged();emit selectionChanged();emit stateChanged();
+            resumeWhenSettled_=playWhenPrepared_&&!sourceMode_&&!exporting()&&!generatingSubtitles();playWhenPrepared_=false;
+            if(!sourceMode_)preview_->requestSeek(settled);mediaCache_->setInteractive(false);emit sourceMetadataChanged();emit stateChanged();
+            });
         },Qt::QueuedConnection);
-    }));
+        }));
+    });
 }
 void EditorController::exportDialog(bool optimizeForIphone) {
-    if(exporting()||project_.clips.isEmpty()) return;
+    if(exporting()||generatingSubtitles()||project_.clips.isEmpty()) return;
     auto p=QFileDialog::getSaveFileName(nullptr,"Export MP4 · "+exportFormat(optimizeForIphone),moviesDirectory(),"MP4 video (*.mp4)");
     if(p.isEmpty()) return; if(!p.endsWith(".mp4",Qt::CaseInsensitive)) p+=".mp4"; exportTo(p,optimizeForIphone);
 }
@@ -839,7 +865,7 @@ void EditorController::attachTimeline(QObject *object) {
 }
 
 void EditorController::refreshPendingProxy() {
-    if(!proxyPending_||exporting()||preview_->isSeeking()||scrubbing_||skim_||visualBefore_) return;
+    if(!proxyPending_||exporting()||generatingSubtitles()||preview_->isSeeking()||scrubbing_||skim_||visualBefore_) return;
     proxyPending_=false;
     const bool resume=playing()||resumeWhenSettled_;
     resumeWhenSettled_=false;
@@ -914,7 +940,7 @@ void EditorController::selectSource(int index) {cancelPendingVisual();
     finishSourceScrub(true);
     if(index<0||index>=project_.assets.size())return;
     if(textDragBefore_)endTextDrag(false);
-    preview_->pause(false);playWhenPrepared_=false;resumeWhenSettled_=false;endSkim();
+    preview_->requestPause(false);playWhenPrepared_=false;resumeWhenSettled_=false;endSkim();
     // Legacy files know the last used frame; discover the full source when it is available.
     auto &asset=project_.assets[index];const int completeFrames=qRound(sourceDuration(asset.path)*60);
     if(completeFrames>asset.durationFrames && completeFrames<=86400*60){
@@ -926,7 +952,7 @@ void EditorController::selectSource(int index) {cancelPendingVisual();
 void EditorController::rebuildSource() {
     if(sourcePreparing_)++supersededJobs_;
     const quint64 revision=++sourceRevision_;sourcePool_.clear();
-    sourcePlayWhenPrepared_|=sourcePreview_->isPlaying();sourcePreview_->setProducer(nullptr,false);sourceUsesProxy_=false;
+    sourcePlayWhenPrepared_|=sourcePreview_->isPlaying();sourceUsesProxy_=false;
     struct PreparedSource {
         std::shared_ptr<void> lease;
         std::unique_ptr<Mlt::Profile> profile;
@@ -934,14 +960,16 @@ void EditorController::rebuildSource() {
         int completeFrames=0;bool discardedProxy=false,usesProxy=false;QString identity;
     };
     auto retired=std::make_shared<PreparedSource>();retired->lease=std::move(sourceProxyLease_);retired->profile=std::move(preparedSourceProfile_);retired->producer=std::move(sourceProducer_);
-    if(!sourceMode_||selectedSource_<0||selectedSource_>=project_.assets.size()){sourcePreparing_=false;return;}
+    if(!sourceMode_||selectedSource_<0||selectedSource_>=project_.assets.size()){sourcePreparing_=false;sourcePreview_->requestProducer(nullptr,retired);return;}
     const MediaAsset asset=project_.assets[selectedSource_];
-    if(!QFileInfo::exists(asset.path)){sourcePreparing_=false;frame_=QImage();emit frameChanged();report("Source is offline. Locate its original file to preview it.");return;}
+    if(!QFileInfo::exists(asset.path)){sourcePreview_->requestProducer(nullptr,retired);sourcePreparing_=false;frame_=QImage();emit frameChanged();report("Source is offline. Locate its original file to preview it.");return;}
     const auto copy=proxyCache_->readyCopy(asset.path,0,asset.durationFrames);
     QStringList candidates;if(!copy.path.isEmpty())candidates.append(copy.path);candidates.append(asset.path);
     auto prepared=std::make_shared<PreparedSource>();prepared->lease=copy.lease;const auto budget=performanceBudget_;
     ++sourceJobs_;sourceClock_.start();sourcePreparing_=true;emit stateChanged();
-    sourcePool_.start(QRunnable::create([this,retired,prepared,asset,candidates,budget,revision]{
+    sourcePreview_->requestProducer(nullptr,retired,[this,retired,prepared,asset,candidates,budget,revision](bool detached){
+        if(!detached||revision!=sourceRevision_.load())return;
+        sourcePool_.start(QRunnable::create([this,retired,prepared,asset,candidates,budget,revision]{
         retired->producer.reset();retired->profile.reset();retired->lease.reset();
         const auto canceled=[this,revision]{return revision!=sourceRevision_.load();};if(canceled())return;
         prepared->identity=SourceTiming::fingerprint(asset.path);const auto info=Media::retryMediaInfo(asset.path);prepared->completeFrames=info?qRound(info->durationSeconds*60):0;
@@ -961,29 +989,34 @@ void EditorController::rebuildSource() {
         QMetaObject::invokeMethod(this,[this,prepared,asset,revision]{
             if(revision!=sourceRevision_.load()||!sourceMode_||selectedSource_<0||selectedSource_>=project_.assets.size()||project_.assets[selectedSource_].path!=asset.path)return;
             if(SourceTiming::fingerprint(asset.path)!=prepared->identity){rebuildSource();return;}
-            sourcePreparing_=false;sourcePreparationMs_=sourceClock_.elapsed();
+            sourcePreparationMs_=sourceClock_.elapsed();
             if(prepared->discardedProxy)proxyCache_->discard(asset.path);
-            if(!prepared->producer){sourcePlayWhenPrepared_=false;report("Could not open source preview.");return;}
+            if(!prepared->producer){sourcePreparing_=false;sourcePlayWhenPrepared_=false;report("Could not open source preview.");return;}
             auto &current=project_.assets[selectedSource_];
             if(prepared->completeFrames>current.durationFrames&&prepared->completeFrames<=86400*60){
                 if(current.inFrame==0&&current.outFrame==current.durationFrames)current.outFrame=prepared->completeFrames;
                 current.durationFrames=prepared->completeFrames;durations_[asset.path]=current.durationFrames/60.0;emit projectChanged();emit sourceChanged();
             }
             preparedSourceProfile_=std::move(prepared->profile);sourceProducer_=std::move(prepared->producer);sourceProxyLease_=std::move(prepared->lease);sourceUsesProxy_=prepared->usesProxy;
-            if(!sourcePreview_->setProducer(sourceProducer_.get(),false)){
+            sourcePreview_->requestProducer(sourceProducer_.get(),{},[this,prepared,asset,revision](bool connected){
+            if(revision!=sourceRevision_.load())return;
+            sourcePreparing_=false;
+            if(!connected){
                 sourcePlayWhenPrepared_=false;
                 if(!prepared->discardedProxy&&!proxyCache_->readyCopy(asset.path,0,asset.durationFrames).path.isEmpty()){proxyCache_->discard(asset.path);rebuildSource();}
                 else report("Could not open source preview.");
                 return;
             }
             sourcePreview_->requestSeek(sourcePosition());emit stateChanged();
+            });
         },Qt::QueuedConnection);
-    }));
+        }));
+    });
 }
 void EditorController::showProject() {
     finishSourceScrub(true);
     if(!sourceMode_)return;
-    sourceMode_=false;++sourceRevision_;sourcePool_.clear();sourcePreparing_=false;sourcePlayWhenPrepared_=false;sourcePreview_->pause(false);
+    sourceMode_=false;++sourceRevision_;sourcePool_.clear();sourcePreparing_=false;sourcePlayWhenPrepared_=false;sourcePreview_->requestPause(false);
     if(timeline_)preview_->requestSeek(position_);
     else {frame_=QImage();emit frameChanged();}
     emit sourceChanged();emit stateChanged();
@@ -994,13 +1027,13 @@ void EditorController::seekSource(int frame) {
     auto &a=project_.assets[selectedSource_];const int next=qBound(0,frame,a.durationFrames-1);
     if(sourceScrubbing_)sourceScrubFrame_=next;
     else if(next!=a.cursorFrame){a.cursorFrame=next;sourceViewDirty_=true;}
-    sourcePreview_->pause(false);if(sourceProducer_)sourcePreview_->requestSeek(next);
+    sourcePreview_->requestPause(false);if(sourceProducer_)sourcePreview_->requestSeek(next);
     emit sourceChanged();emit stateChanged();
 }
 void EditorController::stepSource(int frames){seekSource(sourcePosition()+frames);}
 void EditorController::beginSourceScrub(){
     if(sourceScrubbing_||!sourceMode_||selectedSource_<0)return;
-    sourcePreview_->pause(false);sourceScrubFrame_=sourcePosition();sourceScrubbing_=true;
+    sourcePreview_->requestPause(false);sourceScrubFrame_=sourcePosition();sourceScrubbing_=true;
 }
 void EditorController::finishSourceScrub(bool cancel){
     if(!sourceScrubbing_)return;

@@ -3,12 +3,14 @@
 #include "text_renderer.h"
 #include "text_style.h"
 #include "preview_item.h"
+#include "time_interval_index.h"
 #include <QQuickWindow>
 #include <QElapsedTimer>
 #include <QFontDatabase>
 #include <QTextLayout>
 #include <algorithm>
 #include <future>
+#include <random>
 #ifdef Q_OS_MACOS
 #include <mach/mach.h>
 #elif defined(Q_OS_LINUX)
@@ -105,6 +107,110 @@ int magentaPixels(const QImage &image){int count=0;for(int y=0;y<image.height();
 class TextOverlayTest : public QObject {
     Q_OBJECT
 private slots:
+    void intervalIndexPreservesOverlapBoundariesAndOriginalOrder() {
+        const QVector<TimeIntervalIndex::Interval> intervals{{10,20},{0,100},{20,30},{5,25},{10,10},{30,20}};
+        TimeIntervalIndex index(intervals);
+        QCOMPARE(index.at(9),QVector<int>({1,3}));QCOMPARE(index.at(10),QVector<int>({0,1,3}));
+        QCOMPARE(index.at(20),QVector<int>({1,2,3}));QCOMPARE(index.at(30),QVector<int>({1}));
+        QCOMPARE(index.query(20,21),QVector<int>({1,2,3}));QCOMPARE(index.query(30,100),QVector<int>({1}));
+        QVERIFY(index.query(10,10).isEmpty());QVERIFY(index.at(100).isEmpty());
+        QCOMPARE(index.at(10),QVector<int>({0,1,3}));
+        index.reset({{50,60}});QVERIFY(index.at(10).isEmpty());QCOMPARE(index.at(50),QVector<int>({0}));
+        index.reset({});QVERIFY(index.query(0,100).isEmpty());
+    }
+    void intervalIndexMatchesExhaustiveQueriesInEitherDirection() {
+        std::mt19937 random(1847);QVector<TimeIntervalIndex::Interval> intervals{{-100,10000}};
+        for(int i=0;i<1500;++i){const qint64 start=int(random()%1000)-100;intervals.append({start,start+int(random()%300)-5});}
+        const TimeIntervalIndex index(intervals);
+        for(int pass=0;pass<800;++pass){const qint64 start=int(random()%1300)-200,end=start+1+random()%70;QVector<int> expected,point;
+            for(int i=0;i<intervals.size();++i){const auto &interval=intervals[i];if(interval.end<=interval.start)continue;
+                if(interval.start<end&&interval.end>start)expected.append(i);if(interval.start<=start&&interval.end>start)point.append(i);}
+            QCOMPARE(index.query(start,end),expected);QCOMPARE(index.at(start),point);
+        }
+        std::vector<std::future<bool>> workers;
+        for(int worker=0;worker<4;++worker)workers.emplace_back(std::async(std::launch::async,[&index,worker]{
+            for(int frame=900-worker;frame>=-100;frame-=7){const auto active=index.at(frame);if(active.isEmpty()||active.first()!=0)return false;}return true;
+        }));
+        for(auto &worker:workers)QVERIFY(worker.get());
+    }
+    void sparseIntervalQueriesScaleWithActiveContent() {
+        const auto make=[](int count){QVector<TimeIntervalIndex::Interval> intervals;intervals.reserve(count);for(int i=0;i<count;++i)intervals.append({i*10,i*10+2});return TimeIntervalIndex(intervals);};
+        const auto small=make(64),large=make(64000);
+        const auto measure=[](const TimeIntervalIndex &index,int frame){QElapsedTimer timer;timer.start();for(int i=0;i<4000;++i)if(!index.at(frame).isEmpty())return qint64(-1);return timer.nsecsElapsed();};
+        QVector<qint64> few,many;for(int pass=0;pass<3;++pass){few.append(measure(small,325));many.append(measure(large,320005));}
+        std::sort(few.begin(),few.end());std::sort(many.begin(),many.end());QVERIFY(few[1]>0);QVERIFY(many[1]>0);
+        qInfo()<<"Sparse interval lookup ns, 64 items:"<<few[1]<<"64000 items:"<<many[1];
+        QVERIFY2(many[1]<few[1]*12,"Sparse queries must skip inactive subtrees as project size grows");
+    }
+    void inactiveTextsDoNotSlowFramePreparation() {
+        QVERIFY(!frameAt(footage(),0,160,90).isNull());
+        Mlt::Profile profile;Media::configureOutputProfile(profile,160,90);
+        const auto make=[&](int count){QVector<TextOverlay> texts;texts.reserve(count);TextOverlay text;text.text="Active cue";text.durationFrames=60;texts.append(text);
+            for(int i=1;i<count;++i){text.startFrame=1000+i*3;text.durationFrames=2;texts.append(text);}
+            auto timeline=std::make_unique<Mlt::Tractor>(profile);Mlt::Producer background(profile,"color:black");background.set("length",60);background.set_in_and_out(0,59);timeline->set_track(background,0);
+            if(!TextRendering::attach(*timeline,texts))return std::unique_ptr<Mlt::Tractor>{};return timeline;
+        };
+        auto small=make(64),large=make(256000);QVERIFY(small);QVERIFY(large);
+        const auto measure=[](Mlt::Tractor &timeline){QElapsedTimer timer;timer.start();for(int i=0;i<1000;++i){timeline.seek(10);std::unique_ptr<Mlt::Frame> frame(timeline.get_frame());if(!frame||!frame->is_valid())return qint64(-1);}return timer.nsecsElapsed();};
+        QVector<qint64> few,many;for(int pass=0;pass<3;++pass){few.append(measure(*small));many.append(measure(*large));}
+        std::sort(few.begin(),few.end());std::sort(many.begin(),many.end());QVERIFY(few[1]>0);QVERIFY(many[1]>0);
+        qInfo()<<"Text frame preparation ns, 64 cues:"<<few[1]<<"256000 cues:"<<many[1];
+        QVERIFY2(many[1]<few[1]*8,"Preparing frames must not scan all inactive text cues");
+    }
+    void queuedTextFramesRetainTheirActiveCueSnapshot() {
+        auto project=footage();TextOverlay text;text.text="Queued original";text.shadow=false;project.textOverlays={text};
+        Mlt::Profile profile;Media::configureOutputProfile(profile,640,360);auto timeline=Media::buildTimeline(project,profile);QVERIFY(timeline);
+        auto expected=frameAt(footage(),10);TextRendering::paint(expected,{text},10);
+        timeline->seek(10);std::unique_ptr<Mlt::Frame> queued(timeline->get_frame());QVERIFY(queued);
+        text.text="Edited after queue";TextRendering::update(*timeline,{text});
+        auto format=mlt_image_rgba;uint8_t *pixels=nullptr;int width=640,height=360;
+        QCOMPARE(mlt_frame_get_image(queued->get_frame(),&pixels,&format,&width,&height,0),0);QVERIFY(pixels);
+        QCOMPARE(QImage(pixels,width,height,width*4,QImage::Format_RGBA8888),expected);
+    }
+    void activeTextIndexMatchesPaintOrderAcrossBackwardSeeks() {
+        auto project=footage();project.clips[0].outSeconds=1;
+        const QVector<QPair<int,int>> intervals{{25,20},{0,60},{5,20},{20,10},{10,35}};
+        for(int i=0;i<intervals.size();++i){TextOverlay text;text.text="Same overlapping words";text.fontSize=52;text.shadow=i%2;text.fade=i%2;
+            text.startFrame=intervals[i].first;text.durationFrames=intervals[i].second;text.color=QColor::fromHsv(i*55,220,240).name();text.y=.4+i*.04;
+            project.textOverlays.append(text);
+        }
+        auto plain=project;plain.textOverlays.clear();Mlt::Profile profile;Media::configureOutputProfile(profile,640,360);auto timeline=Media::buildTimeline(project,profile);QVERIFY(timeline);
+        for(int at:{45,0,59,5,25,24,44,10,29,30}){auto expected=frameAt(plain,at);referencePaint(expected,project.textOverlays,at);
+            timeline->seek(at);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());QVERIFY(frame);auto format=mlt_image_rgba;uint8_t *pixels=nullptr;int width=640,height=360;
+            QCOMPARE(mlt_frame_get_image(frame->get_frame(),&pixels,&format,&width,&height,0),0);QVERIFY(pixels);QCOMPARE(QImage(pixels,width,height,width*4,QImage::Format_RGBA8888),expected);
+        }
+    }
+    void singleCueUpdatesRefreshAppearanceAndActivity() {
+        auto project=footage();TextOverlay text;text.text="First cue";text.startFrame=5;text.durationFrames=15;text.shadow=false;
+        auto other=text;other.text="Unchanged cue";other.startFrame=0;other.durationFrames=30;other.y=.7;project.textOverlays={text,other};
+        Mlt::Profile profile;Media::configureOutputProfile(profile,640,360);auto timeline=Media::buildTimeline(project,profile);QVERIFY(timeline);
+        QVERIFY(!TextRendering::updateOne(*timeline,-1,text));QVERIFY(!TextRendering::updateOne(*timeline,2,text));
+        const auto verify=[&](int at){auto plain=project;plain.textOverlays.clear();auto expected=frameAt(plain,at);referencePaint(expected,{text,other},at);
+            timeline->seek(at);std::unique_ptr<Mlt::Frame> frame(timeline->get_frame());QVERIFY(frame);auto format=mlt_image_rgba;uint8_t *pixels=nullptr;int width=640,height=360;
+            QCOMPARE(mlt_frame_get_image(frame->get_frame(),&pixels,&format,&width,&height,0),0);QVERIFY(pixels);QCOMPARE(QImage(pixels,width,height,width*4,QImage::Format_RGBA8888),expected);
+        };
+        text.text="Edited cue";text.color="#ff00ff";QVERIFY(TextRendering::updateOne(*timeline,0,text));verify(10);
+        text.startFrame=12;text.durationFrames=3;QVERIFY(TextRendering::updateOne(*timeline,0,text));for(int at:{14,10,15,12})verify(at);
+        text.text.clear();QVERIFY(TextRendering::updateOne(*timeline,0,text));verify(12);
+        text.text="Visible again";QVERIFY(TextRendering::updateOne(*timeline,0,text));verify(12);
+    }
+    void selectedTextColorsShapeAndInvalidateCachedLayouts() {
+        TextOverlay t;t.text=QString::fromUtf8("Hello 世界 🔥");t.fontSize=100;t.bold=false;t.shadow=false;
+        QImage plain(960,540,QImage::Format_RGBA8888);plain.fill(Qt::transparent);TextRendering::paint(plain,{t},30);
+        QVERIFY(setTextRangeFields(t,0,5,{{"color","#ff00ff"},{"bold",true}}));
+        auto styled=plain;styled.fill(Qt::transparent);TextRendering::paint(styled,{t},30);
+        QVERIFY(styled!=plain);QVERIFY(magentaPixels(styled)>100);
+        t.spans.clear();auto restored=plain;restored.fill(Qt::transparent);TextRendering::paint(restored,{t},30);QCOMPARE(restored,plain);
+        t.text="FIRST SECOND";t.animation="word-pop";t.durationFrames=120;
+        QVERIFY(setTextRangeFields(t,6,12,{{"color","#ff00ff"}}));
+        styled.fill(Qt::transparent);TextRendering::paint(styled,{t},90);QVERIFY(magentaPixels(styled)>100);
+        styled.fill(Qt::transparent);TextRendering::paint(styled,{t},15);QCOMPARE(magentaPixels(styled),0);
+        t.text=QString::fromUtf8("ß hi");t.spans.clear();t.animation="none";t.uppercase=true;
+        QVERIFY(setTextRangeFields(t,2,4,{{"color","#ff00ff"},{"bold",true}}));
+        styled.fill(Qt::transparent);TextRendering::paint(styled,{t},30);
+        t.text="SS HI";t.uppercase=false;t.spans.clear();QVERIFY(setTextRangeFields(t,3,5,{{"color","#ff00ff"},{"bold",true}}));
+        auto expanded=styled;expanded.fill(Qt::transparent);TextRendering::paint(expanded,{t},30);QCOMPARE(styled,expanded);
+    }
     void presetsAreCompleteAndEditsAreIndependent() {
         TextOverlay t;t.text="Keep my words";t.startFrame=12;t.durationFrames=90;t.x=.23;t.y=.71;
         QString error;

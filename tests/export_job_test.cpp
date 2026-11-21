@@ -14,6 +14,7 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <cstdio>
+#include <csignal>
 #include <cstdlib>
 
 class ExportJobTest : public QObject {
@@ -43,6 +44,10 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));QVERIFY(!done[0][1].toBool());
         auto info=Media::mediaInfo(dir.filePath("video.mp4"));QVERIFY(info);QCOMPARE(qRound(info->durationSeconds*60),120);QVERIFY(!progress.isEmpty());QCOMPARE(progress.last()[0].toInt(),100);
         QVERIFY(contents(job.logPath()).contains("Encoder:"));QVERIFY(contents(job.logPath()).contains("Completed"));
+        if(qEnvironmentVariableIntValue("ISAAC_DISABLE_HARDWARE_ENCODING")==1){
+            QVERIFY(contents(job.logPath()).contains("Encoder: libx264"));
+            QVERIFY(!contents(job.logPath()).contains("Hardware probe:"));
+        }
         QCOMPARE(QDir(dir.path()).entryList(QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
     }
     void actualApplicationWorkerPreservesBundledFont() {
@@ -56,6 +61,10 @@ private slots:
         };
         const auto expected=frame(p);QVERIFY(!expected.isNull());QTemporaryDir dir;const auto output=dir.filePath("font.mp4");ExportJob job(exportWorkerExecutable());QSignalSpy done(&job,&ExportJob::finished);QString error;
         QVERIFY(job.start(p,output,&error));QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));
+        if(qEnvironmentVariableIntValue("ISAAC_DISABLE_HARDWARE_ENCODING")==1){
+            QVERIFY(contents(job.logPath()).contains("Encoder: libx264"));
+            QVERIFY(!contents(job.logPath()).contains("Hardware probe:"));
+        }
         Project encoded;encoded.clips={{output,0,2}};const auto actual=frame(encoded);QCOMPARE(actual.size(),expected.size());
         int shared=0,total=0;const auto magenta=[](QColor c){return c.red()>160&&c.blue()>150&&c.green()<110;};
         for(int y=0;y<expected.height();++y)for(int x=0;x<expected.width();++x){const bool a=magenta(actual.pixelColor(x,y)),b=magenta(expected.pixelColor(x,y));shared+=a&&b;total+=a||b;}
@@ -84,9 +93,12 @@ private slots:
         QVERIFY(job.start(sample(),output,&error));QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY(done[0][0].toBool());QVERIFY(!done[0][1].toBool());QVERIFY(Media::mediaInfo(output).has_value());
     }
     void hardwareProbeUsesTheMltRuntime() {
+        if(qEnvironmentVariableIntValue("ISAAC_RUN_HARDWARE_TESTS")!=1)QSKIP("Set ISAAC_RUN_HARDWARE_TESTS=1 to exercise the real hardware encoder; drivers may crash.");
 #ifndef Q_OS_UNIX
         QSKIP("The test command wrapper needs a POSIX shell");
 #else
+        const auto previousHardware=qgetenv("ISAAC_DISABLE_HARDWARE_ENCODING");qputenv("ISAAC_DISABLE_HARDWARE_ENCODING","0");
+        const auto restoreHardware=qScopeGuard([&]{if(previousHardware.isNull())qunsetenv("ISAAC_DISABLE_HARDWARE_ENCODING");else qputenv("ISAAC_DISABLE_HARDWARE_ENCODING",previousHardware);});
         QTemporaryDir dir;const auto tools=dir.filePath("tools");QVERIFY(QDir().mkpath(tools));QFile probe(tools+"/ffmpeg");QVERIFY(probe.open(QIODevice::WriteOnly));probe.write("#!/bin/sh\nprintf 'external ffmpeg was called\n' > \"$ISAAC_TEST_FFMPEG_MARKER\"\nexit 7\n");probe.close();QVERIFY(probe.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner|QFileDevice::ExeOwner));
         const auto previous=qgetenv("PATH"),previousMarker=qgetenv("ISAAC_TEST_FFMPEG_MARKER");qputenv("PATH",QFile::encodeName(tools)+':'+previous);qputenv("ISAAC_TEST_FFMPEG_MARKER",QFile::encodeName(dir.filePath("external-probe")));const auto restore=qScopeGuard([&]{qputenv("PATH",previous);qputenv("ISAAC_TEST_FFMPEG_MARKER",previousMarker);});
         ExportJob job(QCoreApplication::applicationFilePath());QSignalSpy done(&job,&ExportJob::finished);QString error;const auto output=dir.filePath("runtime.mp4");QVERIFY(job.start(sample(),output,&error));
@@ -173,7 +185,13 @@ int main(int argc,char **argv){
         }
         if(mode.startsWith("crash-")&&(!args.contains("--software")||mode=="crash-both")){
             const auto message=args.contains("--software")?"Encoder: libx264":mode=="crash-hardware"?"Encoder: h264_videotoolbox":mode=="crash-nvenc-probe"?"Hardware probe: h264_nvenc":"Encoder: h264_nvenc";
-            const auto event=QJsonDocument(QJsonObject{{"event","diagnostic"},{"message",message}}).toJson(QJsonDocument::Compact)+'\n';fwrite(event.constData(),1,event.size(),stdout);fflush(stdout);std::abort();
+            const auto event=QJsonDocument(QJsonObject{{"event","diagnostic"},{"message",message}}).toJson(QJsonDocument::Compact)+'\n';fwrite(event.constData(),1,event.size(),stdout);fflush(stdout);
+#ifdef Q_OS_UNIX
+            // Preserve CrashExit without opening the macOS crash reporter for an expected failure.
+            std::raise(SIGKILL);
+#else
+            std::abort();
+#endif
         }
         if(mode=="missing"||mode=="malformed"||mode=="flood"){
             QFile staged(args.value(3));if(!staged.open(QIODevice::WriteOnly))return 3;staged.write("INVALID VIDEO");staged.close();

@@ -1,4 +1,5 @@
 #include "visual_renderer.h"
+#include "time_interval_index.h"
 #include <QPainter>
 #include <QImageReader>
 #include <QFile>
@@ -34,8 +35,13 @@ struct OverlaySource {VisualOverlay overlay;int index=0,start=0,frames=0;bool vi
 constexpr auto errorKey="isaac.visual.error";
 struct RenderError {QMutex mutex;QString message;};
 void recordError(const std::shared_ptr<RenderError> &error,const QString &message){QMutexLocker lock(&error->mutex);if(error->message.isEmpty())error->message=message;}
-struct OverlayState {QMutex mutex;std::vector<OverlaySource> sources;std::shared_ptr<RenderError> error=std::make_shared<RenderError>();};
+struct OverlayState {QMutex mutex;std::vector<OverlaySource> sources;TimeIntervalIndex index;QVector<int> active;std::shared_ptr<RenderError> error=std::make_shared<RenderError>();};
 struct OverlayFrame {int position=0;std::vector<OverlaySource> sources;std::shared_ptr<RenderError> error;};
+void indexOverlays(OverlayState &state) {
+    QVector<TimeIntervalIndex::Interval> intervals;intervals.reserve(state.sources.size());
+    for(const auto &source:state.sources)intervals.append(source.visible?TimeIntervalIndex::Interval{source.start,qint64(source.start)+source.frames}:TimeIntervalIndex::Interval{});
+    state.index.reset(intervals);
+}
 struct StillKey {
     QString path;qint64 size=0,modified=0;
     bool operator==(const StillKey &other) const {return path==other.path&&size==other.size&&modified==other.modified;}
@@ -114,14 +120,18 @@ mlt_frame overlayProcess(mlt_filter filter,mlt_frame frame) {
     auto *state=static_cast<OverlayState*>(mlt_properties_get_data(MLT_FILTER_PROPERTIES(filter),overlayKey,nullptr));
     const int position=mlt_filter_get_position(filter,frame);
     OverlayFrame snapshot;snapshot.position=position;snapshot.error=state->error;
-    {QMutexLocker lock(&state->mutex);for(auto &source:state->sources){
-        if(!source.visible||position<source.start||position>=source.start+source.frames){source.still.reset();continue;}
-        if(!source.decoder&&source.offline.isNull()){
-            const auto key=stillKey(source.overlay.path);
-            if(!source.still||!(source.still->key==key))source.still=activeStill(key);
+    {QMutexLocker lock(&state->mutex);auto active=state->index.at(position);
+        for(int previous:state->active)if(!std::binary_search(active.cbegin(),active.cend(),previous))state->sources[previous].still.reset();
+        snapshot.sources.reserve(active.size());
+        for(int index:active){auto &source=state->sources[index];
+            if(!source.decoder&&source.offline.isNull()){
+                const auto key=stillKey(source.overlay.path);
+                if(!source.still||!(source.still->key==key))source.still=activeStill(key);
+            }
+            snapshot.sources.push_back(source);
         }
-        snapshot.sources.push_back(source);
-    }}
+        state->active=std::move(active);
+    }
     if(snapshot.sources.empty())return frame;
     auto *data=new OverlayFrame(std::move(snapshot));
     mlt_properties_set_data(MLT_FRAME_PROPERTIES(frame),"isaac.visual.frame",data,0,[](void *p){delete static_cast<OverlayFrame*>(p);},nullptr);
@@ -179,6 +189,7 @@ bool attachOverlays(Mlt::Tractor &timeline,Mlt::Profile &profile,const Project &
         }
         state->sources.push_back(std::move(s));
     }
+    indexOverlays(*state);
     auto filter=mlt_filter_new();if(!filter)return false;
     auto *data=state.get();
     mlt_properties_set_data(MLT_FILTER_PROPERTIES(filter),overlayKey,state.release(),0,[](void *p){delete static_cast<OverlayState*>(p);},nullptr);filter->process=overlayProcess;
@@ -202,6 +213,7 @@ void update(Mlt::Tractor &timeline,const Project &project) {
             source.overlay.sourceInFrame=next.sourceInFrame-source.overlay.sourceFrameOffset;
             source.start=project.overlayStartFrame(source.index);source.frames=project.overlayFrames(source.index);
         }
+        indexOverlays(*state.overlays);
     }
 }
 }

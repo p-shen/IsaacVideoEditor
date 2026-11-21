@@ -12,29 +12,26 @@
 #include <algorithm>
 
 QVariantList EditorController::captions() const {
-    QVector<int> order;for(int i=0;i<project_.captions.size();++i)order.append(i);
-    std::stable_sort(order.begin(),order.end(),[&](int a,int b){return project_.textStartFrame(a,true)<project_.textStartFrame(b,true);});
-    QVector<bool> overlaps(order.size(),false);int farthest=-1,end=-1;
-    for(int i:order){const int start=project_.textStartFrame(i,true),last=start+project_.captions[i].durationFrames;
-        if(start<end){overlaps[i]=true;if(farthest>=0)overlaps[farthest]=true;}
-        if(last>end){farthest=i;end=last;}
-    }
-    QVariantList result;for(int i=0;i<project_.captions.size();++i){auto item=timedTextInfo(project_,i,true);item.insert("overlap",overlaps[i]);result.append(item);}return result;
+    return captionModel_->records();
 }
 QVariantMap EditorController::currentCaption() const {return timedTextInfo(project_,selectedCaption_,true);}
 QStringList EditorController::captionWarnings() const {
-    bool review=false,overlap=false,clamp=false;
-    for(const auto &value:captions()){const auto cue=value.toMap();review|=cue["timingNeedsReview"].toBool();overlap|=cue["overlap"].toBool();clamp|=cue["clamped"].toBool();}
-    QStringList messages;
-    if(review)messages.append("Timing needs review — Project-time captions were retained.");
-    if(overlap)messages.append("Caption intervals overlap; all text is retained.");
-    if(clamp)messages.append("Past project end: video is clamped; SRT retains timing.");
-    return messages;
+    return captionModel_->warnings();
 }
 void EditorController::updateTextPreview(){
-    if(timeline_)preview_->requestSeek(position_,true,[timeline=timeline_.get(),texts=project_.renderedTexts()]{TextRendering::update(*timeline,texts);});
-    else if(preparing_)rebuild();
+    if(selectedCaption_>=0)captionModel_->updateCaption(project_,selectedCaption_);
+    if(!textPreviewTimer_.isActive())textPreviewTimer_.start();
     emit stateChanged();
+}
+void EditorController::flushTextPreview(){
+    const bool caption=selectedCaption_>=0;const int index=caption?selectedCaption_:selectedText_;
+    const auto &texts=caption?project_.captions:project_.textOverlays;
+    if(index<0||index>=texts.size()||(caption&&!project_.burnCaptions))return;
+    if(!timeline_){if(preparing_)rebuild();return;}
+    auto text=texts[index];text.startFrame=project_.textStartFrame(index,caption);
+    if(caption||!text.hostId.isEmpty())text.durationFrames=std::clamp(duration()-text.startFrame,0,text.durationFrames);
+    const int renderIndex=caption?project_.textOverlays.size()+index:index;
+    preview_->requestSeek(position_,true,[timeline=timeline_.get(),renderIndex,text]{TextRendering::updateOne(*timeline,renderIndex,text);},renderIndex);
 }
 TextOverlay *EditorController::selectedTimedText(Project &project) const {
     if(selectedCaption_>=0&&selectedCaption_<project.captions.size())return &project.captions[selectedCaption_];
@@ -89,20 +86,22 @@ void EditorController::selectCaption(int index,int modifiers){
 }
 void EditorController::navigateCaption(int direction){
     QVector<int> order;for(int i=0;i<project_.captions.size();++i)order.append(i);if(order.isEmpty())return;
-    std::stable_sort(order.begin(),order.end(),[&](int a,int b){return project_.textStartFrame(a,true)<project_.textStartFrame(b,true);});
+    const auto timing=project_.textTiming();
+    std::stable_sort(order.begin(),order.end(),[&](int a,int b){return timing.captionStarts[a]<timing.captionStarts[b];});
     const int current=order.indexOf(selectedCaption_);const int next=current<0?(direction<0?order.size()-1:0):std::clamp(current+(direction<0?-1:1),0,int(order.size()-1));selectCaption(order[next]);
 }
 void EditorController::previewCaption(){
-    if(selectedCaption_<0)return;preview_->pause();seek(project_.textStartFrame(selectedCaption_,true));
+    if(selectedCaption_<0)return;preview_->requestPause();seek(project_.textStartFrame(selectedCaption_,true));
 }
 void EditorController::beginCaptionEdit(int index,int modifiers){
     cancelPendingVisual();if(index<0||index>=project_.captions.size())return;if(audioPreview_)endAudioGesture(false);if(textDragBefore_)endTextDrag(false);
-    const auto before=state();selectCaption(index,modifiers);preview_->pause();resumeWhenSettled_=false;endSkim();textDragBefore_=before;
+    const auto before=state();selectCaption(index,modifiers);preview_->requestPause();resumeWhenSettled_=false;endSkim();textDragBefore_=before;
 }
 void EditorController::previewCaptionContent(const QString &text){
     if(!textDragBefore_&&selectedCaption_>=0)beginCaptionEdit(selectedCaption_);
     if(!textDragBefore_||selectedCaption_<0||selectedCaption_>=project_.captions.size()||text.size()>2000)return;
-    project_.captions[selectedCaption_].text=text;updateTextPreview();
+    const bool formatted=!project_.captions[selectedCaption_].spans.isEmpty();
+    replaceTextContent(project_.captions[selectedCaption_],text);updateTextPreview();if(formatted)emit selectionChanged();
 }
 void EditorController::setCaptionTiming(int index,int start,int frames){
     cancelPendingVisual();if(index<0||index>=project_.captions.size()||start<0||frames<1||qint64(start)+frames>86400*60)return;
@@ -122,6 +121,24 @@ void EditorController::styleCaptions(const QVariantMap &fields,bool all){
     commit(next,{},-1,all?"Apply caption style to all":"Style selected captions",false,-1,-1,selectedCaption_,captionSelection_);
 }
 void EditorController::chooseCaptionColor(){if(selectedCaption_<0)return;const auto color=QColorDialog::getColor(QColor(project_.captions[selectedCaption_].color),nullptr,"Caption color");if(color.isValid())styleCaptions({{"color",color.name()}});}
+QVariantMap EditorController::captionTextStyle(int start,int end) const {
+    if(selectedCaption_<0||selectedCaption_>=project_.captions.size())return {};
+    return textRangeFields(project_.captions[selectedCaption_],start,end);
+}
+void EditorController::styleCaptionText(int start,int end,const QVariantMap &fields,bool editing) {
+    cancelPendingVisual();if(selectedCaption_<0||selectedCaption_>=project_.captions.size())return;
+    auto next=project_;QString error;
+    if(!setTextRangeFields(next.captions[selectedCaption_],start,end,fields,&error)){report(error);return;}
+    if(editing&&!textDragBefore_)beginCaptionEdit(selectedCaption_);
+    if(textDragBefore_){project_=next;updateTextPreview();emit selectionChanged();}
+    else commit(next,{},-1,"Format caption text",false,-1,-1,selectedCaption_,captionSelection_);
+}
+void EditorController::chooseCaptionTextColor(int start,int end,bool editing) {
+    const auto fields=captionTextStyle(start,end);if(fields.isEmpty())return;
+    const int index=selectedCaption_;const auto before=project_.captions[index];
+    const auto color=QColorDialog::getColor(QColor(fields["color"].toString().isEmpty()?before.color:fields["color"].toString()),nullptr,"Selected caption text color");
+    if(color.isValid()&&selectedCaption_==index&&index<project_.captions.size()&&project_.captions[index]==before)styleCaptionText(start,end,{{"color",color.name()}},editing);
+}
 void EditorController::setBurnCaptions(bool enabled){cancelPendingVisual();if(textDragBefore_)endTextDrag(false);auto next=project_;next.burnCaptions=enabled;commit(next,selection_,primary_,"Change caption burn option");}
 void EditorController::reviewCaptions(){cancelPendingVisual();if(textDragBefore_)endTextDrag(false);auto next=project_;for(auto &cue:next.captions)cue.timingNeedsReview=false;commit(next,selection_,primary_,"Mark caption timing reviewed");}
 void EditorController::attachTimedText(bool caption,int hostIndex){

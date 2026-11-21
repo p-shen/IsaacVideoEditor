@@ -2,6 +2,7 @@
 
 namespace Media {
 QString hardwareH264Encoder() {
+    if (qEnvironmentVariableIntValue("ISAAC_DISABLE_HARDWARE_ENCODING") == 1) return {};
 #ifdef Q_OS_MACOS
     return QStringLiteral("h264_videotoolbox");
 #elif defined(Q_OS_WIN) || defined(Q_OS_LINUX)

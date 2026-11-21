@@ -13,6 +13,15 @@ ColumnLayout {
         return controller.filteredAssets(search.text,["all","video","audio"][kind.currentIndex],["all","used","unused"][usage.currentIndex])
     }
     function focusList() { mediaList.forceActiveFocus() }
+    component BrowserAction: UI.Button {
+        id: action
+        width: Math.min(implicitWidth,browser.width - 12)
+        contentItem: Text {
+            text: action.text; font: action.font; color: action.foreground
+            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+            wrapMode: Text.WordWrap
+        }
+    }
     UI.TextField {
         id: search; objectName: "mediaSearch"
         Layout.fillWidth: true; Layout.margins: 6
@@ -81,8 +90,8 @@ ColumnLayout {
     }
     Flow {
         Layout.fillWidth: true; Layout.margins: 6; spacing: 3
-        UI.Button { text: "Import"; onClicked: controller.importDialog() }
-        UI.Button { text: "Remove source"; enabled: controller.selectedSource >= 0; onClicked: controller.confirmRemoveSource(controller.selectedSource) }
-        UI.Button { text: "Import and append…"; onClicked: controller.importAndAppendDialog() }
+        BrowserAction { text: "Import"; onClicked: controller.importDialog() }
+        BrowserAction { text: "Remove source"; enabled: controller.selectedSource >= 0; onClicked: controller.confirmRemoveSource(controller.selectedSource) }
+        BrowserAction { text: "Import and append…"; onClicked: controller.importAndAppendDialog() }
     }
 }

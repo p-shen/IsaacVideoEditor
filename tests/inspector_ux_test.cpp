@@ -52,6 +52,14 @@ class InspectorUxTest : public QObject {
         return nullptr;
     }
 private slots:
+    void previewPreparationPreservesCompactInspector() {
+        EditorController editor;QQmlApplicationEngine engine;auto *window=load(engine,editor);QVERIFY(window);
+        window->resize(760,560);QTRY_VERIFY(window->property("compact").toBool());
+        QVERIFY(editor.importFiles({fixture()}));QVERIFY(section(window,0));
+        QCOMPARE(window->property("browserSection").toInt(),2);
+        QTRY_VERIFY_WITH_TIMEOUT(!editor.loading()&&!editor.frame().isNull(),10000);
+        QCOMPARE(window->property("browserSection").toInt(),2);
+    }
     void initTestCase() {
         qputenv("SDL_AUDIODRIVER","dummy"); Media::initializeMlt(); QQuickStyle::setStyle("Basic");
         applyAppTheme(*qobject_cast<QApplication*>(qApp)); registerEditorQmlTypes();

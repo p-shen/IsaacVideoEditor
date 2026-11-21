@@ -33,6 +33,7 @@ Preview::Preview(Mlt::Profile &profile, QObject *parent, const Performance::Budg
     , budget_(budget)
     , consumer_(std::make_unique<Mlt::Consumer>(profile, "sdl2_audio"))
 {
+    qualityLimit_ = QSize(budget.previewWidth, budget.previewHeight);
     refreshCacheBudget();
     if (!consumer_->is_valid()) {
         return;
@@ -57,12 +58,16 @@ Preview::~Preview()
         seekWorker_.join();
     }
     stopConsumer();
+    if (consumer_ && consumer_->is_valid()) consumer_->disconnect_all_producers();
+    producer_ = nullptr;
+    producerLifetime_.reset();
     stoppedEvent_.reset();
     frameEvent_.reset();
 }
 
 bool Preview::setProducer(Mlt::Producer *producer, bool renderInitialStill)
 {
+    ++producerTicket_;
     quiesceSeek(true);
     stopConsumer();
     invalidateFrames();
@@ -70,40 +75,51 @@ bool Preview::setProducer(Mlt::Producer *producer, bool renderInitialStill)
     if (playing_.exchange(false)) {
         emit playbackChanged(false);
     }
-    producer_ = nullptr;
-    producerLength_ = 0;
-    if (consumer_ && consumer_->is_valid()) {
-        consumer_->disconnect_all_producers();
-    }
     position_ = 0;
-    if (!producer) {
-        return true;
+    QString error;
+    const bool connected = connectProducer(producer, error);
+    producerLength_ = connected && producer ? producer->get_playtime() : 0;
+    producerLifetime_.reset();
+    {
+        const std::lock_guard<std::mutex> lock(seekMutex_);
+        retiringLifetime_.reset();
     }
+    hasProducer_ = connected && producer;
+    if (!connected) { emit errorOccurred(error); return false; }
+    if (producer && renderInitialStill && !renderStill()) {
+        producer_ = nullptr;
+        hasProducer_ = false;
+        return false;
+    }
+    return true;
+}
+
+bool Preview::connectProducer(Mlt::Producer *producer, QString &error)
+{
+    producer_ = nullptr;
+    sourcePaths_.clear();
+    if (consumer_ && consumer_->is_valid()) consumer_->disconnect_all_producers();
+    if (!producer) return true;
     if (!consumer_ || !consumer_->is_valid()) {
-        emit errorOccurred(tr("Audio preview could not start (MLT sdl2_audio is unavailable)."));
+        error = tr("Audio preview could not start (MLT sdl2_audio is unavailable).");
         return false;
     }
     if (!producer->is_valid()) {
-        emit errorOccurred(tr("Could not connect the timeline to the preview."));
+        error = tr("Could not connect the timeline to the preview.");
         return false;
     }
     const auto profile = producer->get_profile();
     if (!profile || profile->width <= 0 || profile->height <= 0) {
-        emit errorOccurred(tr("The preview video profile is invalid."));
+        error = tr("The preview video profile is invalid.");
         return false;
     }
     updateRenderProfile(profile);
     if (consumer_->connect(*producer) != 0) {
-        emit errorOccurred(tr("Could not connect the timeline to the preview."));
+        error = tr("Could not connect the timeline to the preview.");
         return false;
     }
     producer_ = producer;
     sourcePaths_=Media::sourceFiles(*producer);
-    producerLength_ = producer->get_playtime();
-    if (renderInitialStill && !renderStill()) {
-        producer_ = nullptr;
-        return false;
-    }
     return true;
 }
 
@@ -137,10 +153,12 @@ void Preview::updateRenderProfile(mlt_profile profile)
 
 void Preview::play()
 {
+    if (playing_ && consumerGeneration_ == generation_.load()) return;
     quiesceSeek();
-    if (!producer_ || playing_) {
+    if (!producer_) {
         return;
     }
+    haltConsumer();
     if (producer_->get_playtime() > 0 && position_ >= producer_->get_playtime() - 1) {
         position_ = 0;
     }
@@ -148,6 +166,7 @@ void Preview::play()
     producer_->seek(position_);
     producer_->set_speed(1.0);
     playing_ = true;
+    consumerGeneration_ = generation_.load();
     if (consumer_->start() != 0) {
         playing_ = false;
         emit errorOccurred(tr("Could not start video and audio preview."));
@@ -185,18 +204,74 @@ void Preview::seek(int frame)
     }
 }
 
-void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> edit)
+void Preview::startSeekWorker()
 {
-    if (!producer_) {
+    if (!seekWorker_.joinable()) seekWorker_ = std::thread(&Preview::seekLoop, this);
+}
+
+quint64 Preview::requestProducer(Mlt::Producer *producer, std::shared_ptr<void> lifetime,
+                                std::function<void(bool)> settled)
+{
+    cancelPendingSeek();
+    invalidateFrames();
+    const bool wasPlaying = playing_.exchange(false);
+    hasProducer_ = producer != nullptr;
+    producerLength_ = producer ? producer->get_playtime() : 0;
+    position_ = 0;
+    const auto ticket = ++producerTicket_;
+    std::function<void(bool)> superseded;
+    {
+        const std::lock_guard<std::mutex> lock(seekMutex_);
+        if (pendingProducer_) superseded = std::move(pendingProducer_->settled);
+        // A controller can transfer a previously borrowed producer into this
+        // token on detach. Keep the first token until native disconnect ends.
+        if (!producer && lifetime && !retiringLifetime_) retiringLifetime_ = lifetime;
+        pendingProducer_ = ProducerRequest{producer, std::move(lifetime), std::move(settled), ticket};
+        pendingTransport_.reset();
+        startSeekWorker();
+    }
+    seekWake_.notify_one();
+    if (wasPlaying) emit playbackChanged(false);
+    if (superseded) QMetaObject::invokeMethod(this, [callback = std::move(superseded)] {
+        callback(false);
+    }, Qt::QueuedConnection);
+    return ticket;
+}
+
+void Preview::requestPlay() { requestTransport(true, false); }
+
+void Preview::requestPause(bool renderPausedStill) { requestTransport(false, renderPausedStill); }
+
+void Preview::requestTransport(bool play, bool renderPausedStill)
+{
+    if (!hasProducer_ && play) return;
+    const auto generation = generation_.fetch_add(1) + 1;
+    const bool wasPlaying = playing_.exchange(play && hasProducer_);
+    resumeAfterSeek_ = false;
+    if (play && producerLength_ > 0 && position_ >= producerLength_ - 1) position_ = 0;
+    {
+        const std::lock_guard<std::mutex> lock(seekMutex_);
+        pendingSeek_.reset();
+        prefetch_.clear();
+        pendingTransport_ = TransportRequest{play, position_, generation};
+        startSeekWorker();
+    }
+    seekWake_.notify_one();
+    if (seeking_) { seeking_ = false; emit seekingChanged(false); }
+    if (wasPlaying != playing_.load()) emit playbackChanged(playing_);
+    if (!play && renderPausedStill && hasProducer_) requestSeek(position_);
+}
+
+void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> edit, int editKey)
+{
+    if (!hasProducer_) {
         return;
     }
     refreshCacheBudget();
     if(edit)invalidateFrames();
     const bool wasPlaying = playing_.exchange(false);
     resumeAfterSeek_ = resumeAfterSeek_ || wasPlaying;
-    // The consumer must release the producer before the still worker uses it.
-    stopConsumer();
-    const auto generation = generation_.load();
+    const auto generation = generation_.fetch_add(1) + 1;
     frame = std::clamp(frame, 0, std::max(0, producerLength_ - 1));
     if(lastRequestedFrame_>=0 && frame!=lastRequestedFrame_)seekDirection_=frame>lastRequestedFrame_?1:-1;
     lastRequestedFrame_=frame;
@@ -206,12 +281,14 @@ void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> 
     {
         const std::lock_guard<std::mutex> lock(seekMutex_);
         // A newer seek still needs the latest edit that has not reached the worker.
-        if (edit) pendingEdit_ = std::move(edit);
+        if (edit) {
+            if (editKey >= 0) pendingKeyedEdits_[editKey] = std::move(edit);
+            else { pendingEdit_ = std::move(edit); pendingKeyedEdits_.clear(); }
+        }
+        pendingTransport_.reset();
         prefetch_.clear();
         pendingSeek_ = SeekRequest{frame, position_, commitPosition, generation, frameRevision(),false,seekDirection_};
-        if (!seekWorker_.joinable()) {
-            seekWorker_ = std::thread(&Preview::seekLoop, this);
-        }
+        startSeekWorker();
     }
     seekWake_.notify_one();
     const bool wasSeeking = seeking_;
@@ -229,13 +306,19 @@ void Preview::requestSeek(int frame, bool commitPosition, std::function<void()> 
 
 void Preview::cancelPendingSeek()
 {
-    generation_.fetch_add(1);
+    const auto generation = generation_.fetch_add(1) + 1;
     {
         const std::lock_guard<std::mutex> lock(seekMutex_);
         pendingSeek_.reset();
         prefetch_.clear();
         pendingEdit_ = {};
+        pendingKeyedEdits_.clear();
+        if (seeking_ && !playing_) {
+            pendingTransport_ = TransportRequest{false, position_, generation};
+            startSeekWorker();
+        }
     }
+    seekWake_.notify_one();
     resumeAfterSeek_ = false;
     if (seeking_) {
         seeking_ = false;
@@ -248,88 +331,154 @@ void Preview::quiesceSeek(bool discardEdit)
     std::function<void()> edit;
     {
         const std::lock_guard<std::mutex> lock(seekMutex_);
-        if(!discardEdit)edit=std::move(pendingEdit_);
+        if(!discardEdit)edit=takePendingEdits();
+        pendingTransport_.reset();
     }
     cancelPendingSeek();
     std::unique_lock<std::mutex> lock(seekMutex_);
-    seekWake_.wait(lock, [this] { return !seekBusy_; });
+    pendingTransport_.reset();
+    seekWake_.wait(lock, [this] { return !seekBusy_ && !pendingProducer_ && !pendingQuality_; });
     lock.unlock();
     // Apply filter settings only after the worker releases the producer.
-    if(edit)edit();
+    if(edit) { haltConsumer(); edit(); }
+}
+
+std::function<void()> Preview::takePendingEdits()
+{
+    auto full = std::move(pendingEdit_);
+    auto keyed = std::move(pendingKeyedEdits_);
+    pendingKeyedEdits_.clear();
+    if (!full && keyed.empty()) return {};
+    return [full = std::move(full), keyed = std::move(keyed)] {
+        if (full) full();
+        for (const auto &entry : keyed) entry.second();
+    };
 }
 
 void Preview::seekLoop()
 {
     for (;;) {
-        SeekRequest request;
+        std::optional<ProducerRequest> handoff;
+        std::optional<TransportRequest> transport;
+        std::optional<QSize> quality;
+        std::optional<SeekRequest> seek;
+        std::shared_ptr<void> retiring;
         {
             std::unique_lock<std::mutex> lock(seekMutex_);
-            seekWake_.wait(lock, [this] { return stopSeekWorker_ || pendingSeek_.has_value() || !prefetch_.empty(); });
-            if (stopSeekWorker_) {
-                return;
+            seekWake_.wait(lock, [this] {
+                return stopSeekWorker_ || pendingProducer_ || pendingTransport_ || pendingQuality_ || pendingSeek_ || !prefetch_.empty();
+            });
+            if (stopSeekWorker_) return;
+            if (pendingProducer_) {
+                handoff = std::move(pendingProducer_); pendingProducer_.reset();
+                retiring = std::move(retiringLifetime_);
             }
-            if(pendingSeek_){request=*pendingSeek_;pendingSeek_.reset();}
-            else {request=prefetch_.front();prefetch_.pop_front();}
+            else if (pendingQuality_) { quality = pendingQuality_; pendingQuality_.reset(); }
+            else if (pendingTransport_) { transport = pendingTransport_; pendingTransport_.reset(); }
+            else if (pendingSeek_) { seek = pendingSeek_; pendingSeek_.reset(); }
+            else { seek = prefetch_.front(); prefetch_.pop_front(); }
             seekBusy_ = true;
         }
-        QImage image;
-        QString decodeError;
-        if (request.generation == generation_.load()) {
-            std::function<void()> edit;
-            {
-                const std::lock_guard<std::mutex> lock(seekMutex_);
-                if(request.generation==generation_.load())edit=std::move(pendingEdit_);
-            }
-            if (edit) edit();
-            const auto revision=request.prefetch?request.frameRevision:refreshSourceIdentity(request.frameRevision);
-            request.frameRevision=revision;
-            image=cachedFrame(request.frame,revision);
-            if(image.isNull()){
-                const auto decodeStarted=std::chrono::steady_clock::now();
-                producer_->seek(request.frame);
-                std::unique_ptr<Mlt::Frame> frame(producer_->get_frame());
-                if (frame && frame->is_valid()) {
-                    image = imageFromFrame(frame->get_frame(), renderWidth_, renderHeight_);
+        if (handoff) {
+            haltConsumer();
+            QString error;
+            const bool connected = connectProducer(handoff->producer, error);
+            // Native callbacks and frame decoding have finished before owners
+            // release profiles, producers, filters, and preview-copy leases.
+            producerLifetime_ = connected && handoff->producer ? std::move(handoff->lifetime) : nullptr;
+            retiring.reset();
+            const auto ticket = handoff->ticket;
+            QMetaObject::invokeMethod(this, [this, ticket, connected, error, callback = std::move(handoff->settled)] {
+                const bool current = ticket == producerTicket_.load();
+                if (current && !connected) {
+                    hasProducer_ = false;
+                    cancelPendingSeek();
+                    requestPause(false);
+                    emit errorOccurred(error);
                 }
-                decodeMicros_+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-decodeStarted).count();
-                if(request.prefetch&&!image.isNull())++preloadedFrames_;
+                if (callback) callback(current && connected);
+            }, Qt::QueuedConnection);
+        } else if (quality) {
+            haltConsumer();
+            budget_.previewWidth = quality->width(); budget_.previewHeight = quality->height();
+            if (producer_) updateRenderProfile(producer_->get_profile());
+        } else if (transport) {
+            if (transport->generation == generation_.load()) {
+                haltConsumer();
+                std::function<void()> edit;
+                {
+                    const std::lock_guard<std::mutex> lock(seekMutex_);
+                    if (transport->generation == generation_.load()) edit = takePendingEdits();
+                }
+                if (edit) edit();
+                if (transport->generation == generation_.load() && producer_) {
+                    producer_->seek(transport->position);
+                    producer_->set_speed(transport->play ? 1.0 : 0.0);
+                    if (transport->play) {
+                        consumerGeneration_ = transport->generation;
+                        if (consumer_->start() != 0) QMetaObject::invokeMethod(this, [this, generation = transport->generation] {
+                            if (generation != generation_.load()) return;
+                            if (playing_.exchange(false)) emit playbackChanged(false);
+                            emit errorOccurred(tr("Could not start video and audio preview."));
+                        }, Qt::QueuedConnection);
+                    }
+                }
             }
-            decodeError=VisualRendering::renderError(*producer_);
-            if(decodeError.isEmpty())cacheFrame(request.frame,image,revision);
-            else {
-                image={};
-                // Speculative future frames must not poison a valid current frame.
-                if(request.prefetch)VisualRendering::discardSpeculativeError(*producer_,decodeError);
+        } else if (seek) {
+            auto request = *seek;
+            QImage image;
+            QString decodeError;
+            if (request.generation == generation_.load()) {
+                // stop() can wait for native decoder/audio work; it belongs on
+                // this worker just as get_frame() does.
+                haltConsumer();
+                std::function<void()> edit;
+                {
+                    const std::lock_guard<std::mutex> lock(seekMutex_);
+                    if (request.generation == generation_.load()) edit = takePendingEdits();
+                }
+                if (edit) edit();
+                if (request.generation == generation_.load() && producer_) {
+                    const auto revision = request.prefetch ? request.frameRevision : refreshSourceIdentity(request.frameRevision);
+                    request.frameRevision = revision;
+                    image = cachedFrame(request.frame, revision);
+                    if (image.isNull()) {
+                        const auto decodeStarted = std::chrono::steady_clock::now();
+                        producer_->seek(request.frame);
+                        std::unique_ptr<Mlt::Frame> frame(producer_->get_frame());
+                        if (frame && frame->is_valid()) image = imageFromFrame(frame->get_frame(), renderWidth_, renderHeight_);
+                        decodeMicros_ += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - decodeStarted).count();
+                        if (request.prefetch && !image.isNull()) ++preloadedFrames_;
+                    }
+                    decodeError = VisualRendering::renderError(*producer_);
+                    if (decodeError.isEmpty()) cacheFrame(request.frame, image, revision);
+                    else {
+                        image = {};
+                        // This request carries its error to the GUI. Later
+                        // preview frames must not inherit a stale failure.
+                        VisualRendering::discardSpeculativeError(*producer_, decodeError);
+                    }
+                    producer_->seek(request.restorePosition);
+                }
             }
-            producer_->seek(request.restorePosition);
+            if (!request.prefetch) QMetaObject::invokeMethod(this, [this, request, image, decodeError] {
+                if (request.generation != generation_.load() || !hasProducer_) return;
+                const bool resume = resumeAfterSeek_;
+                ++seekCount_; lastSeekMicros_ = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - request.queuedAt).count();
+                resumeAfterSeek_ = false;
+                seeking_ = false;
+                emit seekingChanged(false);
+                if (request.generation != generation_.load()) return;
+                if (image.isNull()) emit errorOccurred(decodeError.isEmpty() ? tr("Could not decode this preview frame.") : decodeError);
+                else {
+                    emit frameReady(image);
+                    ++deliveredFrames_;
+                    if (request.generation == generation_.load()) emit seekSettled(request.frame, request.committed);
+                }
+                if (resume && request.generation == generation_.load()) requestPlay();
+                else if (!image.isNull() && request.generation == generation_.load() && !playing_) queuePrefetch(request);
+            }, Qt::QueuedConnection);
         }
-        if(!request.prefetch)QMetaObject::invokeMethod(this, [this, request, image, decodeError] {
-            if (request.generation != generation_.load() || !producer_) {
-                return;
-            }
-            const bool resume = resumeAfterSeek_;
-            ++seekCount_;lastSeekMicros_=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-request.queuedAt).count();
-            resumeAfterSeek_ = false;
-            seeking_ = false;
-            emit seekingChanged(false);
-            if (request.generation != generation_.load()) {
-                return;
-            }
-            if (image.isNull()) {
-                emit errorOccurred(decodeError.isEmpty()?tr("Could not decode this preview frame."):decodeError);
-            } else {
-                emit frameReady(image);
-                ++deliveredFrames_;
-                if (request.generation == generation_.load()) {
-                    emit seekSettled(request.frame, request.committed);
-                }
-            }
-            if (resume && request.generation == generation_.load()) {
-                play();
-            } else if(!image.isNull() && request.generation==generation_.load() && !playing_) {
-                queuePrefetch(request);
-            }
-        }, Qt::QueuedConnection);
         {
             const std::lock_guard<std::mutex> lock(seekMutex_);
             seekBusy_ = false;
@@ -341,6 +490,11 @@ void Preview::seekLoop()
 void Preview::stopConsumer()
 {
     generation_.fetch_add(1);
+    haltConsumer();
+}
+
+void Preview::haltConsumer()
+{
     if (consumer_ && consumer_->is_valid() && !consumer_->is_stopped()) {
         consumer_->stop();
     }
@@ -385,7 +539,7 @@ void Preview::frameShown(mlt_properties, void *context, mlt_event_data data)
         ++self->skippedFrames_;
         return;
     }
-    self->publishFrame(mlt_event_data_to_frame(data), self->generation_.load());
+    self->publishFrame(mlt_event_data_to_frame(data), self->consumerGeneration_.load());
 }
 
 void Preview::publishFrame(mlt_frame frame, std::uint64_t generation)
@@ -398,11 +552,11 @@ void Preview::publishFrame(mlt_frame frame, std::uint64_t generation)
     const int framePosition = frame ? mlt_frame_get_position(frame) : 0;
     const auto error=producer_?VisualRendering::renderError(*producer_):QString{};
     if(!error.isEmpty()){
+        VisualRendering::discardSpeculativeError(*producer_, error);
         QMetaObject::invokeMethod(this,[this,generation,error]{
             deliveryPending_=false;
             if(generation!=generation_.load())return;
-            const bool wasPlaying=playing_.exchange(false);stopConsumer();
-            if(wasPlaying)emit playbackChanged(false);
+            requestPause(false);
             emit errorOccurred(error);
         },Qt::QueuedConnection);
         return;
@@ -423,9 +577,9 @@ void Preview::publishFrame(mlt_frame frame, std::uint64_t generation)
         emit frameReady(image);
         emit audioPeak(peak);
         emit positionChanged(position_);
-        if (producer_ && producer_->get_playtime() > 0 &&
-            position_ >= producer_->get_playtime() - 1) {
-            pause(false);
+        if (generation == generation_.load() && producerLength_ > 0 &&
+            position_ >= producerLength_ - 1) {
+            requestPause(false);
         }
     }, Qt::QueuedConnection);
 }
@@ -464,10 +618,16 @@ void Preview::queuePrefetch(const SeekRequest &request) {
 
 void Preview::setQualityLimit(const QSize &size) {
     const QSize bounded(std::clamp(size.width(),2,3840),std::clamp(size.height(),2,2160));
-    if(budget_.previewWidth==bounded.width()&&budget_.previewHeight==bounded.height())return;
-    quiesceSeek();const bool resume=playing_.exchange(false);stopConsumer();
-    budget_.previewWidth=bounded.width();budget_.previewHeight=bounded.height();invalidateFrames();
-    if(producer_){updateRenderProfile(producer_->get_profile());resumeAfterSeek_=resume;requestSeek(position_);}
+    if(qualityLimit_ == bounded)return;
+    qualityLimit_ = bounded;
+    invalidateFrames();
+    {
+        const std::lock_guard<std::mutex> lock(seekMutex_);
+        pendingQuality_ = bounded;
+        startSeekWorker();
+    }
+    if(hasProducer_)requestSeek(position_);
+    seekWake_.notify_one();
 }
 
 QVariantMap Preview::diagnostics() const {
@@ -477,7 +637,7 @@ QVariantMap Preview::diagnostics() const {
         {"deliveredFrames",qulonglong(deliveredFrames_)},{"skippedFrames",qulonglong(skippedFrames_)},
         {"seekCount",qulonglong(seekCount_)},{"lastSeekMs",lastSeekMicros_.load()/1000.0},
         {"decodeMs",decodeMicros_.load()/1000.0},{"cachedBytes",qint64(frameCache_.totalCost())*1024},
-        {"cacheLimitBytes",qint64(frameCache_.maxCost())*1024},{"width",renderWidth_},{"height",renderHeight_}};
+        {"cacheLimitBytes",qint64(frameCache_.maxCost())*1024},{"width",renderWidth_.load()},{"height",renderHeight_.load()}};
 }
 
 void Preview::cacheFrame(int frame,const QImage &image,std::uint64_t revision){
@@ -520,7 +680,7 @@ void Preview::consumerStopped(mlt_properties, void *context, mlt_event_data)
     if (!self || !self->playing_) {
         return;
     }
-    const auto generation = self->generation_.load();
+    const auto generation = self->consumerGeneration_.load();
     QMetaObject::invokeMethod(self, [self, generation] {
         if (generation != self->generation_.load() || !self->playing_.exchange(false)) {
             return;

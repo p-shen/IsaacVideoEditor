@@ -91,7 +91,7 @@ bool readAudio(const QJsonValue &v,AudioControls &a) {
 bool TextOverlay::operator==(const TextOverlay &o) const {
     return text==o.text && fontFamily==o.fontFamily && style==o.style && color==o.color &&
         fontSize==o.fontSize && bold==o.bold && shadow==o.shadow && fade==o.fade && animation==o.animation && italic==o.italic && uppercase==o.uppercase &&
-        startFrame==o.startFrame && durationFrames==o.durationFrames && x==o.x && y==o.y && hostId==o.hostId && hostSourceFrame==o.hostSourceFrame && timingNeedsReview==o.timingNeedsReview;
+        startFrame==o.startFrame && durationFrames==o.durationFrames && x==o.x && y==o.y && hostId==o.hostId && hostSourceFrame==o.hostSourceFrame && timingNeedsReview==o.timingNeedsReview && spans==o.spans;
 }
 
 int Project::clipFrames(const Clip &clip) const {
@@ -258,7 +258,7 @@ QString Project::validate() const {
     }
     if(captions.size()>10000)return "A project supports up to 10000 captions.";
     for (const auto *list : {&textOverlays,&captions})for(const auto &t:*list) {
-        if (t.text.size()>2000 || t.fontFamily.isEmpty() || t.fontFamily.size()>200 ||
+        if (t.text.size()>2000 || !validTextSpans(t) || t.fontFamily.isEmpty() || t.fontFamily.size()>200 ||
             !validTextStyle(t.style) || !validTextAnimation(t.animation) || !QColor(t.color).isValid() ||
             t.fontSize<12 || t.fontSize>200 || t.startFrame<0 || t.startFrame>86400*fps ||
             t.durationFrames<1 || t.durationFrames>86400*fps-t.startFrame || t.hostSourceFrame<0 || t.hostSourceFrame>86400*fps || (!t.hostId.isEmpty()&&!ids.contains(t.hostId)) ||
@@ -286,12 +286,7 @@ QString Project::validate() const {
     return {};
 }
 
-bool saveProject(const Project &project, const QString &path, QString *error) {
-    const QString problem = project.validate();
-    if (!problem.isEmpty()) {
-        if (error) *error = problem;
-        return false;
-    }
+QJsonObject projectJson(const Project &project) {
     QJsonArray clips;
     for (const auto &clip : project.clips) {
         QJsonObject item{{"path", clip.path}, {"in", clip.inSeconds}, {"out", clip.outSeconds}};
@@ -327,6 +322,11 @@ bool saveProject(const Project &project, const QString &path, QString *error) {
             if(t.animation!="none")item.insert("animation",t.animation);
             if(t.italic)item.insert("italic",true);
             if(t.uppercase)item.insert("uppercase",true);
+            if(!t.spans.isEmpty()){
+                QJsonArray spans;for(const auto &span:t.spans){QJsonObject entry{{"start",span.start},{"length",span.length}};
+                    if(!span.color.isEmpty())entry.insert("color",span.color);if(span.bold.has_value())entry.insert("bold",*span.bold);spans.append(entry);}
+                item.insert("spans",spans);data.insert("version",9);
+            }
             if(!t.hostId.isEmpty()){item.insert("hostId",t.hostId);item.insert("hostSourceFrame",t.hostSourceFrame);}
             if(t.timingNeedsReview)item.insert("timingNeedsReview",true);
             texts.append(item);
@@ -335,9 +335,18 @@ bool saveProject(const Project &project, const QString &path, QString *error) {
     }
     data.insert("burnCaptions",project.burnCaptions);
     {data.insert("voiceAudio",audioJson(project.voiceAudio));data.insert("musicAudio",audioJson(project.audioControls(2)));data.insert("musicLoopToEnd",project.musicLoopToEnd);}
+    return data;
+}
+
+bool saveProject(const Project &project, const QString &path, QString *error) {
+    const QString problem = project.validate();
+    if (!problem.isEmpty()) {
+        if (error) *error = problem;
+        return false;
+    }
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) ||
-        file.write(QJsonDocument(data).toJson(QJsonDocument::Indented)) < 0 ||
+        file.write(QJsonDocument(projectJson(project)).toJson(QJsonDocument::Indented)) < 0 ||
         !file.commit()) {
         if (error) *error = file.errorString();
         return false;
@@ -359,7 +368,7 @@ std::optional<Project> loadProject(const QString &path, QString *error) {
     }
     const auto data = document.object();
     const int version = data.value("version").toInt();
-    if ((version < 1 || version > 8) || !data.value("clips").isArray()) {
+    if ((version < 1 || version > 9) || !data.value("clips").isArray()) {
         if (error) *error = "This project format is not supported.";
         return std::nullopt;
     }
@@ -417,6 +426,18 @@ std::optional<Project> loadProject(const QString &path, QString *error) {
             t.animation=item.value("animation").toString("none");t.italic=item["italic"].toBool();t.uppercase=item["uppercase"].toBool();
             t.startFrame=item["startFrame"].toInt();t.durationFrames=item["durationFrames"].toInt();
             t.x=item["x"].toDouble();t.y=item["y"].toDouble();
+            if(item.contains("spans")){
+                if(!item["spans"].isArray()||item["spans"].toArray().size()>2000){if(error)*error="Invalid selected-text formatting.";return std::nullopt;}
+                for(const auto &value:item["spans"].toArray()){
+                    const auto entry=value.toObject();TextSpan span;bool valid=value.isObject();
+                    for(const auto &key:{"start","length"}){const auto n=entry[key].toDouble(-1);valid&=entry[key].isDouble()&&std::isfinite(n)&&n>=0&&n<=2000&&n==std::floor(n);}
+                    span.start=entry["start"].toInt();span.length=entry["length"].toInt();
+                    if(entry.contains("color")){valid&=entry["color"].isString();span.color=entry["color"].toString();}
+                    if(entry.contains("bold")){valid&=entry["bold"].isBool();span.bold=entry["bold"].toBool();}
+                    if(!valid){if(error)*error="Invalid selected-text formatting.";return std::nullopt;}t.spans.append(span);
+                }
+                if(!validTextSpans(t)){if(error)*error="Invalid selected-text formatting ranges.";return std::nullopt;}
+            }
             if(version>=7){
                 if(item.contains("hostId")){
                     const auto n=item["hostSourceFrame"].toDouble(-1);

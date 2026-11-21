@@ -9,4 +9,5 @@ QRectF bounds(const TextOverlay &text, const QSize &canvas);
 void paint(QImage &image, const QVector<TextOverlay> &texts, int frame);
 bool attach(Mlt::Tractor &timeline, const QVector<TextOverlay> &texts);
 void update(Mlt::Tractor &timeline, const QVector<TextOverlay> &texts);
+bool updateOne(Mlt::Tractor &timeline, int renderIndex, const TextOverlay &text);
 }
