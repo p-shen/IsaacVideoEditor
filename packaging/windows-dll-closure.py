@@ -31,6 +31,11 @@ def collect(stage, prefix, objdump):
                 raise RuntimeError(f"Unsupported dependency {name} imported by {binary}")
             if key.startswith(("api-ms-win-", "ext-ms-win-")):
                 continue
+            if key == "nvcuda.dll":
+                # The NVIDIA display driver supplies this; only the isolated CUDA worker may require it.
+                if binary.parent != stage / "subtitles":
+                    raise RuntimeError(f"Optional NVIDIA driver required outside the CUDA worker: {binary}")
+                continue
             # Standalone workers keep their own native runtime beside the executable.
             if any(p.name.lower() == key for p in binary.parent.iterdir() if p.is_file()):
                 continue

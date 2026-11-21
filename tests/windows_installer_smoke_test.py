@@ -75,6 +75,17 @@ def main(installer, archive):
         require(not set(uninstall_files).intersection(manifest), 'Installer metadata must remain outside the update manifest')
         run(sys.executable, Path(__file__).with_name('package_smoke_test.py'), executable,
             env={**os.environ, 'ISAAC_CLEAN_RUNTIME': '1'})
+        cuda_worker=app/'subtitles/whisper-cli.exe'
+        if cuda_worker.is_file():
+            disabled=cuda_worker.with_suffix('.disabled')
+            cuda_worker.rename(disabled)
+            try:
+                missing=subprocess.run([str(executable),'--smoke-test',str(Path(__file__).parent/'fixtures/seek.mp4')],
+                    capture_output=True,timeout=45,env={**os.environ,'ISAAC_REQUIRE_SUBTITLE_RUNTIME':'1'})
+                require(missing.returncode!=0 and b'subtitle worker' in missing.stderr.lower(),
+                        'A missing CUDA worker must fail validation even without an NVIDIA driver')
+            finally:
+                disabled.rename(cuda_worker)
 
         # Exercise the actual updater: it must retain Inno's uninstaller and project.
         prepared = root / 'isaac-update-test'

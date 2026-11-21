@@ -46,7 +46,12 @@ int packageSmokeTest(const QString &fixture) {
         QFile metadata(subtitles.filePath("runtime.json"));
         if(!metadata.open(QIODevice::ReadOnly)||QJsonDocument::fromJson(metadata.readAll()).object()["engine"].toString()!="whisper.cpp"){qCritical()<<"Invalid bundled subtitle runtime";return 2;}
 #ifdef Q_OS_WIN
-        const QStringList workers{subtitles.filePath("whisper-cli.exe"),subtitles.filePath("cpu/whisper-cli.exe")};
+        const auto cudaWorker=subtitles.filePath("whisper-cli.exe");
+        if(!QFileInfo(cudaWorker).isExecutable()){qCritical()<<"Missing CUDA subtitle worker";return 2;}
+        QStringList workers{subtitles.filePath("cpu/whisper-cli.exe")};
+        const auto systemDirectory=QDir(qEnvironmentVariable("SystemRoot","C:/Windows")).filePath("System32");
+        if(QFileInfo::exists(QDir(systemDirectory).filePath("nvcuda.dll")))workers.prepend(cudaWorker);
+        else qInfo()<<"NVIDIA driver absent; checking the CPU subtitle worker. CUDA requires separate hardware acceptance.";
 #else
         const QStringList workers{subtitles.filePath("whisper-cli")};
 #endif
