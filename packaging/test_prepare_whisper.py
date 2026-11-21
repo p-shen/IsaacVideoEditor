@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -11,6 +13,28 @@ module=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 class WhisperRuntimeTests(unittest.TestCase):
+    def test_msvc_runtime_retains_the_published_license_without_the_blocked_landing_page(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            redist=root/'Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC/14.44/x64/Microsoft.VC143.CRT'
+            redist.mkdir(parents=True)
+            (redist/'vcruntime140.dll').write_bytes(b'runtime DLL')
+            runtime=root/'runtime'
+            (runtime/'cpu').mkdir(parents=True)
+            (runtime/'licenses').mkdir()
+            license_bytes=b'published license document'
+            def download(url,path,expected=None):
+                if '/license-terms/' in url:
+                    raise HTTPError(url,403,'Forbidden',{},None)
+                self.assertTrue(url.endswith('.docx'))
+                self.assertIsNotNone(expected)
+                path.write_bytes(license_bytes)
+            with patch.dict(module.os.environ,{'ProgramFiles':str(root),'ProgramFiles(x86)':str(root)}), patch.object(module,'download',side_effect=download):
+                module.copy_msvc_runtime(runtime)
+            for folder in (runtime,runtime/'cpu'):
+                self.assertEqual((folder/'vcruntime140.dll').read_bytes(),b'runtime DLL')
+            self.assertEqual((runtime/'licenses/Microsoft-Visual-C-runtime-license.docx').read_bytes(),license_bytes)
+
     def test_application_and_audio_worker_opt_into_utf8_paths(self):
         root=Path(__file__).resolve().parents[1]
         manifest=ET.parse(root/'assets/windows-utf8.manifest')

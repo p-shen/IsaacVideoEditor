@@ -21,6 +21,8 @@ WINDOWS_URL='https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whi
 WINDOWS_SHA='afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a'
 CPU_URL='https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip'
 CPU_SHA='6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb'
+MSVC_LICENSE_URL='https://visualstudio.microsoft.com/wp-content/uploads/2021/09/Visual-C-Runtime-2015-2022-License-1.docx'
+MSVC_LICENSE_SHA='f1e3d56ceb2ad68aae0711b910375009e651ac5530fa0760f0dea6e81e54fae1'
 
 class PreparationError(RuntimeError):
     pass
@@ -115,7 +117,7 @@ def copy_msvc_runtime(runtime):
     redist=sorted(candidates)[-1]
     for folder in (runtime,runtime/'cpu'):
         for file in redist.glob('*.dll'):shutil.copy2(file,folder/file.name)
-    download('https://visualstudio.microsoft.com/license-terms/vs2022-cruntime/',runtime/'licenses/Microsoft-Visual-C-runtime-license.html')
+    download(MSVC_LICENSE_URL,runtime/'licenses/Microsoft-Visual-C-runtime-license.docx',MSVC_LICENSE_SHA)
 
 def prepare(output,target,source_archive=None):
     output=output.resolve()
