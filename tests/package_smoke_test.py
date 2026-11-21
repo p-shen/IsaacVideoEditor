@@ -17,8 +17,15 @@ if os.environ.get("ISAAC_CLEAN_RUNTIME") == "1":
                  "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
         environment.pop(name, None)
 def check_package(executable, source, expected_success):
-    result = subprocess.run([str(executable), "--smoke-test", str(source.resolve())],
-                            env=environment, text=True, capture_output=True, timeout=45)
+    try:
+        result = subprocess.run([str(executable), "--smoke-test", str(source.resolve())],
+                                env=environment, text=True, capture_output=True, timeout=45)
+    except subprocess.TimeoutExpired as error:
+        print(f"Package check timed out: {executable}; source={source}", file=sys.stderr)
+        for output in (error.stdout, error.stderr):
+            if output:
+                print(output.decode(errors="replace") if isinstance(output,bytes) else output, file=sys.stderr)
+        raise
     if (result.returncode == 0) != expected_success:
         print(f"Smoke process failed: {executable}; source={source}; "
               f"exit={result.returncode} (0x{result.returncode & 0xffffffff:08x})", file=sys.stderr)
