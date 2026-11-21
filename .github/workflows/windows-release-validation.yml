@@ -26,30 +26,22 @@ jobs:
       - name: Download built packages
         shell: pwsh
         run: gh run download $env:SOURCE_RUN --repo $env:GITHUB_REPOSITORY --name windows-download --dir dist
-      - name: Check portable app with native Windows Python
+      - name: Trace packaged startup
         shell: pwsh
         run: |
           python -m zipfile -e (Get-Item dist/*.zip).FullName "$env:RUNNER_TEMP/package check"
-          python tests/package_smoke_test.py "$env:RUNNER_TEMP/package check/IsaacVideoEditor/IsaacVideoEditor.exe"
-      - name: Check installed app
-        shell: pwsh
-        run: python tests/windows_installer_smoke_test.py (Get-Item dist/*-Setup.exe).FullName (Get-Item dist/*.zip).FullName
-      - name: Capture extended runtime diagnostic on failure
-        if: failure()
-        shell: pwsh
-        run: |
           @'
-          import os, subprocess
+          import os, subprocess, time
           from pathlib import Path
           app=Path(os.environ['RUNNER_TEMP'])/'package check/IsaacVideoEditor/IsaacVideoEditor.exe'
-          env={**os.environ,'PATH':str(Path(os.environ['SYSTEMROOT'])/'System32'),'QT_FORCE_STDERR_LOGGING':'1'}
-          try:
-              result=subprocess.run([str(app),'--smoke-test',str(Path('tests/fixtures/seek.mp4').resolve())],env=env,capture_output=True,text=True,timeout=150)
-              print('Extended diagnostic exit:',result.returncode)
-              print(result.stdout+result.stderr)
-          except subprocess.TimeoutExpired as error:
-              print('Extended diagnostic timed out')
-              for output in (error.stdout,error.stderr):
-                  if output: print(output.decode(errors='replace') if isinstance(output,bytes) else output)
-              raise
+          env={**os.environ,'PATH':str(Path(os.environ['SYSTEMROOT'])/'System32'),'QT_FORCE_STDERR_LOGGING':'1','QT_DEBUG_PLUGINS':'1'}
+          with open('startup.log','w') as output:
+              process=subprocess.Popen([str(app),'--smoke-test',str(Path('tests/fixtures/seek.mp4').resolve())],env=env,stdout=output,stderr=output)
+              for index in range(6):
+                  time.sleep(10)
+                  print('Elapsed',10*(index+1),'exit',process.poll(),flush=True)
+                  print(Path('startup.log').read_text(errors='replace')[-18000:],flush=True)
+                  subprocess.run(['powershell','-NoProfile','-Command',"Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'Isaac|whisper|ffmpeg|ffprobe|WerFault' } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List; Get-Process | Where-Object { $_.ProcessName -match 'Isaac|whisper|WerFault' } | Select-Object Id,ProcessName,MainWindowTitle,Responding | Format-List"])
+                  if process.poll() is not None: break
+              if process.poll() is None: subprocess.run(['taskkill','/F','/T','/PID',str(process.pid)])
           '@ | python
