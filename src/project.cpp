@@ -131,6 +131,47 @@ int Project::transitionFramesBefore(int index) const {
     }
     return result;
 }
+bool Project::setTransitionRange(int first,int last,const QString &type,int frames) {
+    if(first<0||last<=first||last>=clips.size()||!Transitions::find(type)||frames<0||frames>600)return false;
+    QVector<int> before;for(int i=0;i<clips.size();++i)before.append(transitionFramesBefore(i));
+    Project fitted=*this;
+    // Fit the range simultaneously, with the existing outside overlaps reserved.
+    for(int i=1;i<clips.size();++i)fitted.clips[i].transitionFrames=before[i];
+    for(int i=first+1;i<=last;++i){
+        auto &clip=fitted.clips[i];clip.transitionType=type;clip.hardCutBefore=type=="cut";
+        clip.transitionFrames=type=="cut"?0:std::min({frames,clipFrames(clips[i-1])-1,clipFrames(clips[i])-1});
+    }
+    fitted.clips[first+1].transitionFrames=std::min(fitted.clips[first+1].transitionFrames,std::max(0,clipFrames(clips[first])-1-before[first]));
+    fitted.clips[last].transitionFrames=std::min(fitted.clips[last].transitionFrames,std::max(0,clipFrames(clips[last])-1-(last+1<clips.size()?before[last+1]:0)));
+    QVector<int> overlaps;for(int i=0;i<clips.size();++i)overlaps.append(fitted.transitionFramesBefore(i));
+    bool changed=false;
+    Project next=*this;
+    for(int i=1;i<clips.size();++i){
+        if(next.clips[i].transitionFrames<0)next.clips[i].transitionFrames=before[i];
+        if(i<=first||i>last)continue;
+        auto &clip=next.clips[i];clip.transitionType=type;clip.hardCutBefore=type=="cut";clip.transitionFrames=overlaps[i];
+        const auto previousType=clips[i].hardCutBefore||(before[i]==0&&clips[i].transitionType=="dissolve")?QString("cut"):clips[i].transitionType;
+        changed|=type!=previousType||overlaps[i]!=before[i];
+    }
+    if(!changed)return false;
+    // Previously oversized requests can expand when a neighboring overlap is removed.
+    // Materialize their current lengths only when necessary to keep outside timing fixed.
+    const auto outside=[&](int i){return i>0&&i<clips.size()&&(i<=first||i>last);};
+    for(int pass=0;pass<clips.size();++pass){
+        QSet<int> freeze;
+        for(int i=1;i<clips.size();++i){
+            if(next.transitionFramesBefore(i)==(outside(i)?before[i]:overlaps[i]))continue;
+            if(outside(i)&&next.clips[i].transitionFrames!=before[i])freeze.insert(i);
+            else for(int neighbor:{i-1,i+1})if(outside(neighbor)&&next.clips[neighbor].transitionFrames!=before[neighbor])freeze.insert(neighbor);
+        }
+        if(freeze.isEmpty())break;
+        for(int i:freeze)next.clips[i].transitionFrames=before[i];
+    }
+    for(int i=1;i<clips.size();++i)if(next.transitionFramesBefore(i)!=(outside(i)?before[i]:overlaps[i]))return false;
+    clips=next.clips;
+    return true;
+}
+
 bool Project::setTransition(int index,const QString &type,int frames) {
     if(index<=0||index>=clips.size()||!Transitions::find(type)||frames<0||frames>600)return false;
     if(clips[index].transitionType==type && transitionFramesBefore(index)==(type=="cut"?0:frames) && ((type=="cut")== (transitionFramesBefore(index)==0)))return false;

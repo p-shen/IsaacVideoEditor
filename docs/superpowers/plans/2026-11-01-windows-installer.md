@@ -27,9 +27,17 @@
 
 **Interfaces:** Builder consumes staged payload directory, output directory, artifact label and application version. Produces `IsaacVideoEditor-VERSION-windows-x86_64-Setup.exe` beside the existing ZIP.
 
-- [ ] Add focused builder tests using a fake compiler: version validation, output collision, missing payload, arguments containing spaces, and compiler failure.
-- [ ] Observe failing tests before adding the builder and Inno script; implement the per-user installer with stable identity and shortcuts.
-- [ ] Integrate compilation into Windows packaging and include setup files in artifact upload, checksums and release upload. Preserve ZIP selection in the updater.
-- [ ] Add Windows-only install/reinstall/shortcut/launch/uninstall checks on disposable CI runners. Preserve a user-added project during reinstall and uninstall; verify installer metadata is absent from the update manifest.
-- [ ] Run focused Python packaging tests, then dispatch Windows validation on the implementation branch. Expected: compiled installer and successful native lifecycle checks.
-- [ ] Obtain a fresh review, address material findings, and commit the implementation. Record any unverified limits explicitly.
+- [x] Add focused builder tests using a fake compiler: version validation, output collision, missing payload, arguments containing spaces, and compiler failure.
+- [x] Observe failing tests before adding the builder and Inno script; implement the per-user installer with stable identity and shortcuts.
+- [x] Integrate compilation into Windows packaging and include setup files in artifact upload, checksums and release upload. Preserve ZIP selection in the updater.
+- [x] Add Windows-only install/reinstall/shortcut/launch/uninstall checks on disposable CI runners. Preserve a user-added project during reinstall and uninstall; verify installer metadata is absent from the update manifest.
+- [x] Run focused Python packaging tests, then dispatch Windows validation on the implementation branch. Expected: compiled installer and successful native lifecycle checks.
+- [x] Obtain a fresh review, address material findings, and commit the implementation. Record any unverified limits explicitly.
+
+## Verification and implementation decisions
+
+- Six builder checks failed before implementation; all 16 focused packaging checks subsequently passed. The standalone helper suite passed 24 checks with two platform skips.
+- Independent review identified uninstalling files introduced by later ZIP updates. Manifest-based cleanup addresses this without broad directory deletion and rejects traversal, absolute paths and junctions.
+- Windows validation exposed a real short/long temporary-path alias mismatch in `src/update_installer.cpp`. Windows now compares ancestor filesystem identities when textual containment differs, while retaining canonical-path and reparse-point checks.
+- Native build and portable package checks passed in run `41403867154`. The focused lifecycle run [41405531320](https://github.com/p-shen/IsaacVideoEditor/actions/runs/41405531320) reused that compiled installer and passed default-path installation, optional desktop and Start shortcuts, reinstall, installed-app playback/export, actual update with preserved uninstaller, and uninstall of newly introduced dependencies while preserving user files and rejecting unsafe manifest paths.
+- Temporary diagnostic CI wiring was removed after validation. No full editor suite was rerun; ordinary interactive installation on the user's desktop remains a manual check.
