@@ -31,17 +31,34 @@ jobs:
         run: |
           python -m zipfile -e (Get-Item dist/*.zip).FullName "$env:RUNNER_TEMP/package check"
           @'
-          import os, subprocess, time
+          import os, subprocess, time, ctypes
+          from ctypes import wintypes
           from pathlib import Path
           app=Path(os.environ['RUNNER_TEMP'])/'package check/IsaacVideoEditor/IsaacVideoEditor.exe'
           env={**os.environ,'PATH':str(Path(os.environ['SYSTEMROOT'])/'System32'),'QT_FORCE_STDERR_LOGGING':'1','QT_DEBUG_PLUGINS':'1'}
           with open('startup.log','w') as output:
               process=subprocess.Popen([str(app),'--smoke-test',str(Path('tests/fixtures/seek.mp4').resolve())],env=env,stdout=output,stderr=output)
-              for index in range(6):
+              for index in range(1):
                   time.sleep(10)
                   print('Elapsed',10*(index+1),'exit',process.poll(),flush=True)
                   print(Path('startup.log').read_text(errors='replace')[-18000:],flush=True)
                   subprocess.run(['powershell','-NoProfile','-Command',"Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'Isaac|whisper|ffmpeg|ffprobe|WerFault' } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List; Get-Process | Where-Object { $_.ProcessName -match 'Isaac|whisper|WerFault' } | Select-Object Id,ProcessName,MainWindowTitle,Responding | Format-List"])
+                  user=ctypes.windll.user32
+                  callback=ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+                  def text(handle, unused):
+                      buffer=ctypes.create_unicode_buffer(4096)
+                      user.GetWindowTextW(handle,buffer,4096)
+                      if buffer.value: print('WINDOW TEXT:',buffer.value,flush=True)
+                      return True
+                  child_callback=callback(text)
+                  def window(handle, unused):
+                      pid=wintypes.DWORD()
+                      user.GetWindowThreadProcessId(handle,ctypes.byref(pid))
+                      if pid.value==process.pid:
+                          text(handle,0)
+                          user.EnumChildWindows(handle,child_callback,0)
+                      return True
+                  user.EnumWindows(callback(window),0)
                   if process.poll() is not None: break
               if process.poll() is None: subprocess.run(['taskkill','/F','/T','/PID',str(process.pid)])
           '@ | python
