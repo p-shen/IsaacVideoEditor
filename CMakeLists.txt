@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(IsaacVideoEditor VERSION 0.5 LANGUAGES CXX)
+project(IsaacVideoEditor VERSION 0.6 LANGUAGES CXX)
 set(ISAAC_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Application version (GitHub release tag)")
 
 set(CMAKE_CXX_STANDARD 17)

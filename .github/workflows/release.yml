@@ -20,7 +20,7 @@ concurrency:
 
 env:
   VERSION: ${{ github.event.release.tag_name || format('validation-{0}', github.run_number) }}
-  APP_VERSION: ${{ github.event.release.tag_name || '0.5' }}
+  APP_VERSION: ${{ github.event.release.tag_name || '0.6' }}
   QT_QPA_PLATFORM: offscreen
   QT_QUICK_BACKEND: software
   SDL_AUDIODRIVER: dummy
@@ -52,8 +52,6 @@ jobs:
       - name: Package
         run: python3 packaging/package-macos.py build-release dist "$VERSION"
       - name: Check extracted download
-        # Skip tests for 0.5 at the maintainer's request; later releases keep checks.
-        if: github.event.release.tag_name != '0.5'
         run: |
           mkdir -p "$RUNNER_TEMP/package check"
           ditto -x -k dist/*.zip "$RUNNER_TEMP/package check"
@@ -123,7 +121,6 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: bash packaging/package-linux.sh build-release dist "$VERSION"
       - name: Check AppImage download
-        if: github.event.release.tag_name != '0.5'
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
           ISAAC_CLEAN_RUNTIME: '1'
@@ -179,14 +176,12 @@ jobs:
       - name: Package
         run: bash packaging/package-windows.sh build-release dist "$VERSION"
       - name: Check extracted download
-        if: github.event.release.tag_name != '0.5'
         run: |
           mkdir -p "$RUNNER_TEMP/package check"
           python -m zipfile -e dist/*.zip "$RUNNER_TEMP/package check"
           ISAAC_CLEAN_RUNTIME=1 python tests/package_smoke_test.py \
             "$RUNNER_TEMP/package check/IsaacVideoEditor/IsaacVideoEditor.exe"
       - name: Check installed application
-        if: github.event.release.tag_name != '0.5'
         shell: pwsh
         run: python tests/windows_installer_smoke_test.py (Get-Item dist/*-Setup.exe).FullName (Get-Item dist/*.zip).FullName
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
