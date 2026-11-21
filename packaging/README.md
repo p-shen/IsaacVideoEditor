@@ -26,7 +26,7 @@ Windows dependency collection validates worker DLLs beside each worker, keeping 
 
 `bundledRuntimePaths` detects these paired module/data folders. MLT receives its bundled module path explicitly, and the executable folder is added to the tool search path. Development builds without that layout retain system dependency discovery.
 
-Required MLT modules are core, avformat, normalize, resample, sdl2, and xml. The application supplies its own Qt text and visual rendering, so MLT's optional Qt modules are excluded. Platform scripts scan the dependency closure of the required modules and both FFmpeg tools, including dynamically loaded modules that an executable-only scan would miss. macOS also includes SDL3 when SDL2 is supplied through sdl2-compat.
+Required MLT modules are core, avformat, normalize, resample, sdl2, and xml. The application supplies its own Qt text and visual rendering, so MLT's optional Qt modules are excluded. Platform scripts scan the dependency closure of the required modules and both FFmpeg tools, including dynamically loaded modules that an executable-only scan would miss. macOS and Windows also include SDL3 when SDL2 is supplied through sdl2-compat.
 
 ## Checks
 

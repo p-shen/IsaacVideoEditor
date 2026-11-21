@@ -24,7 +24,11 @@ def collect(stage, prefix, objdump):
         output = subprocess.run([str(objdump), "-p", str(binary)], check=True, capture_output=True, text=True).stdout
         if "pei-x86-64" not in output:
             raise RuntimeError(f"Expected an x86_64 Windows binary: {binary}")
-        for imported in re.findall(r"DLL Name:\s*([^\r\n]+)", output):
+        imports = re.findall(r"DLL Name:\s*([^\r\n]+)", output)
+        if binary.name.lower() == "sdl2.dll" and b"SDL3.dll" in binary.read_bytes():
+            # sdl2-compat uses LoadLibraryA, so the PE import table omits SDL3.
+            imports.append("SDL3.dll")
+        for imported in imports:
             name = imported.strip()
             key = name.lower()
             if key == "msys-2.0.dll" or any(char in name for char in "/\\:"):

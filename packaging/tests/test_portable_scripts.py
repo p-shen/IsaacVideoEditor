@@ -173,6 +173,22 @@ class WindowsClosureTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not-shipped.dll", result.stderr)
 
+    def test_sdl2_compat_includes_dynamically_loaded_sdl3_and_its_imports(self):
+        self.binary(self.stage / "IsaacVideoEditor.exe", "SDL2.dll")
+        (self.bin / "SDL2.dll").write_text("LoadLibraryA: SDL3.dll")
+        self.binary(self.bin / "SDL3.dll", "audio.dll")
+        self.binary(self.bin / "audio.dll")
+        result = self.collect()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.stage / "SDL3.dll").is_file())
+        self.assertTrue((self.stage / "audio.dll").is_file())
+
+    def test_sdl2_compat_rejects_missing_dynamic_sdl3(self):
+        (self.stage / "SDL2.dll").write_text("LoadLibraryA: SDL3.dll")
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SDL3.dll", result.stderr)
+
     def test_refuses_msys_runtime(self):
         self.binary(self.stage / "IsaacVideoEditor.exe", "msys-2.0.dll")
         self.binary(self.bin / "msys-2.0.dll")
