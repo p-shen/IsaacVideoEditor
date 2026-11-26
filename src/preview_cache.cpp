@@ -368,6 +368,13 @@ PreviewCache::Copy PreviewCache::readyCopy(const QString &source, int inFrame, i
     return {};
 }
 
+int PreviewCache::sourceCadencePeriod(const QString &source) {
+    const QString key=SourceTiming::fingerprint(source);
+    if(key.isEmpty())return -1;
+    if(!cadencePeriods_.contains(key))loadTiming(source);
+    return cadencePeriods_.value(key,-1);
+}
+
 PreviewCache::Job PreviewCache::makeJob(const Request &request) {
     Job job;
     job.source = request.source;

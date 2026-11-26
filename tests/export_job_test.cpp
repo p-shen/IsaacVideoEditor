@@ -22,6 +22,42 @@ class ExportJobTest : public QObject {
     Project sample() const {Project p;p.clips={{QDir::current().filePath("tests/fixtures/seek.mp4"),0,2}};return p;}
     QByteArray contents(const QString &path){QFile f(path);return f.open(QIODevice::ReadOnly)?f.readAll():QByteArray{};}
 private slots:
+    void captionAndTitleKeepTheirFrameBoundariesInTheApplicationWorker_data() {
+        QTest::addColumn<QString>("animation");
+        for(const auto &name:{"none","fade","slide","pop","bounce","typewriter","karaoke","word-pop","pulse"})QTest::newRow(name)<<QString(name);
+    }
+    void captionAndTitleKeepTheirFrameBoundariesInTheApplicationWorker() {
+        QFETCH(QString,animation);
+        QTemporaryDir dir;QImage background(640,360,QImage::Format_RGB32);background.fill(Qt::black);
+        const auto source=dir.filePath("black.png");QVERIFY(background.save(source));
+        Project p;p.canvasWidth=640;p.canvasHeight=360;p.clips={{source,0,2}};
+        TextOverlay title;title.text="TITLE";title.color="#00ff00";title.fontSize=120;title.shadow=false;title.y=.25;title.startFrame=30;title.durationFrames=60;
+        auto cue=title;cue.text="ONE TWO THREE FOUR";cue.color="#ff00ff";cue.y=.75;cue.animation=animation;p.textOverlays={title};p.captions={cue};
+        const auto frame=[](const Project &project,int position){
+            Mlt::Profile profile;Media::configureOutputProfile(profile,640,360);auto timeline=Media::buildTimeline(project,profile);if(!timeline)return QImage{};
+            timeline->seek(position);std::unique_ptr<Mlt::Frame> f(timeline->get_frame());auto format=mlt_image_rgba;int w=640,h=360;uint8_t *pixels=nullptr;
+            if(!f||mlt_frame_get_image(f->get_frame(),&pixels,&format,&w,&h,0)||!pixels)return QImage{};
+            return QImage(pixels,w,h,w*4,QImage::Format_RGBA8888).copy();
+        };
+        ExportJob job(exportWorkerExecutable());QSignalSpy done(&job,&ExportJob::finished);QString error;const auto output=dir.filePath("timing.mp4");
+        QVERIFY2(job.start(p,output,&error,false,true),qPrintable(error));QTRY_COMPARE_WITH_TIMEOUT(done.count(),1,20000);QVERIFY2(done[0][0].toBool(),qPrintable(done[0][2].toString()));
+        Project encoded;encoded.clips={{output,0,2}};
+        for(int position:{0,29,30,31,36,45,59,75,89,90,119}){
+            const auto preview=frame(p,position),actual=frame(encoded,position);QVERIFY(!preview.isNull());QVERIFY(!actual.isNull());
+            for(bool caption:{false,true}){
+                const auto coloredPixels=[caption](const QImage &image){int count=0;
+                    for(int y=caption?image.height()/2:0;y<(caption?image.height():image.height()/2);++y)for(int x=0;x<image.width();++x){const auto c=image.pixelColor(x,y);
+                        count+=caption?(c.red()>150&&c.blue()>150&&c.green()<100):(c.green()>150&&c.red()<100&&c.blue()<100);}
+                    return count;
+                };
+                const bool visible=position>=30&&position<90;
+                const int expected=coloredPixels(preview),exported=coloredPixels(actual);
+                if(!caption||animation=="none"||!visible)QVERIFY2((expected>100)==visible,qPrintable(QString("Preview %1 at frame %2").arg(caption?"caption":"title").arg(position)));
+                QVERIFY2((exported>100)==(expected>100),qPrintable(QString("Exported %1 at frame %2: preview=%3 export=%4").arg(caption?"caption":"title").arg(position).arg(expected).arg(exported)));
+                if(expected>100)QVERIFY2(std::abs(exported-expected)<expected*.35,qPrintable(QString("Animation %1 at frame %2: preview=%3 export=%4").arg(animation).arg(position).arg(expected).arg(exported)));
+            }
+        }
+    }
     void iphoneModeSurvivesHardwareFallback_data() {
         QTest::addColumn<QByteArray>("mode");
         QTest::newRow("normal-worker")<<QByteArray{};

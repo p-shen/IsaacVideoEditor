@@ -1237,6 +1237,11 @@ void QuickTimeline::paint(QPainter *painter) {
     const auto &project=displayProject();
     const int ruler=rulerHeight()+textHeight(),video=videoHeight(),audio=audioHeight();
     p.save();p.setClipRect(QRectF(labelWidth()+1,0,std::max(0.0,width()-labelWidth()-1),height()));
+    const auto caption=captionRect(selectedCaption_);
+    if(!project.clips.isEmpty()&&!caption.isEmpty()){
+        p.setPen(QPen(accent,1.5,Qt::DashLine));
+        for(const double x:{caption.left(),caption.right()})p.drawLine(QPointF(x,caption.bottom()),QPointF(x,ruler+video+2*audio));
+    }
     if (!project.clips.isEmpty()) {
         const double x = xForFrame(position_);
         p.setPen(QPen(accent, 1.5));

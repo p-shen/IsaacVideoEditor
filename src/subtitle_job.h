@@ -8,7 +8,7 @@
 #include <memory>
 
 namespace Subtitles {
-std::optional<QByteArray> whisperSrt(const QByteArray &json,int durationFrames,QStringList *warnings=nullptr,QString *error=nullptr);
+std::optional<QByteArray> whisperSrt(const QByteArray &json,int durationFrames,QStringList *warnings=nullptr,QString *error=nullptr,int *repetitionStartMs=nullptr);
 }
 QString subtitleEngineExecutable(bool cpuOnly=false);
 QString subtitleRuntimeDirectory();
@@ -46,6 +46,6 @@ private:
     QFile log_;
     QByteArray output_,errors_;
     QStringList warnings_;
-    int frames_=0,progress_=-1;
+    int frames_=0,progress_=-1,repetitionRetryMs_=-1;
     bool running_=false,canceled_=false,cpuOnly_=false,audio_=true,resultReceived_=false,resultOk_=false,protocolFailed_=false,gpuConfirmed_=false;
 };

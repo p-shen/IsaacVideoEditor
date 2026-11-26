@@ -7,6 +7,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QTemporaryDir>
+#include <QSettings>
+#include <QScopeGuard>
 #include <QtTest>
 
 class SourceBrowserTest: public QObject {
@@ -63,6 +65,113 @@ private slots:
         e.togglePlayback();QTRY_VERIFY_WITH_TIMEOUT(e.sourcePosition()>90,2000);e.togglePlayback();QCOMPARE(e.position(),37);
         const int source=e.sourcePosition();e.showProject();QCOMPARE(e.position(),37);e.selectSource(0);QCOMPARE(e.sourcePosition(),source);
         e.seekSource(0);QTRY_VERIFY_WITH_TIMEOUT(e.frame().pixelColor(e.frame().width()/2,e.frame().height()/2).red()>180,2000);
+    }
+    void markingAndAppendingKeepSourceProducer() {
+        EditorController e; QVERIFY(e.importMedia({fixture()})); e.selectSource(0);
+        QTRY_VERIFY_WITH_TIMEOUT(!e.performanceDiagnostics()["preparingSource"].toBool(), 3000);
+        const auto jobs=e.performanceDiagnostics()["sourcePreparationJobs"].toULongLong();
+        e.seekSource(12); e.markSourceIn();
+        e.seekSource(29); e.markSourceOut();
+        QVERIFY(e.appendSource());
+        QCOMPARE(e.performanceDiagnostics()["sourcePreparationJobs"].toULongLong(), jobs);
+        QCOMPARE(e.currentSource()["rangeFrames"].toInt(), 18);
+        QCOMPARE(e.project().clips.size(), 1);
+    }
+    void markingSourceDoesNotSeekProjectPreview() {
+        EditorController e; QVERIFY(e.importFiles({fixture()}));
+        QTRY_VERIFY_WITH_TIMEOUT(!e.performanceDiagnostics()["preparingTimeline"].toBool(),3000);
+        e.selectSource(0);
+        QTRY_VERIFY_WITH_TIMEOUT(!e.performanceDiagnostics()["preparingSource"].toBool(),3000);
+        const auto seeks=e.performanceDiagnostics()["preview"].toMap()["seekCount"].toULongLong();
+        e.seekSource(12); e.markSourceIn(); e.seekSource(29); e.markSourceOut();
+        QTest::qWait(200);
+        QCOMPARE(e.performanceDiagnostics()["preview"].toMap()["seekCount"].toULongLong(),seeks);
+    }
+    void marksDuringPlaybackKeepWatchingSource() {
+        EditorController e; QVERIFY(e.importMedia({fixture()}));
+        QTRY_VERIFY_WITH_TIMEOUT(!e.performanceDiagnostics()["preparingSource"].toBool(),3000);
+        e.seekSource(10); e.togglePlayback();
+        QTRY_VERIFY_WITH_TIMEOUT(e.playing()&&e.sourcePosition()>10,3000);
+        const auto jobs=e.performanceDiagnostics()["sourcePreparationJobs"].toULongLong();
+        e.markSourceIn(); QVERIFY(e.playing());
+        QTRY_VERIFY_WITH_TIMEOUT(e.sourcePosition()>e.currentSource()["inFrame"].toInt(),3000);
+        e.markSourceOut(); QVERIFY(e.playing());
+        QVERIFY(e.appendSource()); QVERIFY(e.playing());
+        QCOMPARE(e.performanceDiagnostics()["sourcePreparationJobs"].toULongLong(),jobs);
+        e.togglePlayback(); QTRY_VERIFY_WITH_TIMEOUT(!e.playing(),3000);
+    }
+    void highResolutionSourcePreparesItsOwnPreview() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString path=dir.filePath("source.mp4");
+        QProcess ffmpeg;
+        ffmpeg.start("/opt/homebrew/bin/ffmpeg", {"-v","error","-f","lavfi","-i","color=c=red:s=2048x1152:r=30:d=2",
+            "-c:v","libx264","-preset","ultrafast","-y",path});
+        QVERIFY(ffmpeg.waitForFinished(30000)); QCOMPARE(ffmpeg.exitCode(),0);
+        QSettings settings; const auto previous=settings.value("preview/cacheDirectory");
+        const auto restore=qScopeGuard([&]{if(previous.isValid())settings.setValue("preview/cacheDirectory",previous);else settings.remove("preview/cacheDirectory");});
+        EditorController e; QVERIFY(e.setCacheDirectory(dir.path())); QVERIFY(e.importMedia({path}));
+        QTRY_VERIFY_WITH_TIMEOUT(e.performanceDiagnostics()["proxy"].toMap()["processes"].toULongLong()>0, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(e.performanceDiagnostics()["sourceUsesProxy"].toBool(), 30000);
+        QTRY_COMPARE_WITH_TIMEOUT(e.performanceDiagnostics()["sourceCopyRequestCount"].toInt(),0,3000);
+        QCOMPARE(e.duration(),0);
+    }
+    void longSourceUsesPartialPreviewCopy() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString path=dir.filePath("long-source.mp4");
+        QProcess ffmpeg;
+        ffmpeg.start("/opt/homebrew/bin/ffmpeg", {"-v","error","-f","lavfi","-i","color=c=red:s=2048x1152:r=1:d=30",
+            "-f","lavfi","-i","color=c=blue:s=2048x1152:r=1:d=2","-filter_complex","[0:v][1:v]concat=n=2:v=1:a=0",
+            "-c:v","libx264","-preset","ultrafast","-y",path});
+        QVERIFY(ffmpeg.waitForFinished(30000)); QCOMPARE(ffmpeg.exitCode(),0);
+        QSettings settings; const auto previous=settings.value("preview/cacheDirectory");
+        const auto restore=qScopeGuard([&]{if(previous.isValid())settings.setValue("preview/cacheDirectory",previous);else settings.remove("preview/cacheDirectory");});
+        EditorController e; QVERIFY(e.setCacheDirectory(dir.path())); QVERIFY(e.importMedia({path}));
+        QTRY_VERIFY_WITH_TIMEOUT(!e.performanceDiagnostics()["preparingSource"].toBool(),3000);
+        QVERIFY(!e.performanceDiagnostics()["sourceUsesProxy"].toBool());
+        e.togglePlayback();
+        QTRY_VERIFY_WITH_TIMEOUT(e.performanceDiagnostics()["sourceUsesProxy"].toBool(),30000);
+        QTRY_VERIFY_WITH_TIMEOUT(e.playing(),3000);
+        e.togglePlayback();
+        QVERIFY(e.performanceDiagnostics()["sourceCopyCount"].toInt()>0);
+        QCOMPARE(e.currentSource()["durationFrames"].toInt(),32*60);
+        e.seekSource(31*60);
+        QTRY_VERIFY_WITH_TIMEOUT(e.frame().pixelColor(e.frame().width()/2,e.frame().height()/2).blue()>180,3000);
+        QVERIFY(e.performanceDiagnostics()["sourceCopyRequestCount"].toInt()>0);
+        QVERIFY(e.removeSource(0,true));
+        QCOMPARE(e.performanceDiagnostics()["sourceCopyRequestCount"].toInt(),0);
+    }
+    void lateSeekInVariableCadenceSourceKeepsCopyBounded() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString path=dir.filePath("variable-source.mp4");
+        QProcess ffmpeg;
+        ffmpeg.start("/opt/homebrew/bin/ffmpeg", {"-v","error","-f","lavfi","-i","color=c=red:s=2048x1152:r=1:d=90",
+            "-f","lavfi","-i","color=c=blue:s=2048x1152:r=2:d=90","-filter_complex","[0:v][1:v]concat=n=2:v=1:a=0",
+            "-fps_mode","vfr","-c:v","libx264","-preset","ultrafast","-y",path});
+        QVERIFY(ffmpeg.waitForFinished(30000)); QCOMPARE(ffmpeg.exitCode(),0);
+        QSettings settings; const auto previous=settings.value("preview/cacheDirectory");
+        const auto restore=qScopeGuard([&]{if(previous.isValid())settings.setValue("preview/cacheDirectory",previous);else settings.remove("preview/cacheDirectory");});
+        EditorController e; QVERIFY(e.setCacheDirectory(dir.path())); QVERIFY(e.importMedia({path}));
+        e.seekSource(150*60);
+        QTRY_VERIFY_WITH_TIMEOUT(([&]{for(const auto &name:QDir(dir.path()).entryList({"*.mov"},QDir::Files))if(!name.endsWith(".part.mov"))return true;return false;})(),30000);
+        PreviewCache cache(dir.path()); QCOMPARE(cache.sourceCadencePeriod(path),0);
+        QString copy;for(const auto &name:QDir(dir.path()).entryList({"*.mov"},QDir::Files))if(!name.endsWith(".part.mov")){copy=dir.filePath(name);break;}
+        const auto info=Media::mediaInfo(copy); QVERIFY(info); QVERIFY(info->durationSeconds<40);
+    }
+    void tenMinuteSourcePreparesNearbyRange() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString path=dir.filePath("ten-minute-source.mp4");
+        QProcess ffmpeg;
+        ffmpeg.start("/opt/homebrew/bin/ffmpeg", {"-v","error","-f","lavfi","-i","color=c=green:s=2048x1152:r=1:d=600",
+            "-c:v","libx264","-preset","ultrafast","-y",path});
+        QVERIFY(ffmpeg.waitForFinished(30000)); QCOMPARE(ffmpeg.exitCode(),0);
+        QSettings settings; const auto previous=settings.value("preview/cacheDirectory");
+        const auto restore=qScopeGuard([&]{if(previous.isValid())settings.setValue("preview/cacheDirectory",previous);else settings.remove("preview/cacheDirectory");});
+        EditorController e; QVERIFY(e.setCacheDirectory(dir.path())); QVERIFY(e.importMedia({path}));
+        e.seekSource(9*60*60);
+        QTRY_VERIFY_WITH_TIMEOUT(e.performanceDiagnostics()["sourceUsesProxy"].toBool(),30000);
+        QCOMPARE(e.sourcePosition(),9*60*60);
+        QString copy;for(const auto &name:QDir(dir.path()).entryList({"*.mov"},QDir::Files))if(!name.endsWith(".part.mov")){copy=dir.filePath(name);break;}
+        QVERIFY(!copy.isEmpty()); const auto info=Media::mediaInfo(copy); QVERIFY(info); QVERIFY(info->durationSeconds<40);
     }
     void audioSourcesAndMalformedLibrary() {
         QTemporaryDir dir;QProcess ffmpeg;const auto audio=dir.filePath("tone.wav");

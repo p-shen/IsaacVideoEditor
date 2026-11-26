@@ -134,6 +134,12 @@ private slots:
         project.captions[0].durationFrames=120;s.view->setProject(project);
         QVERIFY(s.view->captionRect(0).top()!=s.view->captionRect(1).top());
     }
+    void selectedCaptionEdgesGuideWaveformReview(){
+        Scene s;auto p=sequence();TextOverlay cue;cue.startFrame=60;cue.durationFrames=120;p.captions={cue};s.view->setProject(p,{8,8,8});
+        const auto changedAt=[&](int frame,const QImage &before,const QImage &after){const int x=s.atFrame(frame).x(),bottom=qRound(s.view->clipRect(0).bottom());int count=0;for(int y=bottom-16;y<bottom-2;++y)for(int dx=-1;dx<=1;++dx)if(before.pixelColor(x+dx,y)!=after.pixelColor(x+dx,y))++count;return count;};
+        const auto before=render(s.view);s.view->setSelectedCaption(0);const auto selected=render(s.view);QVERIFY(changedAt(60,before,selected)>5);QVERIFY(changedAt(180,before,selected)>5);s.view->setSelectedCaption(-1);QCOMPARE(render(s.view),before);
+        s.view->zoomAt(2,s.view->labelWidth()+12);s.view->setContentOffset(s.view->pixelsPerSecond()*.25);const auto zoomed=render(s.view);s.view->setSelectedCaption(0);const auto guided=render(s.view);QVERIFY(changedAt(60,zoomed,guided)>5);QVERIFY(changedAt(180,zoomed,guided)>5);
+    }
     void attachedTextTracksTransitionPreviewAndCancel() {
         Scene s;auto project=sequence();project.clips[1].transitionFrames=30;
         TextOverlay cue;cue.hostId=project.clips[1].id;cue.hostSourceFrame=120;cue.durationFrames=60;
@@ -1008,6 +1014,11 @@ void QuickTimelineTest::waveformsUseTrimAndMusicLoops() {
     const QColor signal = image.pixelColor(qRound(r.left()) + 30, qRound(r.bottom()) - 5);
     const QColor background = image.pixelColor(qRound(r.left()) + 30, qRound(r.bottom()) - 16);
     QVERIFY(std::abs(signal.red() - background.red()) + std::abs(signal.green() - background.green()) + std::abs(signal.blue() - background.blue()) > 20);
+    const auto captures=qEnvironmentVariable("ISAAC_CAPTION_GUIDE_SCREENSHOTS");
+    if(!captures.isEmpty()){
+        TextOverlay cue;cue.text="Word-timed caption";cue.startFrame=12;cue.durationFrames=36;p.captions={cue};s.view->setProject(p,{2.01});s.view->setSelectedCaption(0);s.view->setSelectedCaptions({0});
+        QVERIFY(QDir().mkpath(captures));QVERIFY(render(s.view).save(captures+"/caption-waveform-guides.png"));p.captions.clear();s.view->setSelectedCaption(-1);s.view->setSelectedCaptions({});
+    }
     p.clips = {{"placeholder.mp4", 0, 4}};
     p.musicPath = path;
     s.view->setProject(p);

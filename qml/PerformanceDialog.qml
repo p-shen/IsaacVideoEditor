@@ -7,15 +7,21 @@ Dialog {
     id: panel
     objectName: "performanceDialog"
     required property var controller
+    property var viewer
     property var stats: ({})
+    function snapshot() {
+        var result = controller.performanceDiagnostics()
+        result.textureUploads = viewer ? viewer.textureUploads : 0
+        return result
+    }
     title: "Performance"
     anchors.centerIn: parent
     modal: true
     width: Math.min(parent.width - 40,540)
     height: Math.min(parent.height - 40,580)
     standardButtons: Dialog.Close
-    onOpened: stats = controller.performanceDiagnostics()
-    Timer { interval: 750; repeat: true; running: panel.visible; onTriggered: panel.stats = panel.controller.performanceDiagnostics() }
+    onOpened: stats = snapshot()
+    Timer { interval: 750; repeat: true; running: panel.visible; onTriggered: panel.stats = panel.snapshot() }
     contentItem: ScrollView {
         id: scroll
         contentWidth: availableWidth
