@@ -28,6 +28,26 @@
 namespace {
 QString normalized(const QString &path){QFileInfo f(path);return f.exists()?f.canonicalFilePath():f.absoluteFilePath();}
 QPair<qint64,qint64> identity(const QString &path){const QFileInfo f(path);return f.isFile()?qMakePair(f.size(),f.lastModified().toMSecsSinceEpoch()):qMakePair(qint64(-1),qint64(-1));}
+QString minuteSecond(int ms){return QString("%1:%2").arg(ms/60000).arg(ms/1000%60,2,10,QLatin1Char('0'));}
+std::optional<QPair<double,double>> wordBounds(const QJsonObject &segment,double start,double end){
+    if(!segment["tokens"].isArray())return {};
+    const auto tokens=segment["tokens"].toArray();if(tokens.isEmpty()||tokens.size()>10000)return {};
+    QString reconstructed;double first=-1,last=-1;
+    for(const auto &entry:tokens){
+        const auto token=entry.toObject();const auto id=token["id"];
+        if(!id.isDouble()||!std::isfinite(id.toDouble())||id.toDouble()<0||std::floor(id.toDouble())!=id.toDouble())return {};
+        // Both supported multilingual v3 models reserve IDs from 50257 for decoder controls.
+        if(id.toDouble()>=50257)continue;
+        if(!token["text"].isString())return {};const auto text=token["text"].toString();reconstructed+=text;if(reconstructed.size()>4000)return {};
+        bool lexical=false;for(const auto c:text.toUcs4())lexical|=QChar::isLetterOrNumber(c);if(!lexical)continue;
+        const auto offsets=token["offsets"].toObject();if(!offsets["from"].isDouble()||!offsets["to"].isDouble())return {};
+        const double from=offsets["from"].toDouble(),to=offsets["to"].toDouble();
+        if(!std::isfinite(from)||!std::isfinite(to)||from<start||to>end||to<=from||(last>=0&&from<last))return {};
+        if(first<0)first=from;last=to;
+    }
+    if(first<0||reconstructed.normalized(QString::NormalizationForm_C).trimmed()!=segment["text"].toString().normalized(QString::NormalizationForm_C).trimmed())return {};
+    return qMakePair(first,last);
+}
 void event(const QJsonObject &value){const auto data=QJsonDocument(value).toJson(QJsonDocument::Compact)+'\n';fwrite(data.constData(),1,data.size(),stdout);fflush(stdout);}
 QString simplified(const QString &text){
 #ifdef Q_OS_MACOS
@@ -45,7 +65,8 @@ QString simplified(const QString &text){
 #endif
 }
 }
-std::optional<QByteArray> Subtitles::whisperSrt(const QByteArray &json,int frames,QStringList *warnings,QString *error){
+std::optional<QByteArray> Subtitles::whisperSrt(const QByteArray &json,int frames,QStringList *warnings,QString *error,int *repetitionStartMs){
+    if(repetitionStartMs)*repetitionStartMs=-1;
     const auto fail=[&](const QString &message)->std::optional<QByteArray>{if(error)*error=message;return {};};
     if(frames<=0||frames>86400*60||json.size()>128*1024*1024)return fail("Invalid transcription size or duration.");
     QStringDecoder decoder(QStringDecoder::Utf8);decoder(json);if(decoder.hasError())return fail("The transcription contains invalid UTF-8.");
@@ -53,22 +74,39 @@ std::optional<QByteArray> Subtitles::whisperSrt(const QByteArray &json,int frame
     if(parseError.error!=QJsonParseError::NoError||!document.isObject()||!document.object()["transcription"].isArray())return fail("The transcription worker returned invalid JSON.");
     if(document.object()["params"].toObject()["translate"].toBool())return fail("The worker translated the recording instead of transcribing it.");
     const auto segments=document.object()["transcription"].toArray();if(segments.size()>10000)return fail("A project supports up to 10000 captions.");
-    Project project;int previous=-1,previousEnd=0;QStringList brief;
+    Project project;int previous=-1,previousEnd=0,previousOriginalStart=-1,previousOriginalEnd=0,repeatCount=0,repeatStart=0,loopFrame=-1,instantaneous=0;QStringList brief,wordFallbacks;QString previousPhrase;
     for(const auto &entry:segments){
         const auto value=entry.toObject();const auto offsets=value["offsets"].toObject();
         if(!value["text"].isString()||!offsets["from"].isDouble()||!offsets["to"].isDouble())return fail("A transcription segment is incomplete.");
-        const double start=offsets["from"].toDouble(),end=offsets["to"].toDouble();
-        if(!std::isfinite(start)||!std::isfinite(end)||start<0||start>=double(frames)*1000/60||end<=start||end>double(frames)*1000/60+120)return fail("A transcription timestamp is outside the recording.");
+        double start=offsets["from"].toDouble(),end=offsets["to"].toDouble();
+        if(!std::isfinite(start)||!std::isfinite(end)||start<0||start>=double(frames)*1000/60||end<start||end>double(frames)*1000/60+120)return fail("A transcription timestamp is outside the recording or has a reversed interval.");
+        if(end==start){++instantaneous;continue;}
         const auto text=simplified(value["text"].toString().trimmed());if(text.isEmpty())continue;
         if(text.size()>2000)return fail("A caption exceeds 2000 characters.");
+        const int originalStart=qRound(start*60/1000),originalEnd=std::min(frames,qRound(end*60/1000));
+        if(originalStart<previousOriginalStart)return fail("Transcription segments are out of order.");
+        if(const auto words=wordBounds(value,start,end)){start=words->first;end=words->second;}else wordFallbacks.append(QString::number(project.captions.size()+1));
         TextOverlay cue;cue.text=text;cue.fontSize=57;cue.y=.85;cue.startFrame=std::min(frames-1,qRound(start*60/1000));
         const int last=std::min(frames,std::max(cue.startFrame+1,qRound(end*60/1000)));cue.durationFrames=last-cue.startFrame;
         if(cue.startFrame<previous)return fail("Transcription segments are out of order.");
         if(cue.startFrame<previousEnd&&warnings)warnings->append(QString("Caption %1 overlaps the previous caption.").arg(project.captions.size()+1));
         if(cue.durationFrames<21)brief.append(QString::number(project.captions.size()+1));
+        QString phrase;for(const auto c:text.normalized(QString::NormalizationForm_KC).toCaseFolded())if(c.isLetterOrNumber())phrase+=c;
+        // Conservative loop signal: a substantial phrase repeated for at least fifteen seconds.
+        if(phrase.size()>=6&&phrase==previousPhrase&&originalStart<=previousOriginalEnd+60)++repeatCount;
+        else {repeatCount=1;repeatStart=originalStart;}
+        if(loopFrame<0&&repeatCount>=8&&originalEnd-repeatStart>=15*60)loopFrame=repeatStart;
+        previousPhrase=phrase;
+        previousOriginalStart=originalStart;previousOriginalEnd=originalEnd;
         previous=cue.startFrame;previousEnd=last;project.captions.append(cue);
     }
     if(project.captions.isEmpty())return fail("No text was recognized. Existing output was preserved.");
+    if(instantaneous&&warnings)warnings->append(QString("Ignored %1 zero-duration decoder fragments. Review nearby captions.").arg(instantaneous));
+    if(!wordFallbacks.isEmpty()&&warnings)warnings->append(QString("Segment timing kept for captions %1%2.").arg(wordFallbacks.mid(0,10).join(", "),wordFallbacks.size()>10?QString(" (+%1 more)").arg(wordFallbacks.size()-10):QString{}));
+    if(loopFrame>=0){
+        const int ms=int(qint64(loopFrame)*1000/60);if(repetitionStartMs)*repetitionStartMs=ms;
+        return fail(QString("Whisper kept repeating the same phrase near %1. Existing output was preserved. Try Turbo or review the audio around that point.").arg(minuteSecond(ms)));
+    }
     if(!brief.isEmpty()&&warnings)warnings->append("Very short captions need timing review: "+brief.join(", "));
     const auto bytes=Subtitles::writeSrt(project);QString problem;const auto restored=Subtitles::parseSrt(bytes,&problem);
     if(!restored||restored->size()!=project.captions.size())return fail("Generated subtitles did not pass validation: "+problem);
@@ -125,7 +163,7 @@ bool SubtitleJob::start(const Project &snapshot,const QString &destination,const
     staging_=std::make_unique<QTemporaryDir>(QFileInfo(destination_).absoluteDir().filePath(".isaac-subtitles-XXXXXX"));
     if(!staging_->isValid()||!saveProject(snapshot,staging_->filePath("snapshot.isaac.json"),error)){staging_.reset();return fail("Could not prepare subtitles in the output folder.");}
     const auto logs=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/subtitle-logs";QDir().mkpath(logs);log_.setFileName(logs+"/"+QUuid::createUuid().toString(QUuid::WithoutBraces)+".log");(void)log_.open(QIODevice::WriteOnly|QIODevice::NewOnly);
-    running_=true;canceled_=false;audio_=true;resultReceived_=resultOk_=protocolFailed_=gpuConfirmed_=false;output_.clear();errors_.clear();workerError_.clear();warnings_.clear();device_=cpuOnly?"CPU":"Checking GPU";stage_="Preparing audio";progress_=-1;
+    running_=true;canceled_=false;audio_=true;resultReceived_=resultOk_=protocolFailed_=gpuConfirmed_=false;output_.clear();errors_.clear();workerError_.clear();warnings_.clear();device_=cpuOnly?"CPU":"Checking GPU";stage_="Preparing audio";progress_=-1;repetitionRetryMs_=-1;
     auto env=QProcessEnvironment::systemEnvironment();env.insert("QT_QPA_PLATFORM","offscreen");process_.setProcessEnvironment(env);
     process_.start(appWorker_,{"--subtitle-audio-worker",staging_->filePath("snapshot.isaac.json"),staging_->filePath("audio.wav"),staging_->filePath("cancel")});emit changed();return true;
 }
@@ -154,9 +192,13 @@ void SubtitleJob::readErrors(){
     if(errors_.size()>65536)errors_.clear();
 }
 void SubtitleJob::transcribe(){
-    audio_=false;output_.clear();errors_.clear();stage_="Transcribing";progress_=-1;emit changed();
+    audio_=false;output_.clear();errors_.clear();gpuConfirmed_=false;device_=cpuOnly_?"CPU":"Checking GPU";stage_=repetitionRetryMs_>=0?"Retrying transcription":"Transcribing";progress_=-1;emit changed();
     if(canceled_){complete(false,"Subtitle generation canceled.");return;}
-    QStringList args{"-m",model_,"-f",staging_->filePath("audio.wav"),"-l","auto","-oj","-of",staging_->filePath("transcript"),"-pp","-t",QString::number(std::clamp(QThread::idealThreadCount(),1,4))};
+    if(!capturedSourcesUnchanged()){complete(false,"Source media or the subtitle model changed. Generate subtitles again.");return;}
+    const auto transcript=staging_->filePath("transcript.json");
+    if(QFileInfo::exists(transcript)&&!QFile::remove(transcript)){complete(false,"Could not clear the private transcription output before retrying.");return;}
+    QStringList args{"-m",model_,"-f",staging_->filePath("audio.wav"),"-l","auto","-ojf","-of",staging_->filePath("transcript"),"-pp","-t",QString::number(std::clamp(QThread::idealThreadCount(),1,4))};
+    if(repetitionRetryMs_>=0)args.append({"-mc","0"});
     if(cpuOnly_)args.append("-ng");process_.setWorkingDirectory(QFileInfo(whisper_).absolutePath());process_.start(whisper_,args);
 }
 void SubtitleJob::processFinished(int code,QProcess::ExitStatus status){
@@ -172,8 +214,12 @@ void SubtitleJob::processFinished(int code,QProcess::ExitStatus status){
     stage_="Saving subtitles";progress_=-1;emit changed();if(canceled_){complete(false,"Subtitle generation canceled.");return;}
     QFile json(staging_->filePath("transcript.json"));QString error;
     if(!json.open(QIODevice::ReadOnly)||json.size()>128*1024*1024){complete(false,"The worker did not produce a readable transcription.");return;}
-    const auto result=Subtitles::whisperSrt(json.readAll(),frames_,&warnings_,&error);
+    int repetition=-1;const auto result=Subtitles::whisperSrt(json.readAll(),frames_,&warnings_,&error,&repetition);json.close();
+    if(repetition>=0&&repetitionRetryMs_<0){
+        repetitionRetryMs_=repetition;warnings_.clear();writeLog(QString("Repetition detected near %1; retrying once with previous-text context disabled (-mc 0).\n").arg(minuteSecond(repetition)).toUtf8());transcribe();return;
+    }
     if(!result){complete(false,error);return;}
+    if(repetitionRetryMs_>=0)warnings_.prepend(QString("Whisper repetition near %1 was retried with text history reset. Review the recovered captions.").arg(minuteSecond(repetitionRetryMs_)));
     if(!capturedSourcesUnchanged()){complete(false,"Source media changed during subtitle generation. Existing output was preserved.");return;}
     QSaveFile file(destination_);file.setDirectWriteFallback(false);
     if(!file.open(QIODevice::WriteOnly)||file.write(*result)!=result->size()||!file.commit()){complete(false,"Could not save the SRT: "+file.errorString());return;}

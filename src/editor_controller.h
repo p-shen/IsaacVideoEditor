@@ -2,6 +2,7 @@
 #include "project.h"
 #include "performance.h"
 #include "caption_model.h"
+#include "preview_cache.h"
 #include <QObject>
 #include <QImage>
 #include <QVariantList>
@@ -9,6 +10,7 @@
 #include <QUndoStack>
 #include <QPointer>
 #include <QHash>
+#include <QSet>
 #include <QTimer>
 #include <QThreadPool>
 #include <QElapsedTimer>
@@ -17,7 +19,6 @@
 #include <mlt++/Mlt.h>
 #include <memory>
 class Preview;
-class PreviewCache;
 class MediaCache;
 class ExportJob;
 class SubtitleJob;
@@ -31,6 +32,7 @@ class EditorController final : public QObject {
     Q_PROPERTY(int selectedSource READ selectedSource NOTIFY sourceChanged)
     Q_PROPERTY(int sourcePosition READ sourcePosition NOTIFY sourcePositionChanged)
     Q_PROPERTY(bool sourceMode READ sourceMode NOTIFY sourceChanged)
+    Q_PROPERTY(bool sourceUsesProxy READ sourceUsesProxy NOTIFY stateChanged)
     Q_PROPERTY(QString sourceTimeText READ sourceTimeText NOTIFY sourcePositionChanged)
     Q_PROPERTY(QVariantList visualOverlays READ visualOverlays NOTIFY compositionChanged)
     Q_PROPERTY(QVariantList visualLanes READ visualLanes NOTIFY compositionChanged)
@@ -125,6 +127,7 @@ public:
     int selectedSource() const { return selectedSource_; }
     int sourcePosition() const;
     bool sourceMode() const { return sourceMode_; }
+    bool sourceUsesProxy() const { return sourceUsesProxy_; }
     QString sourceTimeText() const;
     Q_INVOKABLE QVariantList filteredAssets(const QString &search,const QString &kind,const QString &usage) const;
     Q_INVOKABLE bool importMedia(const QStringList &paths);
@@ -402,6 +405,9 @@ private:
     bool commit(const Project &next,const QVariantList &selection,int primary,const QString &label,bool force=false,int text=-2,int overlay=-2,int caption=-2,const QVariantList &captions={});
     void rebuild();
     void rebuildSource();
+    void refreshSourceCopies();
+    void applyProxyRequests();
+    void refreshSourceIfCopyReady();
     void startImport(const QStringList &paths,bool append,int insertFrame=-1);
     void chooseAudioAsync(const QString &path,bool music);
     void startVisualImport(const QStringList &paths,int frame,int lane);
@@ -458,10 +464,15 @@ private:
     bool sourceMode_=false,sourceViewDirty_=false,sourceScrubbing_=false;
     int sourceScrubFrame_=0;
     Mlt::Profile sourceProfile_;
-    std::shared_ptr<void> sourceProxyLease_;
+    QVector<std::shared_ptr<void>> sourceProxyLeases_;
     std::unique_ptr<Mlt::Profile> preparedSourceProfile_;
     std::unique_ptr<Mlt::Producer> sourceProducer_;
     bool sourceUsesProxy_=false;
+    bool sourceFullCopyActive_=false;
+    bool sourceProxyEligible_=false;
+    int sourceCopyWindowStart_=-1;
+    QSet<QString> sourceActiveCopies_;
+    QVector<PreviewCache::Request> timelineProxyRequests_,sourceProxyRequests_;
     std::unique_ptr<Preview> sourcePreview_;
     Mlt::Profile profile_;
     QVector<std::shared_ptr<void>> timelineProxyLeases_;

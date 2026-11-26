@@ -414,7 +414,7 @@ ApplicationWindow {
                             Label { visible: editor.sourceMode || editor.soloLane >= 0; text: editor.sourceMode ? "Source · " + (editor.currentSource.name || "") : "SOLO PREVIEW"; elide: Text.ElideMiddle; Layout.fillWidth: true; font.weight: Font.DemiBold }
                             UI.Button { visible: !editor.sourceMode && editor.soloLane >= 0; text: "Full mix"; Accessible.name: "Disable preview only solo"; onClicked: editor.setSolo(-1) }
                             Item { Layout.fillWidth: true }
-                            Label { visible: editor.sourceMode || editor.clips.length > 0; text: editor.sourceMode ? (editor.currentSource.offline ? "Offline" : "Original source") : editor.loading ? "Loading frame…" : editor.previewStatus; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0; horizontalAlignment: Text.AlignRight; color: UI.Theme.muted }
+                            Label { visible: editor.sourceMode || editor.clips.length > 0; text: editor.sourceMode ? (editor.currentSource.offline ? "Offline" : editor.sourceUsesProxy ? "Lighter source preview" : "Original source") : editor.loading ? "Loading frame…" : editor.previewStatus; elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0; horizontalAlignment: Text.AlignRight; color: UI.Theme.muted }
                         }
                         VideoPreview {
                             id: viewer
@@ -656,7 +656,7 @@ ApplicationWindow {
         }
         onAccepted: editor.selectRange(rangeFirst.value - 1,rangeLast.value - 1)
     }
-    UI.PerformanceDialog { id: performanceDialog; controller: editor }
+    UI.PerformanceDialog { id: performanceDialog; controller: editor; viewer: viewer }
     Dialog {
         id: exportOptionsDialog
         objectName: "exportOptionsDialog"

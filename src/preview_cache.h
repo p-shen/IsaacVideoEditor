@@ -43,6 +43,8 @@ public:
     bool isBusy() const;
     void setRequests(const QVector<Request> &requests);
     Copy readyCopy(const QString &source, int inFrame, int outFrame) const;
+    // -1 until checked, 0 when source-origin timing must be retained.
+    int sourceCadencePeriod(const QString &source);
     void prioritize(const QString &source, int inFrame, int outFrame);
     void setPaused(bool paused);
     QString cacheDirectory() const { return directory_; }

@@ -299,7 +299,8 @@ QVariantMap EditorController::performanceDiagnostics() const {
     const auto memory=Performance::processMemory();const auto resources=Performance::resources();
     return {{"preview",preview_->diagnostics()},{"sourcePreview",sourcePreview_->diagnostics()},
         {"media",mediaCache_->diagnostics()},{"proxy",proxyCache_->diagnostics()},
-        {"preparingTimeline",preparing_},{"preparingSource",sourcePreparing_},{"importing",importing_},
+        {"preparingTimeline",preparing_},{"preparingSource",sourcePreparing_},{"sourceUsesProxy",sourceUsesProxy_},
+        {"sourceCopyCount",sourceActiveCopies_.size()},{"sourceCopyRequestCount",sourceProxyRequests_.size()},{"importing",importing_},
         {"projectRevision",qulonglong(projectRevision_)},{"clipCount",project_.clips.size()},
         {"timelinePreparationJobs",qulonglong(preparationJobs_)},{"sourcePreparationJobs",qulonglong(sourceJobs_)},{"importJobs",qulonglong(importJobs_)},
         {"supersededPreparationJobs",qulonglong(supersededJobs_)},{"timelinePreparationMs",preparationMs_},{"sourcePreparationMs",sourcePreparationMs_},{"importMs",importMs_},
